@@ -26,6 +26,10 @@ const SECRET = [
   /(^|\/)auth\.json$/i, /(^|\/)\.?credentials[^/]*$/i, /(^|\/)\.claude\.json$/i, /(^|\/)(\.vault-token|\.pgpass|\.s3cfg|\.boto|\.my\.cnf|access-token|token)$/i,
   /(^|\/)rclone\.conf$/i, /(^|\/)\.yarnrc\.yml$/i, /(^|\/)configstore(\/|$)/i, /(^|\/)\.railway(\/|$)/i, /(^|\/)\.supabase(\/|$)/i,
   /(^|\/)\.?huggingface\/(stored_)?tokens?$/i, /(^|\/)service[-_]?account[^/]*\.json$/i, /\.tfstate(\.backup)?$/i,
+  // Key files kept outside dot folders (eighth review V8-8): App Store Connect .p8, PuTTY .ppk, Google OAuth client
+  // secrets, Firebase admin keys, Terraform variables, SSH keys by other names, Rails secrets, wallets, VPN profiles.
+  /\.(p8|ppk|ovpn|kdbx|asc|gpg)$/i, /(^|\/)client_secret[^/]*\.json$/i, /(^|\/)[^/]*adminsdk[^/]*\.json$/i, /\.tfvars(\.json)?$/i,
+  /(^|\/)id_[a-z0-9]+(_sk)?(\.pub)?$/i, /(^|\/)[^/]*_(key|rsa|ed25519)$/i, /(^|\/)(master\.key|secrets?\.(ya?ml|json|toml)|wallet\.dat)$/i,
   // Browsers' saved logins and cookies (Firefox keeps cookies.sqlite on a Mac too) and apps' web storage (Discord's token).
   /\/(User Data|Profiles)\/.*\/(cookies\.sqlite[^/]*|logins[^/]*\.json|key[34]\.db|cert9\.db|signons\.sqlite)$/i, /\/(Local Storage|Session Storage|IndexedDB)(\/|$)/i,
   /(^|\/)\.(bash|zsh|fish)_history$/, /(^|\/)\.zsh_sessions(\/|$)/,
@@ -212,7 +216,8 @@ export function checkRead(p, home, { recursive = false } = {}) {
 // is never written without a yes.
 // Also files an app or tool runs on its own when it starts or opens a folder (seventh review F9): MATLAB's startup.m,
 // package.json scripts, editor workspaces with tasks, mise's config.
-const LOADED = /\.(pth|plist|code-workspace|sublime-project)$|^(package\.json|startup\.m|finish\.m|mise\.toml|deno\.jsonc?|bunfig\.toml)$/i;
+// Eighth review V8-9: mise's local and per-env configs (their [hooks] run on cd), Makefiles and Justfiles.
+const LOADED = /\.(pth|plist|code-workspace|sublime-project)$|^(package\.json|startup\.m|finish\.m|\.?mise(\.[^/]+)?\.toml|deno\.jsonc?|bunfig\.toml|makefile|gnumakefile|justfile|\.envrc)$/i;
 // A name part as the system reads it: Windows drops trailing dots and spaces (a.bat. is a.bat), and invisible
 // characters at the end don't change what opens it.
 const bare = (x) => String(x).replace(/[\s.\p{Cf}]+$/u, '');
@@ -226,7 +231,7 @@ const LOAD_DIRS = ['matlab', 'powershell', 'windowspowershell'];
 
 /** write_file. Owner: a new file inside ~/Desktop, ~/Documents or ~/Downloads (and in `own`, an agent's own folder),
  *  with no dot or runnable part, needs no yes; everything else asks every time with the whole real path (overwriting
- *  too); secrets, startup files, apps and places outside the home folder never. Only where the path really leads
+ *  too, in its own folder as well); secrets, startup files, apps and places outside the home folder never. Only where the path really leads
  *  counts. */
 export function checkWrite(p, home, { exists = false, own = null } = {}) {
   const { real, all } = pathsOf(p, home), homes = homesOf(home);
@@ -243,7 +248,8 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
     const parts = below(canonical(norm(own, home)));
     // Its history and state go into every later run's prompt and the chat's report: never written by the agent (F10).
     if (parts?.length === 1 && /^(history\.md|\.agent\.json)$/i.test(bare(parts[0]))) return { ...verdict(BLOCK, `${parts[0]} is the agent's own record, so it can't write it.`), path: real };
-    if (parts && !riskyParts(parts)) return { ...verdict(SAFE), path: real };
+    // Binding D2 (eighth review V8-10): overwriting asks even in its own folder; only a new file there is unasked.
+    if (parts && !there && !riskyParts(parts)) return { ...verdict(SAFE), path: real };
   }
   if (there) return { ...verdict(ASK, `Overwrite ${real}?`), path: real, always: true };
   const parts = below(homes[homes.length - 1]);
@@ -255,14 +261,16 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
 
 // Runs or follows a link when opened. Windows: script hosts, installers, registry files, shortcuts, control panels.
 // Link files (.webloc, .inetloc, .fileloc, .url) carry any scheme or a file:// target, so they count too (F4, F6).
-const RUNNABLE = /\.(app|command|sh|bash|zsh|csh|ksh|fish|tool|terminal|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|jar|jnlp|py|pyw|pyc|rb|pl|js|jse|mjs|cjs|osax|exe|bat|cmd|ps1|psm1|psd1|vbs|vbe|wsf|wsh|wsc|hta|scr|msi|msp|msix|appx|reg|lnk|url|cpl|appref-ms|shortcut|mobileconfig|kext|plugin|prefPane|saver|desktop|appimage|deb|rpm|run|flatpakref|flatpak|snap|webloc|inetloc|fileloc|ics)\/?$/i;
+const RUNNABLE = /\.(app|command|sh|bash|zsh|csh|ksh|fish|tool|terminal|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|jar|jnlp|py|pyw|pyc|rb|pl|js|jse|mjs|cjs|osax|exe|bat|cmd|ps1|psm1|psd1|vbs|vbe|wsf|wsh|wsc|hta|scr|msi|msp|msix|appx|reg|lnk|url|cpl|appref-ms|shortcut|mobileconfig|kext|plugin|prefPane|saver|desktop|appimage|deb|rpm|run|flatpakref|flatpak|snap|webloc|inetloc|fileloc|afploc|ftploc|smbloc|ics|pyz|jsx|vsix|alfredworkflow|alfredsnippets|sketchplugin|xpi|crx|qlgenerator|mdimporter|bundle|framework|dylib|so|service)\/?$/i;
 // Where installed apps live: opening one there just starts it. Linux lists them as .desktop files. Safari and a few
 // other Apple apps really live in a cryptex (/Applications/Safari.app leads there).
 const APP_DIRS = ['/Applications/', '/System/Applications/', '/System/Volumes/Preboot/Cryptexes/App/System/Applications/', '/System/Library/CoreServices/', '/usr/share/applications/', '/usr/local/share/applications/', '/var/lib/flatpak/exports/share/applications/', '/var/lib/snapd/desktop/applications/'];
+// In one of them, without case (APFS): /applications/Fix.command is /Applications/Fix.command (D5).
+const inAppDir = (a) => APP_DIRS.some((d) => fold(a).startsWith(fold(d)));
 
 // Apps that run what they're given (shells, script hosts, interpreters, installers) or hold the Mac's settings: never
 // the app something is opened in (seventh review F5; Windows' Start-Process runs the target with it).
-const RUNNERS = /^(terminal|iterm2?|warp|ghostty|kitty|alacritty|wezterm|hyper|tabby|rio|script editor|automator|python launcher( \d+)?|pythonw?[\d.]*|py|java|javaw|jar launcher|installer|shortcuts( events)?|osascript|mshta|wscript|cscript|powershell(_ise)?|pwsh|cmd|conhost|wt|windows terminal|bash|sh|zsh|fish|wsl|node|deno|bun|perl|ruby|php|lua|rundll32|regsvr32|msiexec|regedit|reg|certutil|bitsadmin|curl|wget|explorer|xcode|visual studio code|code|cursor|zed|windsurf|vscodium|archive utility|keychain access|system settings|system preferences|disk utility|console|activity monitor|launchctl|open|start)$/i;
+const RUNNERS = /^(terminal|iterm2?|warp|ghostty|kitty|alacritty|wezterm|hyper|tabby|rio|script editor|automator|python launcher( \d+)?|pythonw?[\d.]*|py|java|javaw|jar launcher|installer|shortcuts( events)?|osascript|mshta|wscript|cscript|powershell(_ise)?|pwsh|cmd|conhost|wt|windows terminal|bash|sh|zsh|fish|wsl|node|deno|bun|perl|ruby|php|lua|rundll32|regsvr32|msiexec|regedit|reg|certutil|bitsadmin|curl|wget|explorer|xcode|visual studio code|code|cursor|zed|windsurf|vscodium|antigravity|sublime text|nova|bbedit|textmate|macvim|vim|emacs|alfred( \d+)?|raycast|swift playgrounds?|playgrounds|wave|warp preview|archive utility|keychain access|system settings|system preferences|disk utility|console|activity monitor|launchctl|open|start)$/i;
 // Apps that only show a file: opening one there needs no yes. Any other app asks, naming the file and the app.
 const VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|finder|microsoft (word|excel|powerpoint)|word|excel|powerpoint|notepad|safari|google chrome|chrome|arc|firefox|microsoft edge|edge|brave browser|brave|opera|vivaldi|orion|zen)$/i;
 
@@ -292,13 +300,22 @@ export function checkOpen(target, home, { executable = false, app = null } = {})
     if (r.level === BLOCK) return verdict(BLOCK, r.reason);
     // Judged where it really leads: a link named notes.txt can lead to an app or a script.
     const all = both(abs, r.path), homes = homesOf(home);
-    const inApps = all.every((a) => APP_DIRS.some((d) => a.startsWith(d)));
-    if ((all.some((a) => a.split('/').some(runnable) || LAST_RUNS.test(bare(a))) || executable) && !inApps) return verdict(BLOCK, `${t} is a script, installer, link file or app that would run, so I won't open it. Open it yourself if you trust it.`);
+    const inApps = all.every(inAppDir);
+    // Only a whole installed app opens unasked: a bundle opened at its root (/Applications/Notes.app), or a Linux
+    // launcher straight in an app folder. A script, a tool or anything inside a bundle in those folders is still a
+    // program (eighth review V8-1: /Applications/Fix.command ran in Terminal).
+    const appRoot = (a) => {
+      const parts = a.split('/'), last = bare(parts.at(-1) ?? '');
+      if (/\.desktop$/i.test(last)) return APP_DIRS.slice(4).some((d) => fold(path.dirname(a) + '/') === fold(d));
+      return inAppDir(a) && /\.app$/i.test(last) && parts.filter((x) => /\.app$/i.test(bare(x))).length === 1 && !parts.slice(0, -1).some((x) => runnable(x));
+    };
+    const appBundle = all.every(appRoot);
+    if ((all.some((a) => a.split('/').some(runnable) || LAST_RUNS.test(bare(a))) || executable) && !appBundle) return verdict(BLOCK, `${t} is a script, installer, link file or app that would run, so I won't open it. Open it yourself if you trust it.`);
     const mine = (a) => homes.some((h) => within(a, h)) || /^\/(private\/)?tmp\//i.test(a);
     if (!inApps && all.some((a) => !mine(a) && SYSTEM_ROOTS.some((d) => a === d || a.startsWith(d + '/')))) return verdict(BLOCK, `${t} is a system file, so I won't open it.`);
     // A startup or settings file, or a hidden or app-data one, opens only with a yes: in an editor the hands tools
     // could change it (seventh review F1), and on screen it can be read.
-    if (r.level === ASK || (!inApps && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true };
+    if (r.level === ASK || (!appBundle && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true };
     if (inApp && !VIEWERS.test(inApp)) return { ...verdict(ASK, `Open ${r.path} in ${inApp}?`), always: true };
     return verdict(SAFE);
   }
@@ -309,15 +326,19 @@ export function checkOpen(target, home, { executable = false, app = null } = {})
 /** Text the hands tools type (act_in_app type, fill and set; draw's type): never a link to a file or a page's
  *  source, never a scheme a browser or the system acts on, and a path in it is checked like a read (F2). */
 export function checkTyped(text, home) {
-  const t = String(text ?? '');
+  // Invisible characters (a zero-width space before javascript:) and look-alike forms come off first (V8-4).
+  const t = String(text ?? '').normalize('NFKC').replace(/\p{Cf}/gu, '');
   const lead = /^\s*([a-z][a-z0-9+.-]*):(?=\S)/i.exec(t)?.[1]?.toLowerCase();
   const port = /^\s*[a-z0-9.-]+:\d+(?:[/?#\s]|$)/i.test(t); // localhost:3000
   if ((lead && !port && !['http', 'https', 'mailto'].includes(lead)) || /(?:^|[^a-z0-9+.-])(file|view-source)\s*:/i.test(t)) {
     return verdict(BLOCK, `I only type web and mail addresses, not ${lead && !port ? `${lead}:` : 'file:'} links: they open files or run things.`);
   }
   let worst = verdict(SAFE);
-  for (const tok of t.split(/[\s"'`<>|;,()]+/)) {
-    if (!/^(~|\/|[a-z]:[\\/]|\$\{?HOME)/i.test(tok)) continue;
+  // A path after = (--key=~/.ssh/id_rsa) is a token too; one without a leading ~ or / (.ssh/id_rsa) is checked from
+  // the home folder, where Go to Folder and Open panels start (V8-4). Web addresses were checked above.
+  for (const tok of t.split(/[\s"'`<>|;,()=]+/)) {
+    if (!tok || /^[a-z][a-z0-9+.-]*:\/\//i.test(tok)) continue;
+    if (!/^(~|\/|[a-z]:[\\/]|\$\{?HOME)/i.test(tok) && !/[\\/]/.test(tok)) continue;
     const v = checkRead(tok, home);
     if (v.level === BLOCK) return verdict(BLOCK, `I won't type ${tok}: ${v.reason}`);
     if (v.level === ASK) worst = { ...verdict(ASK, `Type the path ${v.path}? It's a hidden or app-data file, which can hold sign-ins.`), always: true };
@@ -462,11 +483,23 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
 
 // Verbs that act on the world: a tool named like this always asks, whatever the server says about it.
 const MCP_RISKY = /(?:^|_)(send|delete|remove|trash|destroy|erase|wipe|drop|purge|truncate|pay|payment|payments|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate|execute|exec|sql|migration|migrate|reset|merge|archive)(?:_|$)/;
-// Every string in a call's arguments, however deep.
-const strings = (v, out = [], depth = 0) => {
-  if (typeof v === 'string') out.push(v);
-  else if (v && typeof v === 'object' && depth < 8) for (const x of Object.values(v)) strings(x, out, depth + 1);
-  return out;
+// Every string in a call's arguments at any depth, each line of it on its own too (V8-6: nothing is skipped). More than
+// LIMIT strings, or one line longer than MAX_ARG, is too much to check: such a call is never SAFE.
+const MAX_ARG = 4096, LIMIT = 2000;
+const strings = (v) => {
+  const out = [], stack = [v], seen = new Set();
+  let over = false;
+  while (stack.length) {
+    const x = stack.pop();
+    if (typeof x === 'string') {
+      for (const line of [x, ...(/[\n\r\u2028\u2029]/.test(x) ? x.split(/[\n\r\u2028\u2029]+/) : [])]) {
+        if (out.length >= LIMIT) { over = true; break; }
+        out.push(line);
+      }
+    } else if (x && typeof x === 'object' && !seen.has(x)) { seen.add(x); stack.push(...Object.values(x)); if (stack.length > LIMIT * 4) { over = true; break; } }
+    if (over) break;
+  }
+  return { list: out, over };
 };
 const snake = (s) => String(s ?? '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^a-z0-9]+/gi, '_').toLowerCase();
 
@@ -482,13 +515,24 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
   // A server's file tools would read past every rule (seventh review F7): each string it's sent that could be a path
   // (from the home folder when it's relative) is checked like read_file. A secret never goes; a hidden or app-data
   // file asks.
-  let pathAsk = null;
-  for (const s of strings(args)) {
-    if (s.length > 4096 || /[\n\r]/.test(s) || /^[a-z][a-z0-9+.-]*:\/\//i.test(s) && !/^file:/i.test(s)) continue;
+  // A tool that searches or lists is checked as a recursive read: never the whole home folder, / or Library (V8-6).
+  const recursive = /(?:^|_)(search|find|grep|glob|list|ls|tree|walk|scan|index|ripgrep|rg|browse|crawl|directory|dir)(?:_|$)/.test(snake(name));
+  let pathAsk = null, tooBig = null;
+  const { list, over } = strings(args);
+  if (over) tooBig = 'It sends more than I can check.';
+  for (const s of list) {
     let p = s.trim();
-    if (/^file:/i.test(p)) { try { p = decodeURIComponent(new URL(p).pathname); } catch { continue; } }
+    // A web address is the web; any other scheme (file:, fs:, vscode-file:) names a file by its path.
+    if (/^https?:\/\//i.test(p) || /^mailto:/i.test(p)) continue;
+    const u = /^[a-z][a-z0-9+.-]*:\/\//i.test(p) ? (() => { try { return new URL(p); } catch { return null; } })() : null;
+    if (u) { try { p = decodeURIComponent(`${u.host ? `/${u.host}` : ''}${u.pathname}`); } catch { p = u.pathname; } }
     if (!p) continue;
-    const v = checkRead(p, home);
+    // Checked after the server would normalize it (a/../ undone), so length alone never hides one (4663 chars of a/../).
+    const n = path.normalize(slash(p).replace(/^~(?=\/|$)/, slash(home)));
+    if (n.length > MAX_ARG) { tooBig = 'One of its values is too long to check.'; continue; }
+    const v = checkRead(p, home, { recursive });
+    const v2 = u && u.host ? checkRead(decodeURIComponent(u.pathname), home, { recursive }) : null;
+    if (v2?.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v2.reason}`);
     if (v.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v.reason}`);
     if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}, a hidden or app-data file that can hold sign-ins.`), always: true };
   }
@@ -496,7 +540,11 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
   // An allowlist: readOnlyHint (the server's own claim) makes a call SAFE only when its name reads (a read verb in it)
   // and nothing in it writes. Everything else asks.
   const words = snake(name).split('_').filter(Boolean);
-  if (a.readOnlyHint === true && words.some((w) => MCP_READS.has(w)) && !MCP_WRITES.test(snake(name))) return pathAsk ?? verdict(SAFE);
+  if (a.readOnlyHint === true && words.some((w) => MCP_READS.has(w)) && !MCP_WRITES.test(snake(name))) {
+    // What can't be checked never goes to a tool that would read with no yes (V8-6: blocked, not skipped).
+    if (tooBig) return verdict(BLOCK, `${tooBig} A tool that reads with no yes is never sent what I can't check.`);
+    return pathAsk ?? verdict(SAFE);
+  }
   // Owner: anything that might change, send or delete asks every time.
   return { ...verdict(ASK, "The server doesn't say it only reads."), always: true };
 }

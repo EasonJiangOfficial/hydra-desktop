@@ -457,6 +457,8 @@ export async function updateCommitment(id, { status, dueMs, repeat, keepSeries =
   let advanced = false;
   if (status === 'done' && c.repeat && c.status === 'open') advanced = advance(c, now);
   if (advanced) { c.lastDoneAt = now; c.timesDone = (c.timesDone ?? 0) + 1; }
+  // Dropping deletes it (the whole series): a copy goes to Recently deleted first, so it can be put back.
+  if (status === 'dropped' && c.status !== 'dropped') await toBin('commitment', c.text, { ...c });
   if (status && !advanced) { c.status = status; if (status !== 'open') c.doneAt = now; else delete c.doneAt; }
   await saveMemory();
   return { ...c, advanced };
@@ -527,6 +529,7 @@ export function touchFacts(ids) {
 
 export async function clearFacts() {
   const n = loadMemory().facts.length;
+  if (n) await toBin('facts', `${n} thing${n === 1 ? '' : 's'} I remembered`, memory.facts.map((f) => ({ ...f })));
   memory.facts = [];
   await saveMemory();
   return n;
@@ -545,8 +548,119 @@ export async function forgetFact(id) {
   const facts = loadMemory().facts, i = facts.findIndex((f) => f.id === id);
   if (i < 0) return null;
   const [f] = facts.splice(i, 1);
+  await toBin('fact', f.text, { ...f });
   await saveMemory();
   return f;
+}
+
+// ---------- recently deleted ----------
+// Owner: "I should be able to undo deletions and undo past behaviors." Whatever is deleted (a fact, all facts, a
+// dropped commitment, a scheduled job, a skill, a connection) and a file write_file overwrote is kept here for
+// BIN_DAYS, then let go. Each kind is put back by its own module (onRestore); a skill's folder or an old file's copy
+// sits in Data/bin/<id>/ meanwhile. Nothing in it goes to the model unless the owner asks to see or restore it.
+const BIN = path.join(DIR, 'bin.json'), BIN_DIR = path.join(DIR, 'bin');
+export const BIN_DAYS = 30, BIN_MAX = 200;
+const restorers = new Map(), purgers = new Map();
+let bin = null;
+const loadBin = () => {
+  if (bin) return bin;
+  const b = readJson(BIN, { backup: true });
+  bin = b?.version === 1 && Array.isArray(b.items) ? b : { version: 1, items: [] };
+  return bin;
+};
+const saveBin = () => writeJson(BIN, loadBin(), { backup: true });
+/** Where an item's files are kept while it's in the bin. */
+export const binFolder = (id) => path.join(BIN_DIR, String(id).replace(/[^a-z0-9]/gi, ''));
+/** How a kind is put back: fn(item) → a line saying what came back (throws when it can't). */
+export const onRestore = (kind, fn) => restorers.set(kind, fn);
+/** What else goes when an item of this kind leaves the bin for good (a connection's saved keys). */
+export const onPurge = (kind, fn) => purgers.set(kind, fn);
+
+/** Keeps something deleted so it can be put back. title: what the owner sees; data: all it takes to restore it. */
+export async function toBin(kind, title, data, { files = null } = {}) {
+  const b = loadBin(), id = `d${randomBytes(4).toString('hex')}`;
+  b.items.unshift({ id, kind, title: String(title ?? '').slice(0, 300), at: Date.now(), data, ...(files ? { files } : {}) });
+  await pruneBin();
+  await saveBin();
+  return id;
+}
+/** Lets go of what's older than BIN_DAYS or past BIN_MAX (a connection's keys, a skill's folder go with it). */
+export async function pruneBin(now = Date.now()) {
+  const b = loadBin(), cut = now - BIN_DAYS * 864e5;
+  const gone = b.items.filter((x, i) => x.at < cut || i >= BIN_MAX);
+  if (!gone.length) return 0;
+  const left = new Set(b.items.filter((x) => !gone.includes(x)).map((x) => x.id));
+  for (const x of gone) {
+    // A kind whose module isn't loaded yet can't tidy up after itself: kept until it is.
+    const purge = purgers.get(x.kind);
+    if (x.kind === 'connection' && !purge) { left.add(x.id); continue; }
+    try { await purge?.(x); } catch {}
+    await fs.rm(binFolder(x.id), { recursive: true, force: true }).catch(() => {});
+  }
+  b.items = b.items.filter((x) => left.has(x.id));
+  await saveBin();
+  return gone.length;
+}
+/** What's in the bin, newest first: { id, kind, title, at } (no contents). */
+export const listBin = () => loadBin().items.map(({ id, kind, title, at }) => ({ id, kind, title, at }));
+export const getBin = (id) => { const x = loadBin().items.find((i) => i.id === String(id)); return x ? JSON.parse(JSON.stringify(x)) : null; };
+/** Puts one item back where it was and takes it out of the bin. → the restorer's line. Throws with a reason. */
+export async function restoreFromBin(id) {
+  const b = loadBin(), x = b.items.find((i) => i.id === String(id));
+  if (!x) throw new Error(`Nothing in Recently deleted has the id ${id}.`);
+  const fn = restorers.get(x.kind);
+  if (!fn) throw new Error(`I can't put back a ${x.kind} yet.`);
+  const said = await fn(JSON.parse(JSON.stringify(x)));
+  b.items = b.items.filter((i) => i !== x);
+  await saveBin();
+  await fs.rm(binFolder(x.id), { recursive: true, force: true }).catch(() => {});
+  return said;
+}
+/** A bin line for the model and the panel: what it was, when it went. */
+export const binLine = (x, fmt = (ms) => new Date(ms).toLocaleString()) => `${x.id}  ${BIN_KIND[x.kind] ?? x.kind}: ${x.title} (deleted ${fmt(x.at)})`;
+export const binKind = (k) => BIN_KIND[k] ?? k;
+const BIN_KIND = { fact: 'Fact', facts: 'Facts', commitment: 'Commitment', job: 'Scheduled job', skill: 'Skill', connection: 'Connection', file: 'File before it was changed' };
+
+// Facts and commitments come back with a new id, so sync doesn't take them for the ones it saw deleted.
+onRestore('fact', async ({ data }) => {
+  const f = { ...data, id: newId('f'), updatedAt: Date.now() };
+  delete f.supersededBy; delete f.supersededAt;
+  loadMemory().facts.push(f);
+  await saveMemory();
+  return `Remembered again: ${f.text}`;
+});
+onRestore('facts', async ({ data }) => {
+  const have = new Set(loadMemory().facts.map((f) => f.text));
+  const back = (Array.isArray(data) ? data : []).filter((f) => f?.text && !have.has(f.text)).map((f) => ({ ...f, id: newId('f'), updatedAt: Date.now() }));
+  memory.facts.push(...back);
+  await saveMemory();
+  return `Remembered ${back.length} thing${back.length === 1 ? '' : 's'} again.`;
+});
+onRestore('commitment', async ({ data }) => {
+  const m = loadMemory();
+  m.commitments = m.commitments.filter((c) => c.id !== data.id);
+  const c = { ...data, id: newId('c'), updatedAt: Date.now() };
+  m.commitments.push(c);
+  await saveMemory();
+  return `Back on the list: ${c.text}`;
+});
+// A file write_file changed: its old contents go back where they were (what's there now is kept in the bin too).
+onRestore('file', async ({ id, data }) => {
+  const from = path.join(binFolder(id), 'old');
+  if (!existsSync(from)) throw new Error('Its old copy is gone, so it can\'t be put back.');
+  if (existsSync(data.path)) await keepOldFile(data.path);
+  await fs.mkdir(path.dirname(data.path), { recursive: true });
+  await fs.copyFile(from, data.path);
+  return `Put back ${data.path} as it was before it was changed.`;
+});
+/** Keeps a copy of a file about to be overwritten (a regular file up to 25 MB) so the change can be undone. */
+export async function keepOldFile(file) {
+  const st = await fs.lstat(file).catch(() => null);
+  if (!st?.isFile() || st.size > 25 * 2 ** 20) return null;
+  const id = await toBin('file', file, { path: file, size: st.size });
+  await fs.mkdir(binFolder(id), { recursive: true, mode: 0o700 });
+  await fs.copyFile(file, path.join(binFolder(id), 'old'));
+  return id;
 }
 
 /** Open commitments whose time has come and that haven't been reminded yet. Marks them reminded; plain

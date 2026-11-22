@@ -6,7 +6,7 @@ import { unknownToolMessage } from '@kenkaiiii/gg-agent';
 const STEPS = [
   ['plan', { now: 'Writing the page' }],
   ['write_file', { path: 'files/index.html', content: '<h1>Woof</h1>' }],
-  ['write_file', { path: 'files/index.html', content: '<h1>Woof Co</h1>' }], // overwriting its own file: no yes needed
+  ['write_file', { path: 'files/index.html', content: '<h1>Woof Co</h1>' }], // overwriting its own file: asks (D2)
   ['run_command', { command: 'id' }], // no shell tool any more: Unknown tool (sixth review)
   ['write_file', { path: 'work/build.sh', content: 'echo hi' }], // a script, even in its own folder: asks once
   ['finish', { outcome: 'Made a one-page site for Woof Co.', files: [{ path: 'files/index.html', what: 'the page' }] }],

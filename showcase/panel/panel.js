@@ -409,15 +409,26 @@
   }
 
   // ---------------------------------------------------------------- Memory
-  // Two tabs, What I remember and Commitments, each a page at a time; Get to know me at the end of the tab row.
+  // Three tabs, What I remember, Commitments and Recently deleted, each a page at a time; Get to know me at the end of
+  // the tab row.
   function memory() {
-    const on = ui.mtab === 'commits' ? 'commits' : 'facts';
+    const on = ['commits', 'bin'].includes(ui.mtab) ? ui.mtab : 'facts';
     return [
       el('div', { className: 'mhead' },
-        tabRow('Memory', 'mem-panel', [['facts', 'What I remember'], ['commits', 'Commitments']], on, (id) => { ui.mtab = id; }),
+        tabRow('Memory', 'mem-panel', [['facts', 'What I remember'], ['commits', 'Commitments'], ['bin', 'Recently deleted']], on, (id) => { ui.mtab = id; }),
         link('Get to know me', () => act('intro', true), { k: 'intro', disabled: state.intro })),
-      ...(on === 'commits' ? commitList() : factList()),
+      ...(on === 'commits' ? commitList() : on === 'bin' ? binList() : factList()),
     ];
+  }
+  // What was deleted (facts, commitments, jobs, skills, connections) and files as they were before I changed them:
+  // kept 30 days, each with Put back.
+  function binList() {
+    const d = state.deleted ?? [];
+    const { box, nav } = paged('bin', d, (x) => el('li', { className: 'item mem' },
+      el('span', { className: 'text', dir: 'auto', title: x.title }, x.title, el('small', { textContent: `${x.kind} · ${x.when}` })),
+      el('span', { className: 'row-btns' }, link('Put back', () => act(`bin:restore:${x.id}`, true), { k: `bin:restore:${x.id}`, aria: `Put back: ${x.title}` }))),
+    { label: 'Recently deleted', empty: 'Nothing deleted in the last 30 days.' });
+    return [el('div', { className: 'group paged', role: 'tabpanel', id: 'mem-panel', 'aria-labelledby': 'tab-bin' }, box), foot(d.length ? el('p', { className: 'usage', textContent: `${d.length} kept for 30 days` }) : null, nav)];
   }
   // ---------------------------------------------------------------- Abilities
   // What I can do beyond talking, a tab each: skills I know, apps I'm connected to, and what I do on my own.
@@ -1156,6 +1167,8 @@
       usage: { requests: 14, tokens: 31240 },
       facts: [{ id: 'f1', text: 'Prefers short answers in the morning' }, { id: 'f2', text: 'Working on the Hydra 1.0 launch, due end of month' }, { id: 'f3', text: 'Has a cat called Miso', ...(q.has('replaced') ? { replaced: true } : {}) }],
       commitments: [{ id: 'c1', text: 'Send the launch email', when: 'Fri 7 Nov, 10:00', overdue: false }, { id: 'c2', text: 'Book the dentist', when: 'Mon 3 Nov, 09:00', overdue: true }],
+      deleted: [{ id: 'd1a2b3c4d', kind: 'Fact', title: 'Lives in Lisbon', when: 'Today, 09:12' }, { id: 'd5e6f7a8b', kind: 'Skill', title: 'Weekly invoice', when: 'Tue 4 Nov, 17:40' },
+        { id: 'd9c8b7a6f', kind: 'File before it was changed', title: '/Users/you/Documents/notes.md', when: 'Mon 3 Nov, 11:05' }],
       jobs: [{ id: 'j1a2b3c', title: 'Tech news', paused: false, next: 'Thu 6 Nov, 08:00', repeat: 'weekdays', last: 'Last: Summed up 6 stories on AI chips and a Mac update', bad: false },
         { id: 'j4d5e6f', title: 'Tidy Downloads', paused: true, next: 'Paused', repeat: 'Fri', last: "Didn't run: Allow File Edits & Commands is off", bad: true }],
       skills: [{ slug: 'export-figma-frames', name: 'Export Figma frames', description: 'When they want frames out of Figma as PNGs at 2x.' },
@@ -1197,7 +1210,7 @@
       intro: false,
     };
     if (q.has('busy')) Object.assign(s, { busy: true, status: { state: 'busy', text: 'Reading notes.md' } });
-    if (q.has('empty')) Object.assign(s, { recent: [], facts: [], commitments: [], jobs: [], skills: [], connections: [], usage: null });
+    if (q.has('empty')) Object.assign(s, { recent: [], facts: [], commitments: [], jobs: [], skills: [], connections: [], deleted: [], usage: null });
     if (q.has('many')) {
       const things = ['Prefers short answers', 'Drinks oat flat whites', 'Works late on Thursdays', 'Has a cat called Miso', 'Training for a 10k in March', 'Learning Japanese', 'Uses Figma for design', 'Ships on Fridays', 'Allergic to peanuts', 'Sister is called Ana'];
       s.facts = Array.from({ length: 100 }, (_, i) => ({ id: `f${i}`, text: `${things[i % things.length]}${i >= things.length ? ` (${Math.floor(i / things.length) + 1})` : ''}`, ...(q.has('replaced') && i === 2 ? { replaced: true } : {}) }));
@@ -1242,7 +1255,7 @@
       if (s.voice && id.startsWith('listensecs:')) { s.voice.listenSecs = Number(id.slice(11)); setTimeout(() => window.__panel({ kind: 'state', state: s }), 120); }
       // Removing a row (a skill, connection, job, fact or commitment) comes back as new state, as from the sidecar.
       const gone = [[/^skill:forget:(.+)$/, 'skills', (x, v) => x.slug === v], [/^mcp:remove:(.+)$/, 'connections', (x, v) => x.name === v], [/^job:remove:(.+)$/, 'jobs', (x, v) => x.id === v],
-        [/^forget:(.+)$/, 'facts', (x, v) => x.id === v], [/^(?:done|drop):(.+)$/, 'commitments', (x, v) => x.id === v]].find(([re]) => re.test(id));
+        [/^forget:(.+)$/, 'facts', (x, v) => x.id === v], [/^(?:done|drop):(.+)$/, 'commitments', (x, v) => x.id === v], [/^bin:restore:(.+)$/, 'deleted', (x, v) => x.id === v]].find(([re]) => re.test(id));
       if (gone) { const v = id.match(gone[0])[1]; s[gone[1]] = s[gone[1]].filter((x) => !gone[2](x, v)); setTimeout(() => window.__panel({ kind: 'state', state: s }), Number(q.get('lag') ?? 120)); }
       if (id.startsWith('look:')) { s.look = id.slice(5); s.name = s.looks.find(([v]) => v === s.look)?.[1] ?? s.name; setTimeout(() => window.__panel({ kind: 'state', state: s }), 120); }
       return null;

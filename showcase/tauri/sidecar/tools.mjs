@@ -11,7 +11,7 @@ import { ASK, BLOCK, SAFE, checkDrawAction, checkFetch, checkOpen, checkRead, ch
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
-import { addCommitment, forgetFact, getCommitment, listFacts, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
+import { addCommitment, binLine, forgetFact, getBin, getCommitment, keepOldFile, listBin, listFacts, parseDue, parseRepeat, repeatLabel, restoreFromBin, updateCommitment } from './store.mjs';
 import { snoozeTarget, snoozeUntil } from './snooze.mjs';
 import { addJob, getJob, jobsText, removeJob, updateJob } from './jobs.mjs';
 import { deleteSkill, fetchSkills, installSkill, listSkills, readSkill, skillExists, readSkillFile, saveSkill, screenSkill, skillFiles } from './skills.mjs';
@@ -258,6 +258,29 @@ export function oneYesNoAtATime(ask) {
   };
 }
 
+/** act_in_app steps as the owner reads them in a question: every one, numbered, with all the text it types (D4). */
+export function stepsText(steps) {
+  const q = (t) => JSON.stringify(String(t ?? ''));
+  const one = (s) => {
+    switch (s.do) {
+      case 'click_text': return `click ${q(s.text)}${s.near ? ` near ${q(s.near)}` : ''}`;
+      case 'click': return `click control ${s.id}`;
+      case 'fill': return `fill ${q(s.field)} with ${q(s.text)}`;
+      case 'set': return `set control ${s.id} to ${q(s.text)}`;
+      case 'type': return `type ${q(s.text)}`;
+      case 'choose': return `choose ${q(s.option)}${s.field ? ` in ${q(s.field)}` : ''}`;
+      case 'key': return `press ${s.key}`;
+      case 'click_at': return `click at ${Math.round(s.x)}, ${Math.round(s.y)}`;
+      case 'hover': return s.text ? `point at ${q(s.text)}` : `point at ${Math.round(s.x ?? 0)}, ${Math.round(s.y ?? 0)}`;
+      case 'scroll': return `scroll ${s.direction ?? 'down'}${s.text ? ` in ${q(s.text)}` : ''}`;
+      case 'focus': return `focus control ${s.id}`;
+      case 'wait': return `wait ${s.seconds ?? 1} s`;
+      default: return String(s.do);
+    }
+  };
+  return steps.map((s, i) => `${i + 1}. ${one(s)}`).join('\n');
+}
+
 export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null }) {
   // Relative paths start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
@@ -266,6 +289,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   let lastRead = null; // { win, controls } from the latest read_window, to catch ids that went stale
   // Bumped for every new request: what was seen before it may be another page, tab or app by now.
   let turn = 0;
+  let typedSoFar = { turn: -1, text: '', ok: new Set() }; // what act_in_app typed in this request, joined (V8-4)
   async function shotPoint(x, y) {
     const problem = shotProblem(lastShot, turn);
     if (problem) throw new Error(problem);
@@ -338,16 +362,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal);
     return isYes(answer);
   }
-  // Real paths the user said yes to reading (a hidden or app-data file): not asked again in this session.
-  const readOk = new Set();
-  /** read_file, list_files and search_files: secrets never; a hidden or app-data file asks, naming its real path. */
+  /** read_file, list_files and search_files: secrets never; a hidden or app-data file asks, naming its real path,
+   *  every time (eighth review V8-11: no yes is remembered). */
   async function readable(p, ctx, opts) {
     const v = checkRead(p, HOME, opts);
     const f = allowed(v);
-    if (v.level === ASK && !readOk.has(f)) {
-      if (!(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
-      readOk.add(f);
-    }
+    if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
     return f;
   }
   /** What a window shows (its document's file, or a browser's file:// page) is checked like read_file before any of
@@ -359,10 +379,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     for (const f of files) {
       const v = checkRead(f, HOME);
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${win.app ?? 'that window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
-      if (v.level === ASK && !readOk.has(v.path)) {
-        if (!(await confirm(`${v.reason} (${win.app ?? 'A window'} has it open.)`, ctx))) throw new Error(`${userName} said no, so I didn't read what ${win.app ?? 'that window'} shows.`);
-        readOk.add(v.path);
-      }
+      if (v.level === ASK && !(await confirm(`${v.reason} (${win.app ?? 'A window'} has it open.)`, ctx))) throw new Error(`${userName} said no, so I didn't read what ${win.app ?? 'that window'} shows.`);
     }
   }
 
@@ -373,8 +390,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
     // itself and says the final size; an older helper doesn't, so sips does it here.
     const res = await hands('capture', file, spec, '1568');
-    // The window in the picture (for the whole screen: the one in front) is checked like read_file first.
-    try { await windowShows(res.window ?? (spec === 'screen' ? await hands('front').catch(() => null) : null), ctx); } catch (e) { await fs.unlink(file).catch(() => {}); throw e; }
+    // The window in the picture is checked like read_file first; for the whole screen, every window on it (V8-5: an
+    // editor showing a key beside the front app is in the picture too). A helper that doesn't list them (Windows'):
+    // the front one.
+    try {
+      const shown = res.window ? [res.window] : Array.isArray(res.shown) ? res.shown : [await hands('front').catch(() => null)];
+      for (const w of shown) await windowShows(w, ctx);
+    } catch (e) { await fs.unlink(file).catch(() => {}); throw e; }
     const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
     const bounds = res.window?.bounds ?? res.bounds;
     // area: what the picture covers when it's more than the window (its child windows too); bounds still tell
@@ -873,9 +895,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             // What it types is checked first: no file: or other odd links, no secret paths, hidden ones with a yes (F2).
             const typed = ['type', 'fill', 'set'].includes(s.do) ? s.text : s.do === 'choose' ? s.option : null;
             if (typed != null) {
-              const tv = checkTyped(typed, HOME);
+              // What this request typed so far is checked joined with it too: "~/" then ".ssh/id_rsa" is one path
+              // (eighth review V8-4). A path said yes to isn't asked about again in this request; the join goes on.
+              if (typedSoFar.turn !== turn) typedSoFar = { turn, text: '', ok: new Set() };
+              const joined = typedSoFar.text + typed;
+              let tv = checkTyped(typed, HOME);
+              const jv = checkTyped(joined, HOME);
+              if (jv.level === BLOCK || (jv.level === ASK && tv.level === SAFE)) tv = jv;
               if (tv.level === BLOCK) throw new Error(`Blocked for safety: ${tv.reason} Nothing ran.`);
-              if (tv.level === ASK && !(await confirm(tv.reason, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+              if (tv.level === ASK && !typedSoFar.ok.has(tv.reason)) {
+                if (!(await confirm(tv.reason, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+                typedSoFar.ok.add(tv.reason);
+              }
+              typedSoFar.text = joined.slice(-4096);
             }
             const label = s.do === 'click_text' ? s.text : s.do === 'click' ? s.label : s.do === 'choose' ? s.option : null;
             // Every risky click asks on its own (owner: delete, send, pay, trash and quit always ask). The yes is for this
@@ -915,6 +947,18 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 r = await hands('act', JSON.stringify(plan));
                 continue;
               }
+              // A file panel (Save, Open, an upload) or Finder: any file in any folder can be picked, made or moved there,
+              // so the owner sees every step left, in full, and one yes covers exactly those (V8-3, V8-4, V8-7).
+              if (r.whole) {
+                const left = plan.steps.slice(r.step);
+                if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left)}`, ctx))) {
+                  throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                }
+                plan.wholeOk = [...(plan.wholeOk ?? []), String(r.whole)];
+                plan.steps = left;
+                r = await hands('act', JSON.stringify(plan));
+                continue;
+              }
               if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx))) {
                 throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
               }
@@ -925,7 +969,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             return before.length && Array.isArray(r.done) ? { ...r, done: [...before, ...r.done] } : r;
           };
           // A retry acts somewhere else (the app just opened, or another window): no yes carries over to it.
-          const unconfirm = () => { plan.steps = plan.steps.map(({ confirmed, confirmedLabel, ...st }) => st); };
+          const unconfirm = () => { plan.steps = plan.steps.map(({ confirmed, confirmedLabel, ...st }) => st); delete plan.wholeOk; };
           let res;
           try {
             try { res = await act(); }
@@ -1022,7 +1066,9 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       name: 'list_files', description: 'List the files and folders in a directory.',
       parameters: z.object({ dir: z.string() }),
       execute: async ({ dir }, ctx) => {
-        const ents = await fs.readdir(await readable(at(dir), ctx), { withFileTypes: true });
+        const root = await readable(at(dir), ctx);
+        // Names of secrets and other apps' private data aren't listed either (D3).
+        const ents = (await fs.readdir(root, { withFileTypes: true })).filter((e) => checkRead(path.join(root, e.name), HOME).level !== BLOCK);
         return ents.slice(0, 300).map((e) => (e.isDirectory() ? e.name + '/' : e.name)).join('\n') + (ents.length > 300 ? `\n…and ${ents.length - 300} more` : '');
       },
     },
@@ -1046,6 +1092,8 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const f = allowed(v);
         if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
+        // A file that's there is kept in Recently deleted as it was, so the change can be undone (restore_deleted).
+        if (exists) await keepOldFile(f).catch(() => null);
         // Written where it was checked (the real path); a new file that appeared meanwhile isn't overwritten unasked.
         await fs.writeFile(f, content, { flag: v.level === SAFE && !exists && !own ? 'wx' : 'w' });
         return `Wrote ${content.length} characters to ${f}.`;
@@ -1132,7 +1180,35 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const had = listFacts().find((x) => x.id === id);
         if (!had) throw new Error(`No fact with id ${id}.`);
         if (!(await confirm(`Forget "${had.text}"?`, ctx))) throw new Error(`${userName} said no, so I still remember it.`);
-        const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`;
+        const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text} (it can be put back from Recently deleted)`;
+      },
+    },
+    // Undo (owner: "I should be able to undo deletions and undo past behaviors"): what was deleted, and files as they
+    // were before write_file changed them, stay 30 days in Recently deleted (store.mjs), also on the Memory page.
+    {
+      name: 'list_deleted', description: `List what was deleted or changed in the last 30 days and can be put back: facts, dropped commitments, scheduled jobs, skills, connections, and files as they were before write_file changed them. Use it when ${userName} wants to undo something; then restore_deleted with the id.`,
+      parameters: z.object({}),
+      execute: async () => { const l = listBin(); return l.length ? l.map((x) => binLine(x, fmtWhen)).join('\n') : 'Nothing was deleted or changed in the last 30 days.'; },
+    },
+    {
+      name: 'restore_deleted', description: 'Put back one thing from list_deleted by its id: undoes its deletion, or a file change.',
+      parameters: z.object({ id: z.string().max(20) }), executionMode: 'sequential',
+      execute: async ({ id }, ctx) => {
+        const x = getBin(id);
+        if (!x) throw new Error(`Nothing in Recently deleted has the id ${id}. Call list_deleted to see the ids.`);
+        if (x.kind === 'file') {
+          // Putting a file back writes it: the same rules as write_file, and over a file that's there it asks.
+          if (!allowActions()) throw new Error(actionsOff);
+          const there = await fs.lstat(x.data.path).then(() => true, () => false);
+          const v = checkWrite(x.data.path, HOME, { exists: there });
+          allowed(v);
+          if (there && !(await confirm(`Put back ${v.path} as it was before it was changed? What's in it now goes to Recently deleted.`, ctx))) throw new Error(`${userName} said no, so ${v.path} stays as it is.`);
+        }
+        const said = await restoreFromBin(id);
+        if (x.kind === 'commitment') onCommitments(null);
+        if (x.kind === 'job') jobs?.changed(null);
+        if (x.kind === 'skill') skills?.changed?.(null);
+        return said;
       },
     },
     {

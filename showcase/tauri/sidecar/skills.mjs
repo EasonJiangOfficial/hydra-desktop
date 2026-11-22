@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { redactKeys } from './diagnostics.mjs';
 import { BLOCK, checkFetch, checkSkill } from './safety.mjs';
-import { roamiesRoot } from './store.mjs';
+import { binFolder, onRestore, roamiesRoot, toBin } from './store.mjs';
 
 export const SKILLS_DIR = path.join(roamiesRoot(), 'Skills');
 export const MAX_SKILLS = 60, MAX_STEPS = 6000, MAX_DESC = 200;
@@ -91,9 +91,23 @@ export async function saveSkill({ name, description, steps }) {
 export async function deleteSkill(name) {
   const s = readSkill(name);
   if (!s) return null;
-  await fs.rm(path.dirname(s.path), { recursive: true, force: true });
+  // Moved to Recently deleted, not erased, so it can be put back.
+  const id = await toBin('skill', s.name, { slug: s.slug, name: s.name });
+  await fs.mkdir(binFolder(id), { recursive: true, mode: 0o700 });
+  await fs.rename(path.dirname(s.path), path.join(binFolder(id), s.slug)).catch(async () => {
+    await fs.cp(path.dirname(s.path), path.join(binFolder(id), s.slug), { recursive: true });
+    await fs.rm(path.dirname(s.path), { recursive: true, force: true });
+  });
   return s;
 }
+onRestore('skill', async ({ id, data }) => {
+  const from = path.join(binFolder(id), data.slug), to = path.join(SKILLS_DIR, data.slug);
+  if (!existsSync(from)) throw new Error('Its folder is gone, so it can\'t be put back.');
+  if (existsSync(to)) throw new Error(`There's a skill called ${data.slug} now. Remove or rename it first.`);
+  await fs.mkdir(SKILLS_DIR, { recursive: true });
+  await fs.rename(from, to).catch(async () => { await fs.cp(from, to, { recursive: true }); });
+  return `Put back the skill ${data.slug}.`;
+});
 
 /** One line per skill, for the live state's memory section. */
 export const skillIndex = (list = listSkills()) => list.map((s) => `- ${s.slug}: ${s.description}`).join('\n');

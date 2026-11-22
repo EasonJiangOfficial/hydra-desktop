@@ -46,10 +46,10 @@ assert.equal(a.dir, path.join(tmp, 'data', 'HydraAgent', 'Agents', a.folder), 'i
 assert.match(log[0].prompt, /Brief from Ken:\nMake a landing page for Woof Co\./);
 assert.deepEqual([...log[0].tools].sort(), ['finish', 'list_files', 'plan', 'read_file', 'search_files', 'web_fetch', 'web_search', 'write_file']);
 assert.ok(log[0].system.includes(`Your folder is ${a.dir}.`));
-// It asked once (the script), not for overwriting its own file, with the whole real path.
+// It asked for overwriting its own file (binding D2, eighth review V8-10) and for the script, each with the whole real
+// path; the new page itself needed no yes.
 const asks = events.filter((e) => e.type === 'ask');
-assert.equal(asks.length, 1);
-assert.equal(asks[0].agent.ask.question, `Create ${path.join(a.dir, 'work', 'build.sh')}?`);
+assert.deepEqual(asks.map((e) => e.agent.ask.question), [`Overwrite ${path.join(a.dir, 'files', 'index.html')}?`, `Create ${path.join(a.dir, 'work', 'build.sh')}?`]);
 assert.ok(events.some((e) => e.type === 'update' && e.agent.step === 'Writing the page'), 'its progress line reached the row');
 // The folder: what it made, its scratch, its record.
 assert.equal(fs.readFileSync(path.join(a.dir, 'files', 'index.html'), 'utf8'), '<h1>Woof Co</h1>');

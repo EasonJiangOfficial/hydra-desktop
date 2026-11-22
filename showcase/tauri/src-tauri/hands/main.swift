@@ -168,6 +168,46 @@ func saveOpensPanel(_ combo: String, hasDocument: Bool) -> Bool {
     guard let (flags, key) = parseKey(combo), key == 1, flags.contains(.maskCommand), !flags.contains(.maskControl) else { return false }
     return flags.contains(.maskShift) || !hasDocument
 }
+/// Sandboxed apps' Save and Open panels are drawn by this system service, not by the app.
+let PANEL_SERVICE = "com.apple.appkit.xpc.openAndSavePanelService"
+/// Whether what a window or sheet holds is a file panel (Save, Open, Export, Choose, a browser's upload): the panel's
+/// name field or file browser by id, a column browser, or the panel's own controls beside Cancel.
+func looksLikeFilePanel(ids: [String], roles: [String], titles: [String]) -> Bool {
+    if ids.contains(where: { $0 == "saveAsNameTextField" || $0.hasPrefix("NSSavePanel") || $0.hasPrefix("NSOpenPanel") || $0.hasPrefix("NSNavBrowser") || $0.hasPrefix("FINav") }) { return true }
+    let t = Set(titles.map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) })
+    guard t.contains("cancel") else { return false }
+    if roles.contains("AXBrowser") { return true }
+    let bits: Set<String> = ["new folder", "hide extension", "show options", "hide options", "options", "where:", "tags:", "save as:", "date modified", "favorites", "recents", "locations", "go to folder", "show hidden files"]
+    return !t.isDisjoint(with: bits)
+}
+/// Whether a Save, Open or other file panel is up in the app: the panel service's window on screen, or a sheet or the
+/// focused window holding one. In one, any file in any folder can be picked or made (eighth review V8-3, V8-4), so a
+/// step there needs the owner's yes, with every step shown.
+func filePanelShown(_ app: AXUIElement) -> Bool {
+    if windows().contains(where: { NSRunningApplication(processIdentifier: $0.pid)?.bundleIdentifier == PANEL_SERVICE }) { return true }
+    guard let f = attr(app, kAXFocusedWindowAttribute) else { return false }
+    let win = f as! AXUIElement
+    let roots = (attr(win, kAXChildrenAttribute) as? [AXUIElement] ?? []).filter { str($0, kAXRoleAttribute) == "AXSheet" } + [win]
+    for r in roots {
+        var ids: [String] = [], roles: [String] = [], titles: [String] = []
+        var queue = [r], seen = 0
+        while !queue.isEmpty, seen < 400 {
+            let e = queue.removeFirst(); seen += 1
+            let v = attrs(e, [kAXRoleAttribute, "AXIdentifier", kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute, kAXChildrenAttribute])
+            let role = (v[0] as? String) ?? ""
+            roles.append(role)
+            if let i = v[1] as? String { ids.append(i) }
+            for x in v[2...4] { if let t = x as? String, !t.isEmpty, t.count <= 40 { titles.append(t) } }
+            if role == "AXWebArea" { continue } // a page's own words say nothing about a panel
+            if let kids = v[5] as? [AXUIElement] { queue.append(contentsOf: kids.prefix(60)) }
+        }
+        if looksLikeFilePanel(ids: ids, roles: roles, titles: titles) { return true }
+    }
+    return false
+}
+/// Finder: clicks and keys there rename, move, open and delete files, so a plan in it is asked about as a whole.
+let FINDER = "com.apple.finder"
+func isFinder(_ pid: pid_t?) -> Bool { pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier } == FINDER }
 
 func run(_ path: String, _ args: [String]) -> Int32 {
     let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
@@ -471,10 +511,17 @@ func sendChecks(_ app: AXUIElement, appName: String, returnKey: Bool, target: AX
         for _ in 0 ..< 40 { guard let e = up else { break }; if axRole(e) == "AXWebArea" { inWeb = true; break }; up = attr(e, kAXParentAttribute).map { $0 as! AXUIElement } }
         let label = f.map { el in [kAXDescriptionAttribute, kAXTitleAttribute, kAXPlaceholderValueAttribute].compactMap { str(el, $0) }.joined(separator: " ") } ?? ""
         if sendField(app: appName, role: role, subrole: f.flatMap { str($0, kAXSubroleAttribute) }, label: label, inWeb: inWeb) {
-            out.append(("send", "Return in this \(appName) field could send or submit it."))
+            // What would be sent or run, in full (eighth review V8-13): never a password field's.
+            let secure = f.map { axRole($0) == "AXSecureTextField" || str($0, kAXSubroleAttribute) == "AXSecureTextField" } ?? false
+            let held = secure ? nil : f.flatMap { attr($0, kAXValueAttribute) as? String }.flatMap { $0.isEmpty ? nil : $0 }
+            out.append(("send", sendWhy(appName, held: held)))
         }
     }
     return out
+}
+/// Why Return in a field needs a yes, with all the text it holds (what would be sent or run), never cut (D4).
+func sendWhy(_ appName: String, held: String?) -> String {
+    "Return in this \(appName) field could send or submit it." + (held.map { " It holds, in full: \"\($0)\"" } ?? "")
 }
 /// A risky button on a sheet of the focused window ("Don't Save", "Delete"…): what Cmd+D may press. nil when none.
 func sheetRiskyButton(_ app: AXUIElement) -> String? {
@@ -1355,6 +1402,12 @@ let HANDS_OFF: [String: String] = [
     // Editors with a built-in terminal: typing there could run commands past every check.
     "com.microsoft.VSCode": "VS Code", "com.microsoft.VSCodeInsiders": "VS Code", "com.todesktop.230313mzl4w4u92": "Cursor", "dev.zed.Zed": "Zed",
     "dev.zed.Zed-Preview": "Zed", "com.exafunction.windsurf": "Windsurf", "com.vscodium": "VSCodium", "com.google.antigravity": "Antigravity",
+    // Apps that build and run code or commands from what is typed or clicked (eighth review V8-2, V8-13).
+    "com.apple.shortcuts": "Shortcuts", "com.apple.PlaygroundsMac": "Swift Playgrounds", "com.apple.Playgrounds": "Swift Playgrounds",
+    "com.sublimetext.4": "Sublime Text", "com.sublimetext.3": "Sublime Text", "com.panic.Nova": "Nova", "com.barebones.bbedit": "BBEdit",
+    "com.macromates.TextMate": "TextMate", "com.macromates.TextMate.preview": "TextMate", "org.vim.MacVim": "MacVim", "org.gnu.Emacs": "Emacs",
+    "org.gnu.Aquamacs": "Aquamacs", "com.runningwithcrayons.Alfred": "Alfred", "com.runningwithcrayons.Alfred-Preferences": "Alfred",
+    "com.raycast.macos": "Raycast", "dev.warp.Warp-Preview": "Warp", "dev.commandline.waveterm": "Wave", "com.apple.dt.Instruments": "Instruments",
 ]
 
 func handsOff(_ pid: pid_t) -> String? {
@@ -1863,6 +1916,19 @@ case "--self-test":
     check("a contenteditable box in Notion or Linear could send", sendField(app: "Notion", role: "AXGroup", subrole: nil, label: "", inWeb: true) && sendField(app: "Linear", role: "AXGroup", subrole: nil, label: "", inWeb: true))
     check("ctrl+j, ctrl+m and ctrl+o read as keys the helper presses", ["ctrl+j", "ctrl+m", "ctrl+o"].allSatisfy { parseKey($0) != nil })
     check("VS Code and Cursor are hands-off", HANDS_OFF["com.microsoft.VSCode"] != nil && HANDS_OFF["com.todesktop.230313mzl4w4u92"] != nil)
+    // Eighth review V8-2: apps that run what they're given are hands-off.
+    for id in ["com.apple.shortcuts", "com.sublimetext.4", "com.panic.Nova", "com.barebones.bbedit", "com.macromates.TextMate", "org.vim.MacVim", "org.gnu.Emacs", "com.runningwithcrayons.Alfred", "com.raycast.macos", "dev.warp.Warp-Preview", "dev.commandline.waveterm", "com.apple.PlaygroundsMac"] {
+        check("\(id) is hands-off", HANDS_OFF[id] != nil)
+    }
+    // V8-13: the question shows the whole command or message Return would send.
+    let longCmd = "> rm -rf ~/Documents/x " + String(repeating: "and more ", count: 60)
+    check("a Return question holds the field's whole text", sendWhy("Alfred", held: longCmd).hasSuffix("\"\(longCmd)\""))
+    // V8-3, V8-4: a file panel is recognised, an ordinary window isn't.
+    check("a Save sheet's name field is a file panel", looksLikeFilePanel(ids: ["saveAsNameTextField"], roles: ["AXSheet", "AXTextField"], titles: ["Save"]))
+    check("an Open panel's browser is a file panel", looksLikeFilePanel(ids: [], roles: ["AXSheet", "AXBrowser"], titles: ["Cancel", "Open"]))
+    check("an upload panel in list view is a file panel", looksLikeFilePanel(ids: [], roles: ["AXWindow", "AXOutline"], titles: ["Cancel", "Upload", "Date Modified", "Favorites"]))
+    check("a plain dialog with Cancel isn't", !looksLikeFilePanel(ids: [], roles: ["AXSheet", "AXButton"], titles: ["Cancel", "Delete"]))
+    check("a Finder window without Cancel isn't", !looksLikeFilePanel(ids: [], roles: ["AXWindow", "AXOutline"], titles: ["Favorites", "Recents", "Date Modified"]))
     // B3: menu shortcuts read through parseKey: meta/super chords press nothing anywhere.
     check("meta+q and super+shift+d press nothing", parseKey("meta+q") == nil && parseKey("super+shift+d") == nil && parseKey("meta+shift+d") == nil)
     check("the menu route reads q from cmd+q", parseKey("cmd+q").map { KEY_CHARS[$0.key] } == "q")
@@ -1949,6 +2015,8 @@ case "capture":
         // Its bounds (points) let the caller map pixels back.
         let d = CGDisplayBounds(CGMainDisplayID())
         var o: [String: Any] = ["ok": true, "file": file, "what": "screen", "bounds": [Int(d.minX), Int(d.minY), Int(d.width), Int(d.height)]]
+        // Every window in the picture, with the file or address it shows, for the sidecar to check (V8-5).
+        o["shown"] = windows().prefix(60).map { winShows($0) }
         if let px = px ?? shrink() { o["pixels"] = px }
         makeThumb()
         out(o)
@@ -2069,6 +2137,11 @@ case "act":
     var done: [String] = []
     // Files the user said yes to acting in (the sidecar checked each against its write rules first).
     let docOk = Set((plan["docOk"] as? [String]) ?? [])
+    // What the user said yes to as a whole plan, having seen every step: a file panel, Finder.
+    let wholeOk = Set((plan["wholeOk"] as? [String]) ?? [])
+    if !wholeOk.contains("finder"), isFinder(w.pid) {
+        out(["ok": false, "needsConfirm": true, "step": 0, "whole": "finder", "app": w.app, "label": "finder", "why": "In Finder, clicks and keys can rename, move, open or delete files.", "done": [String]()])
+    }
     progress(["ev": "start", "window": winInfo(w), "steps": steps.count])
     // What a step is about to touch (global points) and what it types. Password fields only send dots.
     func emitStep(_ i: Int, _ what: String, _ e: AXUIElement?, at: CGPoint? = nil, label: String = "", text: String? = nil) {
@@ -2144,6 +2217,12 @@ case "act":
         // A window with a file open: anything done there can change that file, so stop and ask (with its path) first.
         if what != "wait", let d = openDocuments(app, w).first(where: { !docOk.contains($0) }) {
             out(["ok": false, "needsConfirm": true, "step": i, "document": d, "app": w.app, "label": "document", "why": "\(w.app) has \(d) open: what I type or save there goes into that file.", "done": done])
+        }
+        if what != "wait", !wholeOk.contains("finder"), isFinder(frontPid()) {
+            out(["ok": false, "needsConfirm": true, "step": i, "whole": "finder", "app": "Finder", "label": "finder", "why": "Finder came to the front: clicks and keys there can rename, move, open or delete files.", "done": done])
+        }
+        if what != "wait", !wholeOk.contains("panel"), filePanelShown(app) {
+            out(["ok": false, "needsConfirm": true, "step": i, "whole": "panel", "app": w.app, "label": "panel", "why": "A Save or Open panel is up in \(w.app): in it any file in any folder can be picked, uploaded or made.", "done": done])
         }
         if what == "click_at", let x = s["x"] as? Double, let y = s["y"] as? Double {
             let gx = (s["global"] as? Bool ?? false) ? x : w.x + x, gy = (s["global"] as? Bool ?? false) ? y : w.y + y

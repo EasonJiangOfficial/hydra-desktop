@@ -25,6 +25,8 @@ export function describe(name, args = {}) {
     case 'remember_commitment': return ['Adding a reminder', 'Added a reminder'];
     case 'update_commitment': return ['Updating a reminder', 'Updated a reminder'];
     case 'forget_fact': return ['Forgetting it', 'Forgot it'];
+    case 'list_deleted': return ['Looking in Recently deleted', 'Looked in Recently deleted'];
+    case 'restore_deleted': return ['Putting it back', 'Put it back'];
     case 'start_focus': return ['Starting a focus block', 'Started a focus block'];
     case 'stop_focus': return ['Ending the focus block', 'Ended the focus block'];
     case 'snooze_reminder': return ['Snoozing a reminder', 'Snoozed a reminder'];

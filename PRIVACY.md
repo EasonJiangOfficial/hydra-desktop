@@ -86,6 +86,7 @@ and stays on your computer:
 | `Data/usage.jsonl`       | token counts and timings only, never content                                       |
 | `Data/jobs.json`         | your scheduled jobs (never synced to another computer)                             |
 | `Data/mcp.json`          | your connections; their keys and tokens are kept with your other keys, not here   |
+| `Data/bin.json`, `Data/bin/` | Recently deleted: forgotten facts, dropped commitments, removed jobs, skills and connections, and files as they were before Roamies changed them; each kept 30 days so it can be put back, then erased (a removed connection's keys go then too) |
 | `Data/models/`           | the speech model, on Linux (on Windows it's in `%LOCALAPPDATA%\Roamies\models`)    |
 | `Skills/`                | the skills Roamies learned or you installed, one folder each with its `SKILL.md`   |
 | `Agents/`                | what background agents made                                                         |
@@ -108,6 +109,8 @@ Your Fish Audio key, your Gemini voice key and the keys for your connections are
 You can see what Roamies remembers on the panel's **Memory** page, and remove it with **Forget** or
 **Forget Everything**. Learned skills, connections and scheduled jobs are on the **Abilities** page, under its
 **Skills**, **Connections** and **Routines** tabs, each with **Remove**.
+What you remove, and a file as it was before Roamies wrote over it, waits 30 days on the **Memory** page's
+**Recently deleted** tab, where **Put back** undoes it; after that it's erased.
 
 ## Deleting everything
 

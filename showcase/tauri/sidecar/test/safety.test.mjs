@@ -208,8 +208,11 @@ console.log('safety tests: passed');
     fs.writeFileSync(nodePath.join(own, 'files', 'index.html'), 'x');
     fs.writeFileSync(nodePath.join(home, 'notes.txt'), 'x');
     const w = (p, exists = true) => checkWrite(p, home, { exists, own });
-    assert.equal(w(nodePath.join(own, 'files', 'index.html')).level, SAFE, 'overwriting in its own folder needs no yes');
-    assert.equal(w('~/Roamies/Agents/Dog page/files/index.html').level, SAFE, 'also written from ~');
+    // Binding D2 (eighth review V8-10): overwriting asks even in its own folder; a new file there needs no yes.
+    assert.equal(w(nodePath.join(own, 'files', 'index.html')).level, ASK, 'overwriting in its own folder asks');
+    assert.equal(w('~/Roamies/Agents/Dog page/files/index.html').level, ASK, 'also written from ~');
+    assert.equal(w(nodePath.join(own, 'files', 'new.html'), false).level, SAFE, 'a new file in its own folder needs no yes');
+    assert.equal(w('~/Roamies/Agents/Dog page/files/new.html', false).level, SAFE, 'also from ~');
     assert.equal(w('~/notes.txt').level, ASK, 'overwriting outside its folder still asks');
     assert.equal(w(nodePath.join(own, '..', 'other', 'a.txt')).level, ASK, 'a .. out of its folder still asks');
     assert.equal(checkWrite(nodePath.join(own, 'files', 'index.html'), home, { exists: true }).level, ASK, 'without own it asks as before');

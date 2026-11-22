@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { BLOCK, MCP_NAME, checkMcpServer } from './safety.mjs';
-import { DIR, readJson, writeJson } from './store.mjs';
+import { DIR, onPurge, onRestore, readJson, toBin, writeJson } from './store.mjs';
 
 export const SECRET_MARK = '@roamies-secret'; // an env or header value kept in the secret store
 const PREFIX = (server) => `mcp__${server}__`;
@@ -107,11 +107,22 @@ export function createMcp({ file = path.join(DIR, 'mcp.json'), secrets, manager 
     if (!e) return false;
     if (mgr) await mgr.disconnect(name).catch(() => {});
     live.delete(name);
-    for (const field of ['env', 'headers']) for (const [k, v] of Object.entries(e[field] ?? {})) if (v === SECRET_MARK) await secrets.delete(secretName(name, `${field}:${k}`)).catch(() => {});
+    // Recently deleted: its entry is kept, and its saved keys stay in the secret store until the bin lets it go.
+    await toBin('connection', name, { name, entry: e });
     delete j.mcpServers[name];
     await write(j);
     return true;
   }
+  const dropKeys = async (name, e) => { for (const field of ['env', 'headers']) for (const [k, v] of Object.entries(e?.[field] ?? {})) if (v === SECRET_MARK) await secrets.delete(secretName(name, `${field}:${k}`)).catch(() => {}); };
+  onPurge('connection', ({ data }) => (read().mcpServers[data.name] ? null : dropKeys(data.name, data.entry)));
+  onRestore('connection', async ({ data }) => {
+    const j = read();
+    if (j.mcpServers[data.name]) throw new Error(`There's a connection called ${data.name} now. Remove it first.`);
+    j.mcpServers[data.name] = data.entry;
+    await write(j);
+    if (data.entry.enabled !== false) { await ready(); await connect(data.name, data.entry).catch(() => {}); }
+    return `Put back the ${data.name} connection.`;
+  });
 
   async function setEnabled(name, on) {
     const j = read(), e = j.mcpServers[name];
@@ -250,7 +261,7 @@ export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, ope
       parameters: z.object({ name: z.string().max(32) }),
       execute: async ({ name }, ctx) => {
         if (!mcp.has(name)) throw new Error(`There's no connection called ${name}.`);
-        if (!(await confirm(`Remove the ${name} connection and its keys?`, ctx))) throw new Error(`${userName} said no; ${name} stays.`);
+        if (!(await confirm(`Remove the ${name} connection and its keys? It stays in Recently deleted for 30 days, where it can be put back.`, ctx))) throw new Error(`${userName} said no; ${name} stays.`);
         await mcp.remove(name);
         return `Removed ${name}.`;
       },

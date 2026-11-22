@@ -79,15 +79,18 @@ await again.ready();
 assert.equal(again.status().find((s) => s.name === 'notes').state, 'needs-key');
 assert.match(again.liveText(), /notes: needs a key \(needs NOTES_TOKEN\)/);
 
-// Off and on again; removing deletes its secrets and its entry.
+// Off and on again; removing deletes its entry, and its secrets once it leaves Recently deleted (V8-12).
 await mcp.setEnabled('notes', false);
 assert.equal(mcp.status().find((s) => s.name === 'notes').state, 'off');
 assert.ok(calls.some((c) => c[0] === 'disconnect' && c[1] === 'notes'));
 await mcp.add({ name: 'gh', url: 'https://api.example.com/mcp', secretHeaders: { Authorization: 'Bearer abc' } });
 assert.equal(kept.size, 1);
 assert.ok(await mcp.remove('gh'));
-assert.equal(kept.size, 0, 'its secrets went too');
 assert.equal(mcp.has('gh'), false);
+assert.equal(kept.size, 1, 'its secrets stay while it can be put back');
+const { pruneBin } = await import('../store.mjs');
+await pruneBin(Date.now() + 31 * 864e5);
+assert.equal(kept.size, 0, 'its secrets went when it left the bin');
 assert.equal(await mcp.remove('gh'), false);
 
 // Importing: what's in GG Coder's and Claude Desktop's lists (only files that exist).
