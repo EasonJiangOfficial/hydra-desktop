@@ -653,8 +653,9 @@ final class Voice {
     private(set) var bargeOn = true, speaking = false
     private var bargeRetryAt = 0.0
     lazy var barger = BargeListener(onTalk: { [weak self] in self?.talkedOver() }, onClap: { [weak self] in self?.clapHeard() })
-    private var bargeBroken = false
-    func setBarge(_ on: Bool) { bargeOn = on && !bargeBroken; if !bargeOn { barger.stop() } }
+    // bargeBroken: this mic had no echo cancellation; tried again when the mic changes.
+    private var bargeBroken = false, bargeWanted = true
+    func setBarge(_ on: Bool) { bargeWanted = on; bargeOn = on && !bargeBroken; if !bargeOn { barger.stop() } }
     func setSpeaking(_ on: Bool) { speaking = on; if !on { barger.stop() } }
     private func talkedOver() {
         guard Trigger.decide(.voice, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take, phase == .idle || phase == .wake else { return }
@@ -866,7 +867,10 @@ final class Voice {
         // Based on whether wake listening really runs now, not on its setting: with the key phrase on but its mic not
         // open (no permission yet, backing off after errors, held while Hydra answers), the clap detector listens.
         let clapAlone = Trigger.clapDetectorRuns(clapOn: clapOn, idle: phase == .idle, barging: barger.running, wakeCanRun: wakeAllowed(now))
-        if clapper.running && !clapAlone { clapper.stop() }
+        // Kept on across wake listening's retries: it stops only once wake listening has run for 10 s (it hears claps
+        // itself), not each time a retry starts, so the mic isn't opened and closed over and over.
+        let keepClap = clapOn && phase == .wake && now - wakeStartedAt < 10 && !barger.running
+        if clapper.running && !clapAlone && !keepClap { clapper.stop() }
         else if clapAlone && !clapper.running && now >= clapRetryAt && !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
             if engine != nil { stopAudio(close: true) }
             if !clapper.start(device: InputDevice.forListening()) { clapRetryAt = now + 30 }
@@ -1066,6 +1070,8 @@ final class Voice {
 
     /// Another mic was picked: wake listening, or a mic kept open between takes, starts again on it next time.
     func micChanged() {
+        // Another mic may have echo cancellation: try barge-in again.
+        if bargeBroken { bargeBroken = false; bargeOn = bargeWanted; bargeRetryAt = 0; emit(["type": "barge_available"]) }
         if phase == .wake { stopWake() }
         if phase == .idle { stopAudio(close: true) }
     }

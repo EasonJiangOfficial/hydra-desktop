@@ -85,19 +85,39 @@ export function riskyKind(label) {
   return m ? (m[1] ?? m[0]).toLowerCase().replace(/\s+/g, ' ') : null;
 }
 
-// Key chords that quit, delete or send: any chord with cmd and q; cmd with delete, backspace or forward delete (Move
-// to Trash, delete at once, Empty Trash); cmd+return and cmd+enter (send in Mail, Slack, Messages and most chat and
-// web forms); Mail's cmd+shift+d (Send). Names go through the same aliases as the helper's pressKey ("back",
-// "del", "command", "⌘"…). Return alone is checked by the helper (the focused field and the default button).
-// Kept in sync with riskyKey in hands/main.swift. Says what it does, or null.
-const KEY_ALIAS = { command: 'cmd', '⌘': 'cmd', option: 'opt', alt: 'opt', '⌥': 'opt', control: 'ctrl', '⌃': 'ctrl', '⇧': 'shift',
-  backspace: 'delete', back: 'delete', '⌫': 'delete', del: 'delete', forwarddelete: 'delete', '⌦': 'delete', enter: 'return', '↩': 'return', '⏎': 'return' };
+// Key chords that quit, delete or send, read exactly as the helper's pressKey reads them (hands/main.swift parseKey):
+// modifiers anywhere in the chord, the same aliases, and exactly one other key (the helper refuses zero or two, so
+// nothing is pressed). Any chord with cmd and q; cmd with delete, backspace or forward delete; cmd+return or enter;
+// cmd+shift+d (Mail's Send). Return alone, and Return with other modifiers, is checked by the helper against the
+// focused field and the default button. Kept in sync with riskyKey in hands/main.swift. Says what it does, or null.
+// pressKey's KEY_ALIASES: a whole chord or one part, swapped before reading.
+const PRESS_ALIASES = { '*': 'shift+8', multiply: 'shift+8', times: 'shift+8', '+': 'shift+=', plus: 'shift+=', add: 'shift+=',
+  minus: '-', subtract: '-', divide: '/', slash: '/', equals: '=', equal: '=', period: '.', dot: '.', decimal: '.', comma: ',',
+  '%': 'shift+5', percent: 'shift+5', '(': 'shift+9', ')': 'shift+0', '!': 'shift+1', '@': 'shift+2', '#': 'shift+3', $: 'shift+4',
+  '^': 'shift+6', '&': 'shift+7', _: 'shift+-', '?': 'shift+/', ':': 'shift+;', '"': "shift+'", '<': 'shift+,', '>': 'shift+.',
+  '{': 'shift+[', '}': 'shift+]', '|': 'shift+\\', '~': 'shift+`', page_up: 'pageup', page_down: 'pagedown', pgup: 'pageup', pgdn: 'pagedown',
+  del: 'forwarddelete', arrowleft: 'left', arrowright: 'right', arrowup: 'up', arrowdown: 'down', spacebar: 'space', back: 'backspace',
+  'cmd+end': 'cmd+down', 'cmd+home': 'cmd+up', 'ctrl+end': 'cmd+down', 'ctrl+home': 'cmd+up', 'command+end': 'cmd+down', 'command+home': 'cmd+up' };
+const PRESS_MODS = { cmd: 'cmd', command: 'cmd', ctrl: 'ctrl', control: 'ctrl', opt: 'opt', option: 'opt', alt: 'opt', shift: 'shift' };
+/** { mods: Set, key } as pressKey would send it, or null when it wouldn't press anything (no key, or two). */
+export function parseKey(combo) {
+  let c = String(combo ?? '').toLowerCase().trim().replace(/ /g, '');
+  if (PRESS_ALIASES[c]) c = PRESS_ALIASES[c];
+  let parts = c.split('+').filter(Boolean);
+  if (c.endsWith('++') || c === '+') parts.push('shift', '=');
+  parts = parts.flatMap((p) => (PRESS_ALIASES[p] ? PRESS_ALIASES[p].split('+') : [p]));
+  const mods = new Set(), keys = [];
+  for (const p of parts) { if (PRESS_MODS[p]) mods.add(PRESS_MODS[p]); else keys.push(p); }
+  if (keys.length !== 1) return null;
+  const k = keys[0];
+  return { mods, key: k === 'enter' ? 'return' : k === 'backspace' ? 'delete' : k };
+}
 export function riskyKey(combo) {
-  const parts = String(combo ?? '').toLowerCase().replace(/\s+/g, '').split('+').filter(Boolean).map((p) => KEY_ALIAS[p] ?? p);
-  const key = parts.pop(), mods = new Set(parts);
-  if (!mods.has('cmd')) return null;
+  const p = parseKey(combo);
+  if (!p || !p.mods.has('cmd')) return null;
+  const { mods, key } = p;
   if (key === 'q') return 'quits the app';
-  if (key === 'delete') return mods.has('shift') ? 'empties the Trash' : mods.has('opt') ? 'deletes at once' : 'moves to the Trash';
+  if (key === 'delete' || key === 'forwarddelete') return mods.has('shift') ? 'empties the Trash' : mods.has('opt') ? 'deletes at once' : 'moves to the Trash';
   if (key === 'return') return 'can send a message or form';
   if (key === 'd' && mods.has('shift')) return 'can send (Mail)';
   return null;
@@ -240,7 +260,7 @@ const READ_ONLY = new Set([
 const READ_ONLY_SUB = {
   // Only the looking forms: `git branch -D`, `git tag -d`, `git remote add` change the repo. diff, show, blame and
   // log -p can run a program a downloaded repo's own settings name (textconv), so they ask.
-  git: /^(status|rev-parse|ls-files|shortlog|describe|config\s+--get\b|stash\s+list|--version|-v)\b|^log\b(?!.*\s(-p|-u|--patch|-L|--ext-diff|--textconv)\b)|^branch(\s+(-a|-r|-v|-vv|--list|--all|--remotes|--show-current|--merged|--no-merged|--contains))*\s*$|^tag(\s+(-l|--list))?(\s+[^-\s]\S*)?\s*$|^remote(\s+-v)?\s*$|^remote\s+(show|get-url)\s+\S+\s*$/,
+  git: /^(status|rev-parse|ls-files|shortlog|describe|config\s+--get\b|stash\s+list|--version|-v)\b|^log\b(?!.*\s(-p|-u|--patch|-L|--ext-diff|--textconv)\b)|^branch(\s+(-a|-r|-v|-vv|--list|--all|--remotes|--show-current|--merged|--no-merged|--contains))*\s*$|^tag(\s+(-l|--list)(\s+[^-\s]\S*)?)?\s*$|^remote(\s+-v)?\s*$|^remote\s+(show|get-url)\s+\S+\s*$/,
   npm: /^(ls|list|view|info|outdated|audit|--version|-v|-h|help|config\s+get|root|prefix|bin|search|explain|why)\b/,
   brew: /^(list|ls|info|search|outdated|deps|leaves|config|doctor|--version|--prefix|home)\b/,
   cargo: /^(--version|-V|tree|metadata|search)\b/, pip: /^(list|show|freeze|--version|search)\b/, pip3: /^(list|show|freeze|--version)\b/,
@@ -378,8 +398,28 @@ function unrollLoop(s) {
   return pre + vals.map((x) => body.replace(new RegExp(`\\$\\{?${v}\\}?(?!\\w)`, 'g'), x)).join(' && ') + post;
 }
 
+// The files a copying or writing program writes to, checked like write_file: the reason it's refused, or null.
+function writeTargets(text, home, cwd) {
+  const prog = program(words(text)), name = prog.name.toLowerCase(), args = prog.args;
+  const plain = args.filter((a) => !a.startsWith('-'));
+  let dests = [];
+  if (['cp', 'ditto', 'mv', 'install', 'rsync', 'ln', 'scp'].includes(name) && plain.length >= 2) {
+    // The last argument, and each source's name inside it (when it is a folder).
+    const d = plain[plain.length - 1];
+    dests = [d, ...plain.slice(0, -1).map((src) => path.join(d, path.basename(slash(src))))];
+  } else if (['tee', 'touch', 'truncate'].includes(name)) dests = plain;
+  else if (name === 'git' && /^clone\b/.test(args.join(' '))) { const rest = plain.slice(1); if (rest.length >= 2) dests = [rest[rest.length - 1]]; }
+  else if (['curl', 'wget'].includes(name)) { const i = args.findIndex((a) => /^(-o|--output|-O|--output-document)$/.test(a)); if (i >= 0 && args[i + 1]) dests = [args[i + 1]]; }
+  for (const d of dests) {
+    const t = /^~/.test(d) || isAbs(slash(d)) ? d : path.join(cwd, slash(d));
+    const w = checkWrite(t, home, {});
+    if (w.level === BLOCK && w.reason && !/only write files inside your home/.test(w.reason)) return w.reason;
+  }
+  return null;
+}
+
 // Owner's rule: every deletion of anything is confirmed, no exceptions; kill, quit, force quit, send, pay, overwrite and
-// move to the Trash always ask too. These verdicts carry `always`, so "Skip Allow prompts" never answers them.
+// move to the Trash always ask too (with a reason that says so).
 // Says why, or null.
 const ALWAYS_PROGRAMS = {
   rm: 'This deletes files.', rmdir: 'This deletes folders.', unlink: 'This deletes files.', trash: 'This moves files to the Trash.',
@@ -438,6 +478,9 @@ export function classifyCommand(cmd, home, { exists, cwd: start = null, own = nu
     let v = checkSimple(p.text, p.pipeIn, home, cwd ?? home, { own });
     if (cwd == null && v.level === SAFE) v = verdict(ASK, "I can't tell which folder that runs in.");
     if (v.level !== BLOCK) { const why = alwaysAsk(p.text, home, cwd ?? home); if (why) { always = true; if (v.level === SAFE) v = verdict(ASK, why); } }
+    // Where a copy, move, link, clone or tee writes: a protected place (startup items, shell files, keys, Hydra's own
+    // skills and data, app bundles) is never written, whichever program does it.
+    if (v.level !== BLOCK) { const w = writeTargets(p.text, home, cwd ?? home); if (w) return verdict(BLOCK, w); }
     for (const r of redirectTargets(p.text)) {
       const t = /^~/.test(r) || isAbs(slash(r)) ? r : path.join(cwd ?? home, slash(r));
       const w = checkWrite(t, home, { exists: !exists || !!exists(norm(t, home)), own });
@@ -457,32 +500,10 @@ export function classifyCommand(cmd, home, { exists, cwd: start = null, own = nu
   }
   // Command substitution and background jobs change things in ways the parts don't show.
   if (level === SAFE && (/\$\(|`/.test(s) || /(^|\s)&\s*$/.test(s))) level = ASK;
-  // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ASK is `always`
-  // (Skip Allow prompts never answers it) unless the whole command is one of a few plain, known-harmless commands.
-  if (level === ASK && (always || !harmless(s, home, start ? norm(start, home) : home))) return { ...verdict(level, reason), always: true };
+  // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ASK asks the
+  // owner, every time (there is no setting that skips it); `always` stays on the verdict for the code that reads it.
+  if (level === ASK) return { ...verdict(level, reason), always: true };
   return verdict(level, reason);
-}
-
-// The only ASK commands "Skip Allow prompts" may answer: one simple command (no ; && || | & redirect, substitution,
-// brackets, quotes, variables, globs, shell keywords or script runner) from this list, with arguments that only make
-// something new or fetch packages. Anything else, or anything unsure, always asks.
-const HARMLESS_SUB = {
-  git: /^(add|commit|switch|checkout\s+-b|fetch|pull|init|clone|stash\s+push|tag\s+[\w.-]+)(\s|$)/,
-  npm: /^(install|i|ci|run|test|init)(\s|$)/, pnpm: /^(install|i|add|run|test)(\s|$)/, yarn: /^(install|add|run|test)(\s|$)/,
-  brew: /^install(\s|$)/, pip: /^install(\s|$)/, pip3: /^install(\s|$)/, cargo: /^(build|test|check|run)(\s|$)/,
-};
-function harmless(cmd, home, cwd) {
-  const t = String(cmd ?? '').trim();
-  if (!t || /[;&|<>()`{}$*?\[\]\\!'"\n#]/.test(t)) return false;
-  const ws = t.split(/\s+/), name = ws[0], args = ws.slice(1), rest = args.join(' ');
-  if (/^(if|then|for|while|until|do|done|case|function|select|time|exec|eval|source|env|nice|timeout|xargs|watch|nohup|sudo|command|builtin)$/.test(name)) return false;
-  if (HARMLESS_SUB[name]) return HARMLESS_SUB[name].test(rest) && !/(^|\s)(-f|--force|-D|--hard|--delete|-d)(\s|$)/.test(rest);
-  const fresh = (a) => { const p = norm(/^~/.test(a) || isAbs(slash(a)) ? a : path.join(cwd, slash(a)), home); try { fs.lstatSync(p); return false; } catch { return true; } };
-  const plain = args.filter((a) => !a.startsWith('-')), flags = args.filter((a) => a.startsWith('-'));
-  if (name === 'touch' || name === 'mkdir') return plain.length > 0 && plain.every(fresh);
-  // A copy to a new name, never onto a file or into a folder that's there.
-  if (name === 'cp' || name === 'ditto') return plain.length === 2 && flags.every((f) => /^-[rRpvn]+$/.test(f)) && plain[0] !== '/dev/null' && fresh(plain[1]);
-  return false;
 }
 
 
@@ -653,13 +674,16 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
 const MCP_RISKY = /(?:^|_)(send|delete|remove|trash|destroy|erase|wipe|drop|purge|truncate|pay|payment|payments|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate|execute|exec|sql|migration|migrate|reset|merge|archive)(?:_|$)/;
 const snake = (s) => String(s ?? '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^a-z0-9]+/gi, '_').toLowerCase();
 
+// Names that write, whatever the server says (a server's readOnlyHint is its own claim, so it's trusted only for a
+// name that reads: get, list, search, read…).
+const MCP_WRITES = /(?:^|_)(update|set|write|move|run|invoke|batch|apply|create|add|delete|remove|send|post|publish|execute|exec|sql|query|insert|upsert|patch|put|edit|modify|change|rename|upload|import|deploy|rent|buy|share|label|archive|merge|reset|trash|pay|transfer|request|call|trigger|start|stop|cancel|grant|revoke|invite|assign|close|open|submit|sync)(?:_|$)/;
 /** A call to a connected server's tool: { name, annotations }. A read-only tool (readOnlyHint, not destructive, not
  *  named like an action) is SAFE. Anything else ASKs; `always` (destructive, or named send/delete/pay…) means even
- *  "Skip Allow prompts" doesn't skip it. */
+ *  only the owner answers it (an agent job's answer_agent can't say yes). */
 export function checkMcpCall({ name, annotations } = {}) {
   const a = annotations ?? {};
   if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true };
-  if (a.readOnlyHint === true) return verdict(SAFE);
-  // Owner: anything that might change, send or delete asks every time, Skip Allow prompts or not.
+  if (a.readOnlyHint === true && !MCP_WRITES.test(snake(name))) return verdict(SAFE);
+  // Owner: anything that might change, send or delete asks every time.
   return { ...verdict(ASK, "The server doesn't say it only reads."), always: true };
 }

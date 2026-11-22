@@ -393,13 +393,10 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
       p.event = now(); a.turns++; a.tokens.in += m.usage?.in ?? 0; a.tokens.out += m.usage?.out ?? 0;
       if (a.turns > LIMITS.turns) stop(a.id, { state: 'failed', reason: `Used all its ${LIMITS.turns} turns` });
     } else if (m.t === 'plan') { p.event = now(); a.step = one(m.text, 60); update(a); }
-    else if (m.t === 'ask' && !m.always && config.skipAllow?.()) {
-      // "Skip Allow prompts": the agent's yes/no is answered yes here, and nothing else changes (BLOCK verdicts never ask;
-      // delete, kill, quit, send, pay, overwrite and risky clicks carry `always` and still ask).
-      if (p.child.connected) p.child.send({ t: 'reply', id: m.id, value: true });
-    } else if (m.t === 'ask') {
+    else if (m.t === 'ask') {
+      // Every yes/no waits for the owner (a routine running alone waits too, as an approval on its row).
       if (a.state === 'working') { a.workMs += now() - a.workFrom; a.workFrom = null; }
-      a.state = 'waiting'; a.told = false; a.ask = { id: m.id, question: one(m.question, 300) };
+      a.state = 'waiting'; a.told = false; a.ask = { id: m.id, question: one(m.question, 300), always: m.always !== false };
       tell('ask', a); saveState(a);
     } else if (m.t === 'ask_cancel') { if (a.ask?.id === m.id) resume(a); }
     else if (m.t === 'creds') {
@@ -467,9 +464,12 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
   const watch = setInterval(check, 5000);
   watch.unref?.();
 
-  function answer(id, allow) {
+  // by: 'owner' (the Allow button on the agent's row) or 'model' (answer_agent). The model may say no, never yes: only
+  // the owner approves what an agent asks (owner: every deletion is confirmed, by him).
+  function answer(id, allow, by = 'owner') {
     const a = agents.get(String(id)), p = procs.get(String(id));
     if (!a?.ask || !p) return false;
+    if (allow && by !== 'owner' && a.ask.always) return 'owner';
     p.child.send({ t: 'reply', id: a.ask.id, value: !!allow });
     resume(a);
     return true;
@@ -557,9 +557,14 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
       execute: async ({ id }) => { if (!stop(id)) throw new Error(`${id} isn't working.`); return `Stopping ${id}.`; },
     },
     {
-      name: 'answer_agent', description: `Answer an agent that is waiting for ${userName}'s yes, when they say it to you ("allow it", "no, don't"). Only with their answer, never on your own.`,
+      name: 'answer_agent', description: `Tell an agent that is waiting for ${userName}'s yes that the answer is no, when they say so. A yes is theirs to give: they click Allow on the agent's row.`,
       parameters: z.object({ id: z.string().max(12), allow: z.boolean() }),
-      execute: async ({ id, allow }) => { if (!answer(id, allow)) throw new Error(`${id} isn't waiting for an answer.`); return allow ? `Allowed; ${id} carries on.` : `Told ${id} no; it carries on without that.`; },
+      execute: async ({ id, allow }) => {
+        const r = answer(id, allow, 'model');
+        if (r === 'owner') throw new Error(`Only ${userName} can allow that: ask them to click Allow on ${id}'s row (it can delete, send, pay or change things).`);
+        if (!r) throw new Error(`${id} isn't waiting for an answer.`);
+        return allow ? `Allowed; ${id} carries on.` : `Told ${id} no; it carries on without that.`;
+      },
     },
     {
       name: 'agent_report', description: 'What an agent was asked, what it made and where: its history and file list.',

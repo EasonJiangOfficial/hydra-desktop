@@ -4,7 +4,7 @@
 //
 // in:  {type:'menu', id} {type:'answer', id, text} {type:'ui_ready'}
 // out: {type:'menu', items} {type:'ui', msg} {type:'overlays', ids}
-import { CONFIG_PATH, DATA_DIR, ROAMIES_DIR } from './datadir.mjs';
+import { CONFIG_PATH, DATA_DIR, OLDER_DATA, ROAMIES_DIR } from './datadir.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare } from './claudecode.mjs';
 import { SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
@@ -123,7 +123,7 @@ const DEFAULT_KEYS = process.platform === 'win32'
   ? { talk: ['control', 'option'], summon: 'Control+Shift+KeyS', snap: 'Control+Shift+KeyA', list: 'Control+Shift+KeyL' }
   : { talk: ['control', 'option'], summon: 'Control+Alt+KeyS', snap: 'Control+Alt+KeyA', list: 'Control+Alt+KeyL' };
 const DEFAULTS = {
-  provider: null, model: null, sound: true, allowActions: false, skipAllow: false, voice: true,
+  provider: null, model: null, sound: true, allowActions: false, voice: true,
   heavy: { code: '', computer: '', web: '', draw: '', agents: '' }, // hybrid models: a model for each kind of heavy job ('provider:model'), '' = the default model (route.mjs)
   hybrid: false, // the master switch for hybrid models (a model per kind of job, or named in a request)
   subagents: false, // the master switch for subagents: specialists the chat hands background work to (subagents.mjs)
@@ -183,6 +183,7 @@ let shellInfo = null; // resolves the shell's reply to it: screens, tray, panel,
   const saved = readJson(CONFIG_PATH, { backup: true }); // an unreadable file is set aside, never overwritten
   if (saved && typeof saved === 'object' && !Array.isArray(saved)) config = { ...DEFAULTS, ...saved };
   config.look = 'hydra'; // one character
+  delete config.skipAllow; // the old setting that skipped asks is gone: every ask asks
   // Before voices were per look: the one picked becomes the current look's.
   for (const [one, each] of [['geminiVoice', 'geminiVoices'], ['studioVoice', 'studioVoices']]) {
     if (!(one in config)) continue;
@@ -663,7 +664,7 @@ let turnVoice = null;
 const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn } = createTools({
   focus: HANDS_OK ? { start: (m, t) => startFocus(m, t), stop: () => stopFocus() } : null,
   firedReminders: () => firedReminders,
-  allowActions: () => config.allowActions, skipAllow: () => !!config.allowActions && !!config.skipAllow, ui, ask, openUrl, userName,
+  allowActions: () => config.allowActions, ui, ask, openUrl, userName,
   speak: (line) => { if (!turnVoice) return false; turnVoice.say(line); return true; },
   onHandoff: (task) => { activity.handoff(task); panel(); },
   commitmentsText: () => [commitmentsText(), doneTodayText() && `Done today:\n${doneTodayText()}`].filter(Boolean).join('\n'),
@@ -701,7 +702,7 @@ const agents = createAgents({
   fork, ui, root: agentsRoot(), userName, runner: fileURLToPath(new URL('./agentrun.mjs', import.meta.url)),
   safety: { checkRead, checkWrite, checkOpen, checkLink }, log: (kind, data) => { logLine(kind, data); if (kind === 'agent_end') panel(); }, // a scheduled job's row shows how its run went
   config: {
-    model: agentModel, subagent: (name) => { const s = config.subagents ? findSubagent(name, crewNow()) : null; return s ? { id: s.id, label: s.label, type: s.type, role: s.role, spec: s.spec.spec, slot: s.slot } : null; }, userWords: () => turnWords, openUrl: (u) => openUrl(u), creds: (m) => credsFor(m.provider, m.model), allowActions: () => !!config.allowActions, skipAllow: () => !!config.allowActions && !!config.skipAllow, image: () => turnImage,
+    model: agentModel, subagent: (name) => { const s = config.subagents ? findSubagent(name, crewNow()) : null; return s ? { id: s.id, label: s.label, type: s.type, role: s.role, spec: s.spec.spec, slot: s.slot } : null; }, userWords: () => turnWords, openUrl: (u) => openUrl(u), creds: (m) => credsFor(m.provider, m.model), allowActions: () => !!config.allowActions, image: () => turnImage,
     open: (p) => (process.platform === 'win32' ? winOpen(p) : new Promise((r) => execFile(MAC ? 'open' : 'xdg-open', [p], () => r()))),
     reveal: async (p) => reveal(p),
   },
@@ -712,7 +713,7 @@ tools.push(...agents.tools);
 const mcp = createMcp({ secrets, log: (kind, data) => logLine(kind, data) });
 tools.push(...createMcpTools({
   mcp, ask, isYes, userName, checkCall: checkMcpCall, openUrl: (u) => openUrl(u),
-  allowActions: () => !!config.allowActions, skipAllow: () => !!config.allowActions && !!config.skipAllow,
+  allowActions: () => !!config.allowActions,
   keyStore: MAC ? 'Keychain' : LINUX ? 'keyring' : 'Windows key store',
 }));
 let requestNo = 0; // the request being answered (nextTurn), for holdAfterLaunch
@@ -841,7 +842,7 @@ const livePrompt = (context = '') => {
   lastFactIds = facts.map((f) => f.id);
   const open = commitmentsText(), done = doneTodayText(), working = agents.liveText(), scheduled = jobsText(fmtWhen), learned = skillIndex(), linked = mcp.liveText();
   const turn = `Live state (current as of this moment):
-${frontNow ? `${frontNow}\n` : ''}${lookLine(session?.looks, config.look ?? 'hydra', nameOfLook, userName)}${inkLine()}${focusLine()}${crewLine()}${linked ? `- Connections (connection_tools shows a server's tools, use_connection calls one):\n${linked}\n` : ''}- Editing files, running commands and controlling other apps: ${config.allowActions ? 'ALLOWED' : `switched OFF (tell the user to turn on "Allow File Edits & Commands" on the General page in ${PANEL} if they want it)`}.${config.allowActions && config.skipAllow ? ' Allow prompts are skipped: ordinary confirmations go ahead automatically, so be extra careful. Deleting anything, quitting or killing apps, sending, paying, overwriting and risky clicks or keys still ask every time.' : ''}
+${frontNow ? `${frontNow}\n` : ''}${lookLine(session?.looks, config.look ?? 'hydra', nameOfLook, userName)}${inkLine()}${focusLine()}${crewLine()}${linked ? `- Connections (connection_tools shows a server's tools, use_connection calls one):\n${linked}\n` : ''}- Editing files, running commands and controlling other apps: ${config.allowActions ? 'ALLOWED' : `switched OFF (tell the user to turn on "Allow File Edits & Commands" on the General page in ${PANEL} if they want it)`}.
 ${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${HOTKEYS_OK ? `${userName} holds ${talkWords()} to talk` : `${userName} presses the key they bound to ${BIND.talk} to start talking and again to send (a pause sends too)`}${config.autoListen ? (config.listenEvery ? `. Auto-listen is on for every reply: after each spoken reply the mic opens by itself for ${listenSecs()} seconds, so they can just keep talking` : '. Auto-listen is on: when your reply to a spoken question ends with a question, the mic opens by itself for their answer') : ''}${!WAKE_OK ? '. There is no wake word on this computer: to talk they use the talk keys' : ''}${phraseOn() ? `. Wake word is on: ${userName} can also say "Hey ${wakeName(config)}" to start talking hands-free, and what they say right after it is the request (a request that still starts with "Hey ${wakeName(config)}" is them waking you, not calling you by another name: never correct it)${config.wakeName ? ` (they chose "${config.wakeName}" as the wake word; your own name is unchanged)` : ''}` : ''}` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Listening page in ${PANEL}`})`}.` : ''}
 - Shortcuts: ${HOTKEYS_OK ? `${keys().write ? `type a question to you: a quick tap of ${writeWords()} (press both and let go), which opens a text field beside the cursor (Enter sends, Shift+Enter adds a line, Esc or another tap closes it)` : `the tap that opens a text field to type a question is turned off (the Ask button in ${PANEL} still opens it; the Shortcuts page there turns the tap back on)`}; show or hide you ${keyWords(keys().summon)}` : `on this Wayland desktop no app can have global shortcuts, so ${userName} binds keys to these commands in their desktop's keyboard settings: ${BIND.summon} (show or hide you), ${BIND.ask} (ask you), ${BIND.list} (the list), ${BIND.talk} (talk) and ${BIND.panel} (the panel)`}${SNAP_OK ? `; ask about an area ${keyWords(keys().snap)}` : ''}${CIRCLE_OK ? "; while holding the talk keys, moving the cursor round something circles it (no clicking; it snaps shut with a click when the circle closes, and loose lines don't count) and you'll see what they circled" : ''}${HOTKEYS_OK ? `; show the list ${keyWords(keys().list)}` : ''}.${HANDS_OK ? '' : ' Asking about an area, reading app windows, finding things on screen by their words and working other apps need the Hydra app, which isn\'t running here; draw there with x, y from a screenshot.'}`;
   const memory = `${open ? `Open commitments:\n${open}` : 'No open commitments.'}${done ? `\nDone today (ticked off on the list or by you; still shown struck through until midnight):\n${done}` : ''}
@@ -1185,7 +1186,8 @@ async function sideRoute() {
 async function learnFacts(facts) {
   const added = [];
   for (const f of facts) {
-    if (f.replaces) await forgetFact(f.replaces);
+    // A correction is added beside the old fact, never in its place: nothing is deleted without the owner's yes
+    // (he forgets the old one himself, or asks Hydra to, which asks first).
     added.push(await addFact(f.text));
   }
   if (added.length) menu();
@@ -1239,6 +1241,8 @@ async function skillPass(p, why) {
     const { text, model } = await oneShot({ ...(await sideRoute()), system: skillPrompt(userName), text: skillInput({ index: skillIndex(), used, turns: transcript(p.messages, userName, stripNote).slice(-12_000) }) });
     const k = parseSkill(text);
     if (!k) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false }); return; }
+    // The background pass only makes new skills: changing one that exists replaces it, which asks the owner first.
+    if (readSkill(k.name)) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false, skipped: 'exists' }); return; }
     const s = await saveSkill(k); // checkSkill and key scrubbing happen here; an unsafe one throws
     activity.learned(s.name, !s.created); panel();
     logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: s.slug, updated: !s.created });
@@ -1289,7 +1293,7 @@ async function lessonPass(r, correction) {
     const out = parseLesson(text, { knownIds: facts.map((f) => f.id) });
     let skill = null;
     if (out.fact) { await learnFacts([out.fact]); activity.noted(out.fact.text); }
-    if (out.skill) {
+    if (out.skill && !readSkill(out.skill.name)) {
       try { const s = await saveSkill(out.skill); activity.learned(s.name, !s.created); skill = s.slug; } // checkSkill runs here
       catch (e) { logLine('lesson_skill_refused', { error: String(e?.message ?? e).slice(0, 300) }); }
     }
@@ -2297,12 +2301,12 @@ function panelState() {
       mics: mics.list, mic: config.mic ?? '', micAuto: mics.list.find((x) => x.id === mics.auto)?.name ?? '',
       download: NEEDS_MODEL && config.voice && !voiceReady() ? { status: voiceModel.status, pct: voiceModel.total ? Math.floor((voiceModel.done / voiceModel.total) * 100) : 0, size: sizeLabel() } : null,
     } : null,
-    sound: !!config.sound, volume: volumeNow(), actions: !!config.allowActions, skipAllow: !!config.skipAllow, lite: !!config.lite, hybrid: { on: !!config.hybrid, jobs: JOB_KINDS.map((j) => ({ ...j, value: parseSpec(config.heavy?.[j.kind])?.spec ?? '' })), active: routed?.spec ?? '' }, subagents: { on: !!config.subagents, delegate: DELEGATE_MODES.includes(config.delegate) ? config.delegate : 'ask', crew: SUBAGENTS.map((s) => { const c = activeCrew(config.crew, crewSpec, hybridActive() ? config.heavy : null).find((x) => x.id === s.id); return { id: s.id, label: s.label, hint: s.hint, value: parseSpec(config.crew?.[s.id])?.spec ?? '', via: c?.via ?? '', uses: c?.spec.spec ?? '' }; }) }, efforts: Object.fromEntries(SLOTS.map((k) => [k, config.efforts?.[k] ?? ''])), fallbacks: { on: !!config.backups, slots: [0, 1].map((i) => parseSpec(config.fallbacks?.[i])?.spec ?? ''), limited: limits.list().filter((l) => !l.key.includes(':') && (isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? l.key, until: l.until })), unavailable: limits.list().filter((l) => !(isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? modelName(l.key.split(':').slice(1).join(':')) ?? l.key, why: becauseOf(l.kind), until: l.until })), using: routed && /^backup/.test(routed.slot ?? '') ? routed.spec : '' }, notch: notchMode(), notchReal: notchScreen, brief: { on: !!config.morningBrief, todoist: !!config.briefTodoist, canTodoist: HANDS_OK }, focus: HANDS_OK ? { until: focusBlock?.until ?? null, task: focusBlock?.task ?? '', list: distractionList(), custom: !!config.distractions } : null, sync: { dir: config.syncDir || '', at: syncInfo.at, error: syncInfo.error, paused: !!syncInfo.paused }, gameMode: HANDS_OK ? config.gameSidebar !== false : null,
+    sound: !!config.sound, volume: volumeNow(), actions: !!config.allowActions, lite: !!config.lite, hybrid: { on: !!config.hybrid, jobs: JOB_KINDS.map((j) => ({ ...j, value: parseSpec(config.heavy?.[j.kind])?.spec ?? '' })), active: routed?.spec ?? '' }, subagents: { on: !!config.subagents, delegate: DELEGATE_MODES.includes(config.delegate) ? config.delegate : 'ask', crew: SUBAGENTS.map((s) => { const c = activeCrew(config.crew, crewSpec, hybridActive() ? config.heavy : null).find((x) => x.id === s.id); return { id: s.id, label: s.label, hint: s.hint, value: parseSpec(config.crew?.[s.id])?.spec ?? '', via: c?.via ?? '', uses: c?.spec.spec ?? '' }; }) }, efforts: Object.fromEntries(SLOTS.map((k) => [k, config.efforts?.[k] ?? ''])), fallbacks: { on: !!config.backups, slots: [0, 1].map((i) => parseSpec(config.fallbacks?.[i])?.spec ?? ''), limited: limits.list().filter((l) => !l.key.includes(':') && (isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? l.key, until: l.until })), unavailable: limits.list().filter((l) => !(isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? modelName(l.key.split(':').slice(1).join(':')) ?? l.key, why: becauseOf(l.kind), until: l.until })), using: routed && /^backup/.test(routed.slot ?? '') ? routed.spec : '' }, notch: notchMode(), notchReal: notchScreen, brief: { on: !!config.morningBrief, todoist: !!config.briefTodoist, canTodoist: HANDS_OK }, focus: HANDS_OK ? { until: focusBlock?.until ?? null, task: focusBlock?.task ?? '', list: distractionList(), custom: !!config.distractions } : null, sync: { dir: config.syncDir || '', at: syncInfo.at, error: syncInfo.error, paused: !!syncInfo.paused }, gameMode: HANDS_OK ? config.gameSidebar !== false : null,
     login: login.supported ? { on: login.on } : null,
     update: { available: update.available, installing: update.installing, checking: update.checking, result: update.result, page: update.page, done: update.done },
     intro: !!intro,
     // Hydra: asleep or awake, the sleep word, the clap wake's sensitivity, and the link to Hydra's data.
-    hydra: { detached: orbDetached(), asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), wake: phraseOn(),
+    hydra: { olderData: OLDER_DATA ? OLDER_DATA.replace(os.homedir(), '~') : null, detached: orbDetached(), asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), wake: phraseOn(),
       url: hydraLink.url, link: hydraLink.status(), tools: hydraLink.toolCount },
     // The latest error anyone saw, for Copy last error.
     problem: lastProblem ? { code: lastProblem.code, at: lastProblem.at } : null,
@@ -2623,9 +2627,6 @@ async function onMenu(id, via) {
   else if (id === 'actions') {
     config.allowActions = !config.allowActions; agents.setAllow(config.allowActions); saveConfig(); menu(); // live section picks this up
     say(config.allowActions ? 'File edits and commands are on. I promise to be careful.' : 'File edits and commands are off. Hands to myself!', config.allowActions ? 'determined' : 'happy');
-  } else if (id === 'skipallow') {
-    config.skipAllow = !config.skipAllow; saveConfig(); menu();
-    say(config.skipAllow ? "I'll go ahead without asking Allow first. Turn it off any time on the General page." : "I'll ask before risky steps again.", config.skipAllow ? 'determined' : 'happy');
   } else if (id === 'update') checkUpdates(true);
   else if (id === 'install_update') installUpdate();
   else if (id === 'login') setLogin(!login.on);
@@ -2958,6 +2959,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'auto_listen' && m.turn === 'wake') { if (!power.asleep && !busy) send({ type: 'listen', wait: 8 }); }
   // The web app's bridge (window.hydraDesktop.attach / detach), passed on by the shell from Hydra's own page only.
   else if (m.type === 'orb_set') setOrbMode(!!m.detached, m.from ?? 'web');
+  else if (m.type === 'voice_barge_available') { bargeUnavailable = false; if (panelOpen) panel(); }
   else if (m.type === 'voice_barge_unavailable') { bargeUnavailable = true; logLine('barge', { unavailable: true }); if (panelOpen) panel(); }
   else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); power.talked(); }
   else if (m.type === 'reply_said') { power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }

@@ -106,24 +106,23 @@ assert.match(importPaths({ home: '/Users/ken', platform: 'darwin' })['claude-des
 assert.equal(importPaths({ home: 'C:\\Users\\ken', platform: 'win32', env: { APPDATA: 'C:\\Users\\ken\\AppData\\Roaming' } })['claude-desktop'], path.join('C:\\Users\\ken\\AppData\\Roaming', 'Claude', 'claude_desktop_config.json'));
 console.log('mcp ok');
 
-// The chat's tools: adding always asks (even with Allow prompts skipped) and takes keys in masked asks; calls run
-// read-only tools straight away and ask for the rest, destructive ones even with Allow prompts skipped.
+// The chat's tools: adding asks and takes keys in masked asks; calls run read-only tools straight away and ask for
+// the rest, every time (there is no setting that skips asks); removing a connection asks too.
 {
   const { createMcpTools } = await import('../mcp.mjs');
   const { checkMcpCall, isYes } = await import('../safety.mjs');
   const asked = [];
   let answers = [];
   const ask = async (o) => { asked.push(o); return answers.shift() ?? null; };
-  let skip = true;
   const m = createMcp({ secrets, manager: fake, paths: { gg: ggFile, 'claude-desktop': claudeFile } });
   const opened = [];
-  const T = Object.fromEntries(createMcpTools({ mcp: m, ask, isYes, skipAllow: () => skip, openUrl: (u) => opened.push(u), userName: 'Ken', checkCall: checkMcpCall }).map((t) => [t.name, t]));
+  const T = Object.fromEntries(createMcpTools({ mcp: m, ask, isYes, openUrl: (u) => opened.push(u), userName: 'Ken', checkCall: checkMcpCall }).map((t) => [t.name, t]));
   assert.deepEqual(Object.keys(T), ['add_connection', 'remove_connection', 'connection_tools', 'use_connection']);
 
   // Said no: nothing is asked for, nothing saved.
   answers = [null];
   await assert.rejects(T.add_connection.execute({ name: 'notes2', command: 'npx', args: ['-y', '@acme/notes-mcp'], env_keys: ['NOTES_TOKEN'] }), /Ken said no/);
-  assert.equal(asked.length, 1, 'asked even with Allow prompts skipped');
+  assert.equal(asked.length, 1, 'asked');
   assert.match(asked[0].placeholder, /^Connect notes2\? Run npx -y @acme\/notes-mcp$/);
   assert.equal(m.has('notes2'), false);
 
@@ -172,12 +171,15 @@ console.log('mcp ok');
   assert.equal(asked.length, 0, 'read-only: no ask');
   answers = [null];
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'delete_note', args: '{}' }), /Ken said no/);
-  assert.equal(asked.length, 1, 'destructive: asked even with Allow prompts skipped');
+  assert.equal(asked.length, 1, 'destructive: asked');
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '[1]' }), /JSON object/);
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: 'nope' }), /JSON object/);
 
-  // Removing asks (skippable), then deletes.
-  skip = false; answers = ['yes'];
+  // Removing asks, then deletes; a no keeps it.
+  answers = [null];
+  await assert.rejects(T.remove_connection.execute({ name: 'notes3' }), /said no/);
+  assert.equal(m.has('notes3'), true, 'a no keeps the connection');
+  answers = ['yes'];
   assert.equal(await T.remove_connection.execute({ name: 'notes3' }), 'Removed notes3.');
   assert.equal(m.has('notes3'), false);
   console.log('mcp tools ok');

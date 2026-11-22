@@ -1,5 +1,5 @@
 // Review M5: forgetting a fact, dropping a commitment, removing a scheduled job and deleting a skill ask first, every
-// time (owner: every deletion is confirmed), even with "Skip Allow prompts" on. Run: npm test
+// time (owner: every deletion is confirmed). Run: npm test
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,7 +14,7 @@ const { createTools } = await import('../tools.mjs');
 const asked = [];
 let answer = null;
 const noop = async () => {};
-const { tools } = createTools({ allowActions: () => true, skipAllow: () => true, ui: () => {}, openUrl: noop, onCommitments: () => {}, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
+const { tools } = createTools({ allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: () => {}, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
   ask: async (o) => { asked.push(o); return answer; } });
 const tool = (n) => tools.find((t) => t.name === n);
 
@@ -37,6 +37,7 @@ assert.equal(asked.length, 0, 'ticking one off needs no yes');
 
 // The job and skill tools: the asks are in place before anything is removed.
 const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
-assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx, true\)\)/);
-assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?`, ctx, true\)/);
+assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx\)\)/);
+assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?`, ctx\)/);
+assert.match(src, /readSkill\(args\.name\) && !\(await confirm\(`Replace the skill/, 'saving over a skill asks (second review M8)');
 console.log('memory deletes ask: passed');

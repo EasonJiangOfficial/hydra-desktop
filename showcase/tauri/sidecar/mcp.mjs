@@ -192,10 +192,10 @@ async function defaultManager() {
 // bridge, stays the same whatever is connected. ask: the input bubble (the chat input); keys typed there go
 // straight to the secret store and never into the conversation.
 const clipText = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s);
-export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, skipAllow = () => false, openUrl = () => {}, userName = 'the user', keyStore = 'secret store', checkCall }) {
-  const confirm = async (question, ctx, always = false) => {
-    if (!always && skipAllow()) return true;
-    return isYes(await ask({ placeholder: question, choices: ['Allow', "Don't allow"] }, ctx?.signal));
+export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, openUrl = () => {}, userName = 'the user', keyStore = 'secret store', checkCall }) {
+  // Every ask asks the owner (there is no setting that skips it).
+  const confirm = async (question, ctx) => {
+    return isYes(await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal));
   };
   const askKey = async (label, server, ctx) => {
     const v = await ask({ prompt: `Paste the ${label} for ${server} (kept in your ${keyStore}, never in the chat)`, placeholder: label, mask: true }, ctx?.signal);

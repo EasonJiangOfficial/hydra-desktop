@@ -147,17 +147,17 @@ if (process.platform === 'darwin') {
   console.log('run_command shell tests: passed');
 }
 
-// install_skill always asks, even with Skip Allow prompts on, says where the skill comes from, and a no installs nothing.
+// install_skill always asks, says where the skill comes from, and a no installs nothing.
 {
   const asks = [];
   const fake = { slug: 'zz-test-skill', name: 'zz test skill', description: 'Only for this test', text: '---\nname: zz test skill\n---\nx', files: [], skipped: 0, from: 'github.com/o/r/zz' };
-  const { tools: t } = createTools({ allowActions: false, ui: () => {}, ask: async (q) => { asks.push(q); return null; }, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', skipAllow: () => true,
+  const { tools: t } = createTools({ allowActions: false, ui: () => {}, ask: async (q) => { asks.push(q); return null; }, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
     skills: { changed: () => {}, fetch: async (src, { pick }) => (pick ? { skills: [fake] } : { choices: ['zz', 'yy'], from: 'github.com/o/r' }) } });
   const install = t.find((x) => x.name === 'install_skill');
   assert.match(await install.execute({ source: 'o/r' }), /github\.com\/o\/r has 2 skills: zz, yy\. Ask Test which/, 'several: asks which, installs nothing');
   assert.equal(asks.length, 0);
   await assert.rejects(install.execute({ source: 'o/r', skill: 'zz' }, {}), /Test said no, so nothing was installed/);
-  assert.equal(asks.length, 1, 'asked, Skip Allow or not');
+  assert.equal(asks.length, 1, 'asked');
   assert.match(asks[0].placeholder, /Install the skill "zz test skill" from github\.com\/o\/r\/zz\? Only for this test/);
   assert.deepEqual(asks[0].choices, ['Install', "Don't install"]);
   console.log('install_skill asks tests: passed');

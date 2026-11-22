@@ -783,7 +783,7 @@
           el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: `Hey ${v.wakeName || 'Hydra'}` }), link('Change', () => act('wakename'), { k: 'wakename', aria: 'Change the key phrase' }))) : null,
         el('div', { className: 'setting' }, el('span', {}, 'Sleep word', info('Said while Hydra listens, it puts Hydra to sleep at once.')),
           el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: v.sleepWord ?? 'Hydra, sleep' }), link('Change', () => act('sleepword', true), { k: 'sleepword', aria: 'Change the sleep word' }))),
-        v.mac ? toggle('Interrupt by talking', v.bargeNA ? 'Off on this Mac for now: it has no echo cancellation, so Hydra could hear its own voice and stop itself.' : needs('Talk while Hydra speaks to stop it and say something new. A double clap does it too. Uses the Mac\'s echo cancellation.'), v.barge, () => act('barge'), 'barge') : null),
+        v.mac ? toggle('Interrupt by talking', v.bargeNA ? 'Off for now: this mic has no echo cancellation, so Hydra could hear its own voice and stop itself. It tries again with another mic.' : needs('Talk while Hydra speaks to stop it and say something new. A double clap does it too. Uses the Mac\'s echo cancellation.'), v.barge, () => act('barge'), 'barge') : null),
       group('After replies', 'When the mic opens without a key.', null,
         toggle('Auto-listen', needs(v.listenEvery ? 'Mic opens after every spoken reply.' : 'Mic opens when I ask you something.'), v.autoListen, () => act('autolisten'), 'autolisten'),
         v.autoListen && v.listenChoices ? el('div', { className: 'reveal', 'data-anim': 'listen-more' },
@@ -879,7 +879,6 @@
             { off: 'Everything beside your cursor, as usual.', spread: 'Everything in the notch, widening sideways.', drop: state.notchReal ? 'Everything in a capsule that drops from the notch.' : 'Everything in a capsule at the top of the screen.' })) : null,
         state.gameMode != null ? toggle('Game mode', 'In a fullscreen game, I move to a panel at the edge of the screen.', state.gameMode, () => act('gamemode'), 'gamemode') : null,
         toggle('Allow file edits and commands', 'Change files and run commands', state.actions, () => act('actions'), 'actions'),
-        state.actions ? toggle('Skip Allow prompts', 'Go ahead without asking first. Blocked steps stay blocked.', state.skipAllow, () => act('skipallow'), 'skipallow') : null,
         state.learnSkills != null ? toggle('Learn skills', 'After a long task that worked, I keep the how-to for next time.', state.learnSkills, () => act('learnskills'), 'learnskills') : null,
         state.login ? toggle('Open at login', null, state.login.on, () => act('login'), 'login') : null,
         state.sync ? el('div', { className: 'setting' },
@@ -906,6 +905,9 @@
         el('p', { className: 'sub', textContent: 'Clap sensitivity' }),
         picks('Clap sensitivity', CLAP, clap, (x) => act(`clapsens:${x}`), 'clapsens', { '0.2': 'Only loud claps close by.', '0.5': 'Claps from across a desk.', '0.8': 'Softer claps from across the room.' })),
       group("Hydra's data", 'The Hydra agent API. Pairing comes with it.', null,
+        h.olderData ? el('div', { className: 'setting' },
+          el('span', {}, 'Older data', info(`Hydra now keeps its data in ~/HydraAgent. ${h.olderData} is still there with older data; nothing in it was changed or removed.`)),
+          el('span', { className: 'val', textContent: h.olderData })) : null,
         el('div', { className: 'setting' },
           el('span', {}, 'Address', info(h.url || 'Not set')),
           el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: h.url ? h.url.replace(/^https:\/\//, '') : 'Not set' }), link(h.url ? 'Change' : 'Add', () => act('hydra_url', true), { k: 'hydra_url', aria: 'Set the Hydra address' }))),
@@ -1165,7 +1167,7 @@
       name: 'Hydra', look: 'hydra', looks: [['hydra', 'Hydra']], size: 'default', sizes: [['small', 'Small'], ['default', 'Medium'], ['large', 'Large']],
       // ?fish: a Fish Audio key is saved (else Hydra speaks in the Mac's voice). ?asleep: the agent is asleep.
       replies: 'voice', fishKey: q.has('fish'), fishModel: 'drama-3', fishFree: false,
-      hydra: { detached: q.has('detached'), asleep: q.has('asleep'), sleepWord: 'Hydra, sleep', clap: 0.5, wake: true, url: q.has('paired') ? 'https://hydra-olive-one.vercel.app' : '', link: q.has('paired') ? 'ready' : 'off', tools: 0 },
+      hydra: { olderData: q.has('older') ? '~/Roamies' : null, detached: q.has('detached'), asleep: q.has('asleep'), sleepWord: 'Hydra, sleep', clap: 0.5, wake: true, url: q.has('paired') ? 'https://hydra-olive-one.vercel.app' : '', link: q.has('paired') ? 'ready' : 'off', tools: 0 },
       // ?tts=gemini: Gemini as the voice, its key saved.
       tts: new URLSearchParams(location.search).get('tts') === 'gemini' ? 'gemini' : 'fish', geminiKey: new URLSearchParams(location.search).get('tts') === 'gemini', geminiVoice: 'Kore',
       geminiVoices: [['Zephyr', 'Bright'], ['Puck', 'Upbeat'], ['Charon', 'Informative'], ['Kore', 'Firm']].map(([id, style]) => ({ id, style })),
@@ -1190,7 +1192,7 @@
       // Effort per slot: '' is automatic (low); computer use is set to High, and backup 1 (Gemini, which only thinks at High) too.
       efforts: { default: '', computer: 'high', code: '', agents: '', draw: '', web: '', backup1: 'high', backup2: '' },
       voice: { on: true, keys: '⌃⌥', ready: true, mac: true, lang: 'auto', langOnline: null, studioSpeak: 'short', mute: true, autoListen: q.has('listen'), listenEvery: false, listenSecs: 8, listenChoices: [3, 5, 8, 10, 15], mics: [{ id: 'BuiltIn', name: 'MacBook Pro Microphone' }, { id: 'airpods', name: 'AirPods Pro' }], mic: '', micAuto: 'MacBook Pro Microphone', wake: !q.has('nowake'), wakeWord: true, wakeName: 'Hydra', clapTalk: true, barge: !q.has('nobarge'), bargeNA: q.has('nobarge'), sleepWord: 'Hydra, sleep', download: null }, askKeys: '⌥⌘', brief: { on: true, todoist: false, canTodoist: true }, focus: { until: null, task: '', list: ['YouTube', 'Reddit', 'X', 'Steam', 'Netflix'], custom: false }, sync: { dir: '', at: null, error: null, paused: false }, shortcuts: { talk: { value: 'control+option', pairs: [['control+option', 'Control+Option'], ['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] }, keys: [{ id: 'summon', words: 'Control+Option+S' }, { id: 'snap', words: 'Control+Option+A' }, { id: 'list', words: 'Control+Option+L' }] }, writeKeys: { value: 'option+command', pairs: [['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] },
-      sound: true, notch: q.has('notch') || q.has('capsule') ? 'drop' : null, notchReal: q.has('notch'), actions: false, skipAllow: false, login: { on: true },
+      sound: true, notch: q.has('notch') || q.has('capsule') ? 'drop' : null, notchReal: q.has('notch'), actions: false, login: { on: true },
       update: { available: new URLSearchParams(location.search).has('update') && new URLSearchParams(location.search).get('update') !== 'failed' ? '0.9.1' : null, installing: false, checking: false, result: null },
       intro: false,
     };

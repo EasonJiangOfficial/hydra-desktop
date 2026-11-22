@@ -508,7 +508,8 @@ console.log('safety loophole tests: passed');
   assert.equal(checkWrite('/Users/k/Roamies/skills/x/notes.md', H).level, BLOCK, 'any case');
   assert.equal(checkWrite('~/Roamies/Agents/a/files/x.md', H).level, SAFE, 'agents still save their work');
   assert.equal(classifyCommand('echo hi > ~/Roamies/Skills/x/SKILL.md', H, { exists: () => false }).level, BLOCK);
-  assert.equal(classifyCommand('cp a.md ~/Roamies/Skills/x/SKILL.md', H, { exists: () => false }).level, ASK, 'a copy asks first');
+  assert.equal(classifyCommand('cp a.md ~/Roamies/Skills/x/SKILL.md', H, { exists: () => false }).level, BLOCK, 'a copy into a protected place is blocked too (second review)');
+  assert.equal(classifyCommand('cp a.md ~/HydraAgent/Skills/x/SKILL.md', H, { exists: () => false }).level, BLOCK);
   assert.equal(classifyCommand('cat ~/Roamies/Skills/pdf/SKILL.md', H, { exists: () => false }).level, SAFE, 'reading one is fine');
   console.log('safety (skills folder) tests: passed');
 }

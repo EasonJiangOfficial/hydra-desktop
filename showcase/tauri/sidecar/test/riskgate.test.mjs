@@ -1,4 +1,4 @@
-// Security review F1/F2: "Skip Allow prompts" never answers delete, kill, quit, send, pay, overwrite or move-to-Trash
+// Security reviews: every ask asks the owner (the "Skip Allow prompts" setting is gone); delete, kill, quit, send, pay, overwrite and move-to-Trash
 // steps (owner: every deletion of anything is confirmed, no exceptions), and risky clicks by position, risky key chords
 // and Return on a risky default button ask too. Run: npm test
 import assert from 'node:assert/strict';
@@ -15,7 +15,7 @@ const ALWAYS = ['rm ~/Desktop/a.txt', 'mv ~/Desktop/a.txt ~/.Trash/', 'pkill -9 
 for (const c of ALWAYS) {
   const v = classifyCommand(c, HOME, { exists: () => false });
   assert.equal(v.level, 'ask', `${c} asks`);
-  assert.equal(v.always, true, `${c} always asks, even with Skip Allow prompts on`);
+  assert.equal(v.always, true, `${c} always asks`);
 }
 // Review B1: every way round the first program, all of which used to come back skippable.
 const BYPASS = [`bash -lc "rm a"`, `zsh -ic "rm a"`, `( rm a )`, `{ rm a; }`, `if true; then rm a; fi`, `for f in a b; do rm $f; done`, `! rm a`,
@@ -27,17 +27,28 @@ const BYPASS = [`bash -lc "rm a"`, `zsh -ic "rm a"`, `( rm a )`, `{ rm a; }`, `i
 for (const c of BYPASS) {
   const v = classifyCommand(c, HOME, { exists: () => false });
   assert.equal(v.level, 'ask', `${c} asks`);
-  assert.equal(v.always, true, `${c} always asks, even with Skip Allow prompts on`);
+  assert.equal(v.always, true, `${c} always asks`);
 }
-// Only a few plain commands that make something new stay skippable.
-for (const c of ['touch brand-new-riskgate-file.txt', 'cp a.txt riskgate-new-copy.txt', 'npm install']) assert.ok(!classifyCommand(c, HOME, { exists: () => false }).always, `${c} is not always`);
-console.log(`skip allow bypass list: ${BYPASS.length} commands, every one always asks`);
+// Second review: the commands the old allowlist let through, and copies into protected places. Every one asks (or is
+// blocked); nothing is skippable any more.
+const P2 = ['git switch --discard-changes main', 'git switch -C main', 'git checkout -B main', 'git checkout -b x --force', 'git checkout -- .', 'git checkout file.txt', 'git checkout .',
+  'git stash push', 'git stash push -u', 'git pull', 'git pull origin +main:main', 'git fetch origin +main:main', 'git fetch --prune', 'git fetch -p',
+  'git clone --upload-pack=python3 /tmp/x y', 'git clone -u python3 /tmp/x y', 'git fetch --upload-pack=python3 /tmp/x', 'git clone -c core.fsmonitor=/tmp/evil.sh /tmp/r y', 'git commit --amend', 'git commit -c core.x',
+  'git tag v1', 'git tag -a v1', 'git add -A', 'git init', 'npm run clean', 'npm test', 'npm install', 'npm i -g evilpkg', 'npm init evilpkg', 'npm ci', 'pnpm run nuke', 'pnpm add x', 'yarn run x', 'yarn add x', 'pnpm test',
+  'cargo build', 'cargo run', 'cargo test', 'brew install x', 'pip install .', 'pip install evil', 'pip3 install -e .', 'touch exists.txt', 'touch newfile',
+  'cp a proj/exists.txt', 'cp a proj', 'cp -r src newdir', 'ditto a b', 'cp -f a newname', 'cp -n a newname', 'cp -R ~/Documents /tmp/exfil', 'cp /dev/urandom big.bin'];
+for (const c of P2) { const v = classifyCommand(c, HOME, { cwd: HOME, exists: () => false }); assert.ok(v.level === 'block' || (v.level === 'ask' && v.always), `${c}: ${v.level}`); }
+const PROTECTED = ['mkdir -p ~/Library/LaunchAgents/x', 'mkdir ~/HydraAgent/Skills/x', 'cp evil.plist ~/Library/LaunchAgents/com.x.plist', 'cp x ~/.zshenv',
+  'cp x ~/HydraAgent/Skills/new/SKILL.md', 'cp x ~/Applications/Foo.app/Contents/MacOS/foo', 'cp x ~/.ssh/authorized_keys', 'ditto x ~/Library/LaunchAgents/a.plist',
+  'git clone https://example.com/r ~/Library/LaunchAgents/r', 'tee ~/.zshrc', 'mv x ~/.bash_profile', 'ln -s /tmp/x ~/Library/LaunchAgents/x.plist', 'curl -o ~/.zshrc https://x.y/z'];
+for (const c of PROTECTED) assert.equal(classifyCommand(c, HOME, { cwd: HOME, exists: () => false }).level, 'block', `${c} is blocked`);
+console.log(`second review commands: ${P2.length} ask, ${PROTECTED.length} protected destinations blocked`);
 console.log('always-ask command tests: passed');
 
 const noop = async () => {};
 const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' };
 
-// run_command and write_file with Skip Allow prompts on: these still ask, and a no keeps them from running.
+// run_command and write_file: these ask (a tool set made with the old skipAllow option too), and a no keeps them from running.
 {
   // Under /tmp (or home): write_file only writes there.
   const workdir = fs.mkdtempSync(path.join(process.platform === 'win32' ? os.homedir() : '/tmp', 'riskgate-'));
@@ -57,11 +68,11 @@ const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitme
   await assert.rejects(write.execute({ path: f, content: 'new' }, undefined), /said no/, 'overwrite asks with skip on');
   assert.equal(fs.readFileSync(f, 'utf8'), 'old', 'and the file is untouched');
   assert.equal(asked.length, 1);
-  // A new file needs no yes; a plain ask (touch) is still skipped.
+  // A new file needs no yes (write_file makes it); a shell command that changes anything asks.
   asked.length = 0;
   await write.execute({ path: path.join(workdir, 'new.txt'), content: 'hi' }, undefined);
-  if (process.platform !== 'win32') await run.execute({ command: 'touch made.txt' }, undefined);
-  assert.equal(asked.length, 0, 'ordinary steps still skip the Allow question');
+  assert.equal(asked.length, 0, 'a new file needs no yes');
+  if (process.platform !== 'win32') await assert.rejects(run.execute({ command: 'touch made.txt' }, undefined), /said no/, 'touch asks too');
   fs.rmSync(workdir, { recursive: true, force: true });
   console.log('skip allow never answers deletes, kills, quits or overwrites: passed');
 }
@@ -69,7 +80,8 @@ const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitme
 // Agent jobs: the parent auto-answers a yes/no only when it isn't `always`.
 {
   const src = fs.readFileSync(new URL('../agents.mjs', import.meta.url), 'utf8');
-  assert.match(src, /m\.t === 'ask' && !m\.always && config\.skipAllow/, 'agent jobs pass always through');
+  assert.ok(!/skipAllow/.test(src), 'agent jobs never auto-answer');
+  assert.match(src, /if \(allow && by !== 'owner' && a\.ask\.always\) return 'owner';/, 'answer_agent can say no, never yes, for the owner');
 }
 
 // Labels and chords.
@@ -79,6 +91,17 @@ for (const l of ['Save', 'Keep Both', 'Cancel', 'OK', 'Close']) assert.ok(!isRis
 for (const k of ['cmd+q', 'Command+Q', 'cmd+delete', 'cmd+backspace', 'cmd+opt+delete', 'cmd+option+delete', 'cmd+shift+delete',
   'cmd+back', 'cmd+opt+back', 'command+del', 'cmd+shift+q', 'cmd+opt+shift+q', 'ctrl+cmd+q', 'cmd+return', 'cmd+enter', 'cmd+shift+d']) assert.ok(riskyKey(k), `${k} needs a yes`);
 for (const k of ['cmd+s', 'cmd+w', 'delete', 'return', 'cmd+z', 'shift+return']) assert.equal(riskyKey(k), null, `${k} is a normal key`);
+// Second review B1: any order, read the way pressKey reads it (k.mjs).
+const perms = (a) => (a.length <= 1 ? [a] : a.flatMap((x, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map((p) => [x, ...p])));
+for (const chord of [['cmd', 'q'], ['cmd', 'shift', 'q'], ['cmd', 'opt', 'shift', 'q'], ['cmd', 'delete'], ['cmd', 'opt', 'delete'], ['cmd', 'shift', 'delete'], ['cmd', 'opt', 'shift', 'delete'],
+  ['cmd', 'return'], ['cmd', 'enter'], ['cmd', 'shift', 'd'], ['cmd', 'backspace'], ['cmd', 'back'], ['ctrl', 'cmd', 'q']])
+  for (const p of perms(chord)) assert.ok(riskyKey(p.join('+')), `${p.join('+')} needs a yes`);
+for (const k of ['CMD+Q', 'cmd+ q', 'Command + Q', 'cmd+del']) assert.ok(riskyKey(k), `${k} needs a yes`);
+for (const k of ['meta+q', 'super+q', 'cmdorctrl+q', 'cmd+a+q']) assert.equal(riskyKey(k), null, `${k}: the helper presses nothing (not one key it knows)`);
+// Second review M10 (m2.mjs): names that write ask whatever readOnlyHint says.
+for (const n of ['update_file', 'execute_sql', 'run_query', 'archive_thread', 'apply_migration', 'create_payment', 'merge_branch', 'deploy_website', 'move_project_asset', 'batch',
+  'sandbox_exec', 'set_variables', 'share_file', 'label_thread', 'gpu_rent', 'buy_domain', 'write_db', 'api_request', 'invoke', 'apps_invoke', 'query'])
+  assert.equal(checkMcpCall({ name: n, annotations: { readOnlyHint: true } }).level, 'ask', `${n} asks even marked read-only`);
 // Review M4: connected apps' tools that change, send or delete ask every time.
 for (const name of ['trash_message', 'trash_file', 'create_payment', 'execute_sql', 'apply_migration', 'reset_branch', 'merge_branch', 'update_doc'])
   assert.equal(checkMcpCall({ name }).always, true, `${name} always asks`);

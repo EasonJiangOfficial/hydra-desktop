@@ -249,7 +249,7 @@ export function oneYesNoAtATime(ask) {
   };
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null }) {
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null }) {
   // Relative paths (and run_command) start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   const where = workdir === HOME ? "the user's home folder" : `its working folder (${workdir})`;
@@ -321,12 +321,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     return `${head}\n${controlList(res.controls, res.texts)}${res.elsewhere?.length ? `\nElsewhere on the page (scrolled out of view): ${res.elsewhere.join(' | ')}` : ''}`;
   }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
-  // Only the yes/no is skipped (skipAllow: the user turned "Skip Allow prompts" on). BLOCK verdicts never reach here.
-  // always: delete, kill, quit, send, pay, overwrite, move to the Trash and risky clicks. Owner's rule: these always ask,
-  // so "Skip Allow prompts" never answers them.
-  async function confirm(question, ctx, always = false) {
-    if (!always && skipAllow()) return true;
-    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], ...(always ? { always: true } : {}) }, ctx?.signal);
+  // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ask asks the
+  // owner, every time; nothing skips it (the old "Skip Allow prompts" setting is gone). BLOCK verdicts never reach here.
+  // `always` tells an agent job's parent that only the owner may answer (answer_agent can't say yes for them).
+  async function confirm(question, ctx) {
+    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal);
     return isYes(answer);
   }
 
@@ -837,14 +836,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             // label: the helper checks what it really clicks against it and asks again if it differs.
             if (label && isRiskyClick(label)) {
               const where = appName === 'front' ? '' : ` in ${appName}`;
-              if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send, quit or sign out.`, ctx, true))) {
+              if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send, quit or sign out.`, ctx))) {
                 throw new Error(`${userName} said no, so I didn't click "${label}" (nothing after it ran either).`);
               }
               s.confirmed = true; s.confirmedLabel = label;
             }
             const keyDoes = s.do === 'key' ? riskyKey(s.key) : null;
             if (keyDoes) {
-              if (!(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It ${keyDoes}.`, ctx, true))) throw new Error(`${userName} said no, so I didn't press ${s.key} (nothing after it ran either).`);
+              if (!(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It ${keyDoes}.`, ctx))) throw new Error(`${userName} said no, so I didn't press ${s.key} (nothing after it ran either).`);
               s.confirmed = true; s.confirmedLabel = s.key;
             }
             delete s.label;
@@ -856,7 +855,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             let r = await hands('act', JSON.stringify(plan)), before = [];
             while (r.needsConfirm && Number.isInteger(r.step) && r.step >= 0 && r.step < plan.steps.length) {
               before = [...before, ...(r.done ?? [])];
-              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx, true))) {
+              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx))) {
                 throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
               }
               plan.steps = [{ ...plan.steps[r.step], confirmed: true, confirmedLabel: r.label ?? '' }, ...plan.steps.slice(r.step + 1)];
@@ -893,7 +892,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       },
     ] : []),
     // Hydra: manage apps and windows on the Mac (quit, close, minimise, switch, arrange). Destructive steps always ask,
-    // even with "Skip Allow prompts" on: quitting an app with unsaved work, closing an unsaved window, force quitting.
+    // every time: quitting an app with unsaved work, closing an unsaved window, force quitting.
     ...(process.platform === 'darwin' && HANDS ? [{
       name: 'manage_app',
       description: "Manage apps and windows on the Mac. do: 'switch' (bring an app to the front), 'hide', 'quit' (a normal quit), 'force_quit' (only when an app is frozen), 'close' (close a window), 'minimize', 'arrange' (layout: left, right, top, bottom, full, center). app: the app's name; window: an id from list_windows for one particular window (default: the app's front window, or the frontmost app when neither is given). To open an app, a file, a folder or a site, use open.",
@@ -986,7 +985,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const exists = await fs.stat(expand(p)).then(() => true, () => false);
         const v = checkWrite(p, HOME, { exists, own });
         const f = allowed(v);
-        if (v.level === ASK && !(await confirm(v.reason, ctx, !!v.always))) throw new Error(`${userName} said no, so I didn't write ${p}.`);
+        if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't write ${p}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
         await fs.writeFile(f, content);
         return `Wrote ${content.length} characters to ${f}.`;
@@ -999,7 +998,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (!allowActions()) throw new Error(actionsOff);
         const v = classifyCommand(command, HOME, { exists: existsSync, cwd: workdir, own });
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason} Don't try to get around this; tell ${userName} what you wanted to do instead.`);
-        if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''}`, ctx, !!v.always))) {
+        if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''}`, ctx))) {
           throw new Error(`${userName} said no, so the command didn't run.`);
         }
         const [sh, shArgs, shOpts] = shellFor(command);
@@ -1067,7 +1066,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (status === 'dropped') {
           const old = getCommitment(id);
           if (!old) throw new Error(`No commitment with id ${id}. Call list_commitments to see the ids.`);
-          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?`, ctx, true))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
+          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?`, ctx))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
         }
         const ms = due === undefined ? undefined : due === 'none' ? null : parseDue(due);
         if (ms === undefined && due !== undefined) throw new Error(`Couldn't read the time "${due}".`);
@@ -1086,7 +1085,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async ({ id }, ctx) => {
         const had = listFacts().find((x) => x.id === id);
         if (!had) throw new Error(`No fact with id ${id}.`);
-        if (!(await confirm(`Forget "${had.text}"?`, ctx, true))) throw new Error(`${userName} said no, so I still remember it.`);
+        if (!(await confirm(`Forget "${had.text}"?`, ctx))) throw new Error(`${userName} said no, so I still remember it.`);
         const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`;
       },
     },
@@ -1146,7 +1145,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       parameters: z.object({ id: z.string().max(12), action: z.enum(['pause', 'resume', 'run_now', 'remove']).optional(), due: z.string().max(40).optional(), repeat: z.string().max(60).optional() }),
       execute: async ({ id, action, due, repeat }, ctx) => {
         if (!getJob(id)) throw new Error(`No scheduled job with id ${id}. Call list_jobs to see the ids.`);
-        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?`, ctx, true))) throw new Error(`${userName} said no, so the job stays.`);
+        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?`, ctx))) throw new Error(`${userName} said no, so the job stays.`);
         if (action === 'remove') { const j = await removeJob(id); jobs.changed(null); return `Removed the job "${j.title}".`; }
         if (action === 'run_now') { const a = await jobs.run(id); return `Started ${a.id} for "${getJob(id).title}"; it reports back when it's done. The schedule is unchanged.`; }
         const j = await updateJob(id, { ...(action ? { paused: action === 'pause' } : {}), ...(due !== undefined ? { due } : {}), ...(repeat !== undefined ? { repeat } : {}) });
@@ -1189,7 +1188,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const question = list.length === 1
           ? `Install the skill "${list[0].name}" from ${list[0].from}? ${cut(list[0].description, 140)}${replacing.length ? ' It replaces the one you have.' : ''}`
           : `Install ${list.length} skills from ${list[0].from.split('/').slice(0, 3).join('/')}: ${cut(list.map((k) => k.name).join(', '), 160)}?${replacing.length ? ` It replaces ${replacing.join(', ')}.` : ''}`;
-        // Always asked, Skip Allow or not: a skill is instructions the agent will follow later.
+        // Always asked: a skill is instructions the agent will follow later.
         if (!isYes(await ask({ placeholder: question, choices: ['Install', "Don't install"] }, ctx?.signal))) throw new Error(`${userName} said no, so nothing was installed.`);
         const done = [];
         for (const k of list) {
@@ -1203,7 +1202,9 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       name: 'save_skill',
       description: `Save how to do something as a skill: when ${userName} says "remember how to do this" or "save that as a skill", or a skill you used had a wrong or missing step (save it again under the same name). name: 2 to 5 words (the same name replaces it). description: one line on when to use it. steps: short numbered steps that worked, with exact app, menu, site or command names; no passwords, keys or personal details.`,
       parameters: z.object({ name: z.string().min(1).max(60), description: z.string().min(1).max(200), steps: z.string().min(1).max(6000) }),
-      execute: async (args) => {
+      execute: async (args, ctx) => {
+        // Saving under a name that's taken replaces that skill: it asks first, like overwriting a file.
+        if (readSkill(args.name) && !(await confirm(`Replace the skill "${args.name}" with new steps?`, ctx))) throw new Error(`${userName} said no, so the skill stays as it was.`);
         const s = await saveSkill(args);
         skills.changed?.(s);
         return `${s.created ? 'Learned' : 'Updated'} the skill ${s.slug}. It shows on the Abilities page's Skills tab.`;
@@ -1213,7 +1214,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       parameters: z.object({ name: z.string().min(1).max(60) }),
       execute: async ({ name }, ctx) => {
         if (!readSkill(name)) throw new Error(`No skill called "${name}".`);
-        if (!(await confirm(`Delete the skill "${name}"?`, ctx, true))) throw new Error(`${userName} said no, so the skill stays.`);
+        if (!(await confirm(`Delete the skill "${name}"?`, ctx))) throw new Error(`${userName} said no, so the skill stays.`);
         const s = await deleteSkill(name); if (!s) throw new Error(`No skill called "${name}".`); skills.changed?.(null); return `Removed the skill ${s.slug}.`;
       },
     }] : []),
