@@ -104,6 +104,12 @@ onRestore('skill', async ({ id, data }) => {
   const from = path.join(binFolder(id), data.slug), to = path.join(SKILLS_DIR, data.slug);
   if (!existsSync(from)) throw new Error('Its folder is gone, so it can\'t be put back.');
   if (existsSync(to)) throw new Error(`There's a skill called ${data.slug} now. Remove or rename it first.`);
+  // Screened again, every file: the rules may be stricter now than when it was saved (V9-11).
+  const files = (await fs.readdir(from, { recursive: true, withFileTypes: true })).filter((e) => e.isFile());
+  for (const e of files) {
+    const v = checkSkill(await fs.readFile(path.join(e.parentPath ?? e.path, e.name), 'utf8'));
+    if (v.level === BLOCK) throw new Error(`It can't come back: ${v.reason.replace(/^That skill can't be saved: /, '')}`);
+  }
   await fs.mkdir(SKILLS_DIR, { recursive: true });
   await fs.rename(from, to).catch(async () => { await fs.cp(from, to, { recursive: true }); });
   return `Put back the skill ${data.slug}.`;

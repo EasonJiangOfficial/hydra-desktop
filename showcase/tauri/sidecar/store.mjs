@@ -579,7 +579,7 @@ export const onPurge = (kind, fn) => purgers.set(kind, fn);
 /** Keeps something deleted so it can be put back. title: what the owner sees; data: all it takes to restore it. */
 export async function toBin(kind, title, data, { files = null } = {}) {
   const b = loadBin(), id = `d${randomBytes(4).toString('hex')}`;
-  b.items.unshift({ id, kind, title: String(title ?? '').slice(0, 300), at: Date.now(), data, ...(files ? { files } : {}) });
+  b.items.unshift({ id, kind, title: String(title ?? ''), at: Date.now(), data, ...(files ? { files } : {}) });
   await pruneBin();
   await saveBin();
   return id;

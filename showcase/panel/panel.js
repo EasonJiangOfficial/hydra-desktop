@@ -424,7 +424,7 @@
   // kept 30 days, each with Put back.
   function binList() {
     const d = state.deleted ?? [];
-    const { box, nav } = paged('bin', d, (x) => el('li', { className: 'item mem' },
+    const { box, nav } = paged('bin', d, (x) => el('li', { className: 'item mem bin' },
       el('span', { className: 'text', dir: 'auto', title: x.title }, x.title, el('small', { textContent: `${x.kind} · ${x.when}` })),
       el('span', { className: 'row-btns' }, link('Put back', () => act(`bin:restore:${x.id}`, true), { k: `bin:restore:${x.id}`, aria: `Put back: ${x.title}` }))),
     { label: 'Recently deleted', empty: 'Nothing deleted in the last 30 days.' });

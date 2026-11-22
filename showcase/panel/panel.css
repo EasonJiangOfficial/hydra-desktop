@@ -224,6 +224,8 @@ html, body { height: 100%; background: transparent; }
 /* Memory and commitment rows: no marker, just the text and its tick (done) and X (forget, drop). Pressed, a tick or
    X becomes Confirm in place and the row's other one folds away; both ease in and out. */
 .item.mem { grid-template-columns: minmax(0, 1fr) auto; }
+/* Recently deleted: the whole title (a long file path too) wraps, never cut (D4). */
+.item.bin .text { white-space: normal; overflow-wrap: anywhere; }
 .row-btns.icons { gap: 0; }
 .ibtn {
   display: inline-flex; align-items: center; padding: 4px; margin-inline-start: 6px; max-width: 8em; overflow: hidden;

@@ -44,6 +44,9 @@ const PRIVATE = [
   /(^|\/)Pictures\/Photos Library\.photoslibrary(\/|$)/, /(^|\/)Music\/(Music|iTunes)(\/|$)/,
   /(^|\/)AppData\/Local\/Packages(\/|$)/i,
 ];
+// Hydra's own data: memory, chats, settings, connections and Recently deleted (old copies of files the owner said yes
+// to overwrite, hidden ones too). Never read by the tools (ninth review V9-4); only its logs are.
+const OWN_DATA = [/(^|\/)(Roamies|HydraAgent)\/Data(\/(?!logs(\/|$))|$)/i];
 // Writing here could let something run on its own later, or break the Mac.
 const NO_WRITE = [
   // A repo's hooks, config and attributes (its own, a worktree's or a submodule's) run programs on the next git command.
@@ -63,7 +66,7 @@ const NO_WRITE = [
 // ~/Library/LaunchAgents, even before the folder exists. So each rule also matches without case, but only from the
 // home folder down (anchored at ~): a project's own src/cookies or library/mail is not the Mac's.
 const homeCase = (list) => list.map((re) => new RegExp(`^(?:${re.source})`, re.flags.replace('i', '') + 'i'));
-const CI = new Map([[SECRET, homeCase(SECRET)], [PRIVATE, homeCase(PRIVATE)], [NO_WRITE, homeCase(NO_WRITE)]]);
+const CI = new Map([[SECRET, homeCase(SECRET)], [PRIVATE, homeCase(PRIVATE)], [NO_WRITE, homeCase(NO_WRITE)], [OWN_DATA, homeCase(OWN_DATA)]]);
 // Case folded the way APFS folds it (ſ is s, the Kelvin sign is k). Only ever compared one path part at a time, so a
 // letter whose lower case is longer (İ) can't shift where the home folder ends.
 const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase();
@@ -124,6 +127,9 @@ const both = (a, b) => (samePath(a, b) ? [a] : [a, b]);
 const pathsOf = (p, home) => { const abs = undata(norm(p, home)), real = canonical(abs); return { abs, real, all: both(abs, real) }; };
 const homesOf = (home) => both(slash(home), canonical(slash(home)));
 const hits = (list, all, homes) => all.some((a) => homes.some((h) => ruleHit(list, a, h)));
+// macOS names any file again at the root: /.resolve/<n>/…, /.nofollow/… and /.vol/<dev>/<inode>. Such a path hides
+// where it leads from every rule above, so a path whose first part starts with "." is never read or written (V9-1, V9-10).
+const rootDot = (all) => all.some((a) => /^\/\.[^/]/.test(a));
 
 // Buttons that delete, pay, send or sign out: Sidekick needs the user's yes before clicking one,
 // even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift.
@@ -174,8 +180,25 @@ export function riskyKey(combo) {
   if (key === 'delete' || key === 'forwarddelete') return mods.has('shift') ? 'empties the Trash' : mods.has('opt') ? 'deletes at once' : 'moves to the Trash';
   if (key === 'return') return 'can send a message or form';
   if (key === 'd' && mods.has('shift')) return 'can send (Mail)';
+  // Spotlight starts any app, file or command named in it, outside every app check (V9-7).
+  if (key === 'space') return 'opens Spotlight, which can start any app or file';
   return null;
 }
+const SHIFTED = { 1: '!', 2: '@', 3: '#', 4: '$', 5: '%', 6: '^', 7: '&', 8: '*', 9: '(', 0: ')', '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~' };
+/** The text a key step types, as pressKey would press it: a character, ' ' for space, '\n' for return or tab, '\b'
+ *  for delete (backspace), '' for other keys and for any chord with cmd, ctrl or opt (V9-6: typing key by key). */
+export function keyChar(combo) {
+  const p = parseKey(combo);
+  if (!p || p.mods.has('cmd') || p.mods.has('ctrl') || p.mods.has('opt')) return '';
+  const { key } = p, shift = p.mods.has('shift');
+  if (key === 'space') return ' ';
+  if (key === 'return' || key === 'tab') return '\n';
+  if (key === 'delete') return '\b';
+  if (key.length !== 1) return '';
+  return shift ? SHIFTED[key] ?? key.toUpperCase() : key;
+}
+/** cmd+v (any order, with shift or opt too): pastes the clipboard. */
+export const isPasteKey = (combo) => { const p = parseKey(combo); return !!p && p.key === 'v' && p.mods.has('cmd'); };
 
 /** Tool arguments as they go in the activity log: anything typed into fields or files becomes its length. */
 export function redactArgs(name, args = {}) {
@@ -194,7 +217,9 @@ export function redactArgs(name, args = {}) {
 /** read_file / list_files / search_files. Returns { level, reason, path }: path is where it really leads. */
 export function checkRead(p, home, { recursive = false } = {}) {
   const { real, all } = pathsOf(p, home), homes = homesOf(home);
+  if (rootDot(all)) return { ...verdict(BLOCK, `${p} names a file by a hidden name at the top of the disk, so I don't read it. Use its usual path.`), path: real };
   if (hits(SECRET, all, homes)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: real };
+  if (hits(OWN_DATA, all, homes)) return { ...verdict(BLOCK, `${p} is Hydra's own data (memory, chats, settings and Recently deleted), so I don't read it with tools.`), path: real };
   if (hits(PRIVATE, all, homes)) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: real };
   // The whole home folder, a folder above it (/Users, /) or all of Library: never searched or listed down through.
   // Anything in Library or AppData is searched never (other apps' data and tokens, seventh review F11).
@@ -217,7 +242,9 @@ export function checkRead(p, home, { recursive = false } = {}) {
 // Also files an app or tool runs on its own when it starts or opens a folder (seventh review F9): MATLAB's startup.m,
 // package.json scripts, editor workspaces with tasks, mise's config.
 // Eighth review V8-9: mise's local and per-env configs (their [hooks] run on cd), Makefiles and Justfiles.
-const LOADED = /\.(pth|plist|code-workspace|sublime-project)$|^(package\.json|startup\.m|finish\.m|\.?mise(\.[^/]+)?\.toml|deno\.jsonc?|bunfig\.toml|makefile|gnumakefile|justfile|\.envrc)$/i;
+// Ninth review V9-8: build and task files that tools run (Gemfile, Podfile, build.rs, Next.js middleware, any
+// *.config.ts, CMake, Gradle, Maven, Docker, tox, pyproject…).
+const LOADED = /\.(pth|plist|code-workspace|sublime-project|gradle|gradle\.kts|cmake)$|^(package\.json|startup\.m|finish\.m|\.?mise(\.[^/]+)?\.toml|deno\.jsonc?|bunfig\.toml|makefile|gnumakefile|justfile|\.envrc|gemfile|rakefile|podfile|vagrantfile|brewfile|procfile|fastfile|appfile|dangerfile|guardfile|capfile|build\.rs|(instrumentation|middleware|proxy)(-client)?\.[cm]?[jt]sx?|[^/]*\.config\.[cm]?[jt]sx?|cmakelists\.txt|taskfile(\.dist)?\.ya?ml|(docker-)?compose(\.[^/]+)?\.ya?ml|pom\.xml|lefthook(-local)?\.ya?ml|tox\.ini|pyproject\.toml|setup\.cfg|pytest\.ini|noxfile\.py|conftest\.py|dockerfile(\.[^/]+)?|containerfile|[^/]*\.dockerfile|cargo\.toml|go\.mod|build\.zig|meson\.build|sconstruct|wscript|build\.sbt|mix\.exs|composer\.json|turbo\.json|nx\.json|project\.json|lerna\.json|\.?pre-commit-config\.ya?ml|\.?lintstagedrc[^/]*)$/i;
 // A name part as the system reads it: Windows drops trailing dots and spaces (a.bat. is a.bat), and invisible
 // characters at the end don't change what opens it.
 const bare = (x) => String(x).replace(/[\s.\p{Cf}]+$/u, '');
@@ -235,7 +262,7 @@ const LOAD_DIRS = ['matlab', 'powershell', 'windowspowershell'];
  *  counts. */
 export function checkWrite(p, home, { exists = false, own = null } = {}) {
   const { real, all } = pathsOf(p, home), homes = homesOf(home);
-  if (hits(SECRET, all, homes) || hits(NO_WRITE, all, homes)) {
+  if (rootDot(all) || hits(SECRET, all, homes) || hits(NO_WRITE, all, homes)) {
     return { ...verdict(BLOCK, `${p} is a protected file (keys, settings, startup scripts or an app), so I won't write to it.`), path: real };
   }
   const inside = (a) => homes.some((h) => within(a, h) && rel(a, h) !== '') || /^\/(private\/)?tmp\//i.test(a);
@@ -261,7 +288,11 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
 
 // Runs or follows a link when opened. Windows: script hosts, installers, registry files, shortcuts, control panels.
 // Link files (.webloc, .inetloc, .fileloc, .url) carry any scheme or a file:// target, so they count too (F4, F6).
-const RUNNABLE = /\.(app|command|sh|bash|zsh|csh|ksh|fish|tool|terminal|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|jar|jnlp|py|pyw|pyc|rb|pl|js|jse|mjs|cjs|osax|exe|bat|cmd|ps1|psm1|psd1|vbs|vbe|wsf|wsh|wsc|hta|scr|msi|msp|msix|appx|reg|lnk|url|cpl|appref-ms|shortcut|mobileconfig|kext|plugin|prefPane|saver|desktop|appimage|deb|rpm|run|flatpakref|flatpak|snap|webloc|inetloc|fileloc|afploc|ftploc|smbloc|ics|pyz|jsx|vsix|alfredworkflow|alfredsnippets|sketchplugin|xpi|crx|qlgenerator|mdimporter|bundle|framework|dylib|so|service)\/?$/i;
+const RUNNABLE = /\.(app|command|sh|bash|zsh|csh|ksh|fish|tool|terminal|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|jar|jnlp|py|pyw|pyc|rb|pl|js|jse|mjs|cjs|osax|exe|bat|cmd|ps1|psm1|psd1|vbs|vbe|wsf|wsh|wsc|hta|scr|msi|msp|msix|appx|reg|lnk|url|cpl|appref-ms|shortcut|mobileconfig|kext|plugin|prefPane|saver|desktop|appimage|deb|rpm|run|flatpakref|flatpak|snap|webloc|inetloc|fileloc|afploc|ftploc|smbloc|ics|pyz|jsx|vsix|alfredworkflow|alfredsnippets|sketchplugin|xpi|crx|qlgenerator|mdimporter|bundle|framework|dylib|so|service|tar|tgz|tbz2?|txz|tlz|cpio|xar|zipx?|aar|gz|bz2|xz|lzma|7z|rar|iso|img|sparseimage|sparsebundle|cdr|msc|settingcontent-ms|application|appinstaller|chm|scf|sct|library-ms|search-ms|searchconnector-ms|theme|themepack|deskthemepack|diagcab|wsb|xbap|inf|gadget|iqy|slk|xll|xlam)\/?$/i;
+// Archives and disk images (V9-5) unpack what they hold (an executable .command, an app, links) with no quarantine;
+// Windows shell, help and Office query files (V9-9) run or reach the network. All of them count as runnable.
+// Pages that run script when opened (V9-9): opened only with a yes, naming the file.
+const ACTIVE = /\.(html?|xhtml?|xht|shtml|svgz?|webarchive|mht(ml)?)$/i;
 // Where installed apps live: opening one there just starts it. Linux lists them as .desktop files. Safari and a few
 // other Apple apps really live in a cryptex (/Applications/Safari.app leads there).
 const APP_DIRS = ['/Applications/', '/System/Applications/', '/System/Volumes/Preboot/Cryptexes/App/System/Applications/', '/System/Library/CoreServices/', '/usr/share/applications/', '/usr/local/share/applications/', '/var/lib/flatpak/exports/share/applications/', '/var/lib/snapd/desktop/applications/'];
@@ -317,6 +348,7 @@ export function checkOpen(target, home, { executable = false, app = null } = {})
     // could change it (seventh review F1), and on screen it can be read.
     if (r.level === ASK || (!appBundle && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true };
     if (inApp && !VIEWERS.test(inApp)) return { ...verdict(ASK, `Open ${r.path} in ${inApp}?`), always: true };
+    if (all.some((a) => ACTIVE.test(bare(a.split('/').at(-1) ?? '')))) return { ...verdict(ASK, `Open ${r.path}? A page like that can run script when it opens.`), always: true, page: true };
     return verdict(SAFE);
   }
   if (/[/\\]|\.\./.test(t)) return verdict(BLOCK, `"${t}" isn't an app name.`);
@@ -414,12 +446,17 @@ export function checkDrawAction({ kind, url, text, action } = {}, { allowActions
       if (!allowActions) return verdict(BLOCK, 'Typing into apps is switched off (Allow File Edits & Commands).');
       if (!String(text ?? '').length || String(text).length > 2000) return verdict(BLOCK, 'Nothing (or far too much) to type.');
       { const v = checkTyped(text, home); return v.level === SAFE ? v : verdict(BLOCK, v.level === ASK ? `${v.reason.replace(/\?.*$/, '')}: a path like that is typed only with a yes (act_in_app).` : v.reason); }
-    case 'copy': return String(text ?? '').length && String(text).length <= 10_000 ? verdict(SAFE) : verdict(BLOCK, 'Nothing (or far too much) to copy.');
+    case 'copy': {
+      if (!String(text ?? '').length || String(text).length > 10_000) return verdict(BLOCK, 'Nothing (or far too much) to copy.');
+      // What's copied can be pasted into a file panel or an address bar: checked like typed text (V9-6).
+      const v = checkTyped(text, home);
+      return v.level === SAFE ? v : verdict(BLOCK, v.level === ASK ? `${v.reason.replace(/\?.*$/, '')}: a path like that isn't put on the clipboard.` : v.reason);
+    }
     case 'button': {
       const a = action ?? {};
       if (a.do === 'ask') return String(a.value ?? '').trim() ? verdict(SAFE) : verdict(BLOCK, 'A button needs words to ask.');
       if (a.do === 'open') return checkLink(a.value);
-      if (a.do === 'copy') return checkDrawAction({ kind: 'copy', text: a.value });
+      if (a.do === 'copy') return checkDrawAction({ kind: 'copy', text: a.value }, { home });
       return verdict(BLOCK, 'A button can only ask, open a link or copy.');
     }
     case 'handoff': return verdict(SAFE);

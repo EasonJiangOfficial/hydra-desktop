@@ -526,7 +526,8 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     const real = inside(a, path.isAbsolute(r) ? r : path.join(a.dir, r));
     if (!real) return false;
     const v = safety.checkOpen(real, home, { executable: await fs.promises.stat(real).then((s) => s.isFile() && (s.mode & 0o111) !== 0, () => false) });
-    if (v.level === 'safe') await config.open(real); else await config.reveal(real);
+    // The owner clicked it on its tile: that click is the yes a page (an .html it made) asks for (V9-9).
+    if (v.level === 'safe' || v.page) await config.open(real); else await config.reveal(real);
     return true;
   }
   // Its open button: where it worked when it said (a page, a folder, a file), else what it made.

@@ -466,6 +466,7 @@ func riskyKey(_ combo: String) -> String? {
     case 51, 117: return flags.contains(.maskShift) ? "empties the Trash" : flags.contains(.maskAlternate) ? "deletes at once" : "moves to the Trash"
     case 36: return "can send a message or form" // return, enter
     case 2 where flags.contains(.maskShift): return "can send (Mail)" // d
+    case 49: return "opens Spotlight, which can start any app or file" // space (ninth review V9-7)
     default: return nil
     }
 }
@@ -1408,13 +1409,26 @@ let HANDS_OFF: [String: String] = [
     "com.macromates.TextMate": "TextMate", "com.macromates.TextMate.preview": "TextMate", "org.vim.MacVim": "MacVim", "org.gnu.Emacs": "Emacs",
     "org.gnu.Aquamacs": "Aquamacs", "com.runningwithcrayons.Alfred": "Alfred", "com.runningwithcrayons.Alfred-Preferences": "Alfred",
     "com.raycast.macos": "Raycast", "dev.warp.Warp-Preview": "Warp", "dev.commandline.waveterm": "Wave", "com.apple.dt.Instruments": "Instruments",
+    // Ninth review V9-7: more apps that run what is typed, and agent apps (a prompt there can make another agent run commands).
+    "com.apple.Spotlight": "Spotlight", "org.python.IDLE": "IDLE", "org.rstudio.RStudio": "RStudio", "com.rstudio.desktop": "RStudio",
+    "org.blenderfoundation.blender": "Blender", "org.hammerspoon.Hammerspoon": "Hammerspoon", "com.hegenberg.BetterTouchTool": "BetterTouchTool",
+    "com.krill.CodeRunner": "CodeRunner", "com.docker.docker": "Docker Desktop", "com.anthropic.claudefordesktop": "Claude", "com.openai.chat": "ChatGPT",
+    "com.openai.codex": "Codex", "com.posit.positron": "Positron", "com.electron.lens": "Lens", "com.utmapp.UTM": "UTM",
 ]
+// Families of them, by the start of the bundle id: JetBrains IDEs, Android Studio, Eclipse, MATLAB, Keyboard Maestro,
+// Script Debugger, Termius.
+let HANDS_OFF_PREFIXES: [(String, String)] = [("com.jetbrains.", "a JetBrains IDE"), ("com.google.android.studio", "Android Studio"), ("org.eclipse.", "Eclipse"),
+    ("com.mathworks.", "MATLAB"), ("com.stairways.keyboardmaestro", "Keyboard Maestro"), ("com.latenightsw.ScriptDebugger", "Script Debugger"), ("com.termius", "Termius")]
+func handsOffId(_ id: String) -> String? {
+    if let n = HANDS_OFF[id] { return n }
+    return HANDS_OFF_PREFIXES.first { id.hasPrefix($0.0) }?.1
+}
 
 func handsOff(_ pid: pid_t) -> String? {
     guard let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return nil }
     // JetBrains IDEs (IntelliJ, PyCharm, WebStorm…) all have a terminal.
     if id.hasPrefix("com.jetbrains.") { return NSRunningApplication(processIdentifier: pid)?.localizedName ?? "a JetBrains IDE" }
-    return HANDS_OFF[id]
+    return handsOffId(id)
 }
 
 // ---------- permission guide ----------
@@ -1920,6 +1934,12 @@ case "--self-test":
     for id in ["com.apple.shortcuts", "com.sublimetext.4", "com.panic.Nova", "com.barebones.bbedit", "com.macromates.TextMate", "org.vim.MacVim", "org.gnu.Emacs", "com.runningwithcrayons.Alfred", "com.raycast.macos", "dev.warp.Warp-Preview", "dev.commandline.waveterm", "com.apple.PlaygroundsMac"] {
         check("\(id) is hands-off", HANDS_OFF[id] != nil)
     }
+    // V9-7: more apps that run what is typed, and families of them by bundle id; cmd+space (Spotlight) needs a yes.
+    for id in ["com.apple.Spotlight", "com.google.android.studio", "com.google.android.studio-EAP", "org.eclipse.platform.ide", "org.python.IDLE", "org.rstudio.RStudio", "com.mathworks.matlab", "org.blenderfoundation.blender", "org.hammerspoon.Hammerspoon", "com.stairways.keyboardmaestro.editor", "com.hegenberg.BetterTouchTool", "com.krill.CodeRunner", "com.latenightsw.ScriptDebugger8", "com.termius-dmg.mac", "com.docker.docker", "com.anthropic.claudefordesktop", "com.openai.chat"] {
+        check("\(id) is hands-off", handsOffId(id) != nil)
+    }
+    check("TextEdit isn't hands-off", handsOffId("com.apple.TextEdit") == nil)
+    for k in ["cmd+space", "space+cmd", "cmd+opt+space"] { check("\(k) needs a yes", riskyKey(k) != nil) }
     // V8-13: the question shows the whole command or message Return would send.
     let longCmd = "> rm -rf ~/Documents/x " + String(repeating: "and more ", count: 60)
     check("a Return question holds the field's whole text", sendWhy("Alfred", held: longCmd).hasSuffix("\"\(longCmd)\""))
