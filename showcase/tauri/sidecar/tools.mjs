@@ -15,7 +15,7 @@ import { linuxSession, seesPointer } from './platform.mjs';
 import { addCommitment, forgetFact, getCommitment, listFacts, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
 import { snoozeTarget, snoozeUntil } from './snooze.mjs';
 import { addJob, getJob, jobsText, removeJob, updateJob } from './jobs.mjs';
-import { deleteSkill, fetchSkills, installSkill, listSkills, readSkill, readSkillFile, saveSkill, screenSkill, skillFiles } from './skills.mjs';
+import { deleteSkill, fetchSkills, installSkill, listSkills, readSkill, skillExists, readSkillFile, saveSkill, screenSkill, skillFiles } from './skills.mjs';
 
 const HOME = os.homedir();
 export const expand = (p) => path.resolve(String(p).replace(/^~(?=$|\/|\\)/, HOME));
@@ -205,6 +205,8 @@ export function frontLine(f, who = 'The user') {
 // Git settings a downloaded repo's own config could use to run a program from a "read-only" git status or log:
 // switched off for every command the agent runs (git reads GIT_CONFIG_COUNT/KEY/VALUE over every config file).
 const GIT_SAFE = {
+  // No system-wide git config or attributes either: only the user's own and these overrides.
+  GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1',
   GIT_CONFIG_COUNT: '4',
   GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: 'false',
   GIT_CONFIG_KEY_1: 'core.pager', GIT_CONFIG_VALUE_1: 'cat',
@@ -284,7 +286,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // Acting in an app may take the real cursor: meanwhile clicks go through the overlay, even where the Sidekick or
     // its bubble sits on the spot being clicked.
     const acting = args[0] === 'act';
-    if (acting) ui({ kind: 'hands', on: true });
+    // The overlay turns click-through (and its Allow buttons dead) first, before any click can land on it.
+    if (acting) { ui({ kind: 'hands', on: true }); await new Promise((r) => setTimeout(r, 150)); }
     // While it acts, the Sidekick hops to where each step lands. Only the spot is passed on, never what is typed.
     const onLine = acting ? (line) => {
       if (line[0] !== '@') return;
@@ -1204,7 +1207,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       parameters: z.object({ name: z.string().min(1).max(60), description: z.string().min(1).max(200), steps: z.string().min(1).max(6000) }),
       execute: async (args, ctx) => {
         // Saving under a name that's taken replaces that skill: it asks first, like overwriting a file.
-        if (readSkill(args.name) && !(await confirm(`Replace the skill "${args.name}" with new steps?`, ctx))) throw new Error(`${userName} said no, so the skill stays as it was.`);
+        if (skillExists(args.name) && !(await confirm(`Replace the skill "${args.name}" with new steps?`, ctx))) throw new Error(`${userName} said no, so the skill stays as it was.`);
         const s = await saveSkill(args);
         skills.changed?.(s);
         return `${s.created ? 'Learned' : 'Updated'} the skill ${s.slug}. It shows on the Abilities page's Skills tab.`;

@@ -17,11 +17,11 @@ const cmd = (c) => classifyCommand(c, HOME);
 
 cases('command', cmd, [
   // Plain looking around: runs without asking.
-  ['ls -la', SAFE], ['ls ~/Downloads', SAFE], ['pwd', SAFE], ['date', SAFE], ['git status', SAFE], ['git log --oneline -5', SAFE],
+  ['ls -la', SAFE], ['ls ~/Downloads', SAFE], ['pwd', SAFE], ['date', SAFE], ['git status', ASK] /* runs a repo's filters: asks (third review M3) */, ['git log --oneline -5', SAFE],
   ['git diff HEAD~1', ASK], ['du -sh ~/Downloads', SAFE], ['df -h', SAFE], ['ps aux | grep node', SAFE], ['mdfind -name report.pdf', SAFE],
   ['find ~/Documents -name "*.pdf"', SAFE], ['grep -rn TODO ~/projects/app', SAFE], ['cat ~/notes.txt | wc -l', SAFE], ['echo hi', SAFE],
   ['defaults read com.apple.dock', SAFE], ['node --version', SAFE], ['npm ls', SAFE], ['brew list', SAFE], ['sw_vers && uname -a', SAFE],
-  ['ls /tmp | grep -i sidekick', SAFE], ['which python3 2>/dev/null', SAFE], ['git status > /dev/null', SAFE],
+  ['ls /tmp | grep -i sidekick', SAFE], ['which python3 2>/dev/null', SAFE], ['git rev-parse HEAD > /dev/null', SAFE],
   ["osascript -e 'get volume settings'", ASK], ['echo "a; rm -rf ~"', SAFE],
   // Changes things: needs a yes.
   ['rm notes.txt', ASK], ['rm -r ~/projects/old-app', ASK], ['mv a.txt b.txt', ASK], ['mkdir ~/new', SAFE], ['touch x', ASK],
@@ -224,7 +224,7 @@ console.log('redirect tests: all passed');
 // After a cd, relative paths are checked in that folder.
 assert.equal(classifyCommand('cd ~/.config && cat gh/hosts.yml', HOME).level, BLOCK, 'secret reached through cd');
 assert.equal(classifyCommand('cd ~/Library && grep -r x Keychains', HOME).level, BLOCK, 'keychain reached through cd');
-assert.equal(classifyCommand('cd /tmp/x && git status', HOME).level, SAFE, 'subcommands are not paths');
+assert.equal(classifyCommand('cd /tmp/x && git log', HOME).level, SAFE, 'subcommands are not paths');
 assert.equal(classifyCommand('cd "$X" && cat notes.txt', HOME).level, ASK, 'unknown folder');
 assert.equal(classifyCommand('cd ~/Projects && cd .. && cat .ssh/id_rsa', HOME).level, BLOCK, 'cd .. is followed');
 // mkdir follows the write_file rules.
@@ -316,7 +316,7 @@ cases('read-only loopholes', cmd, [
   ['MANPAGER=/tmp/x man ls', ASK], ['PAGER=/tmp/x git log', ASK], ['env GIT_EXTERNAL_DIFF=/tmp/x git status', ASK],
   ['rg --pre /tmp/x foo ~/projects', ASK], ['rg -z foo ~/projects', ASK], ['fd -x rm ~/projects', ASK], ['sysctl -w kern.x=1', ASK], ['sysctl kern.x=1', ASK],
   ['git branch -D main', ASK], ['git tag -d v1', ASK], ['git remote add evil https://x.example/r.git', ASK], ['git log -p', ASK],
-  ['git show HEAD', ASK], ['git blame a.txt', ASK], ['git diff --output=/Users/ken/.zshrc', ASK],
+  ['git show HEAD', ASK], ['git blame a.txt', ASK], ['git diff --output=/Users/ken/.zshrc', BLOCK], ['git diff --output=notes.txt', ASK],
   // Still fine: the looking forms.
   ['sort a.txt', SAFE], ['uniq a.txt', SAFE], ['xxd a.bin', SAFE], ['man ls', SAFE], ['rg foo ~/projects', SAFE], ['sysctl hw.ncpu', SAFE],
   ['git branch', SAFE], ['git branch -a', SAFE], ['git tag', SAFE], ['git tag --list', SAFE], ['git remote -v', SAFE], ['git log --oneline -5', SAFE],

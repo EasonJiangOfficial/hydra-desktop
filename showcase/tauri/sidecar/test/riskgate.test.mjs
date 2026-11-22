@@ -42,6 +42,47 @@ const PROTECTED = ['mkdir -p ~/Library/LaunchAgents/x', 'mkdir ~/HydraAgent/Skil
   'cp x ~/HydraAgent/Skills/new/SKILL.md', 'cp x ~/Applications/Foo.app/Contents/MacOS/foo', 'cp x ~/.ssh/authorized_keys', 'ditto x ~/Library/LaunchAgents/a.plist',
   'git clone https://example.com/r ~/Library/LaunchAgents/r', 'tee ~/.zshrc', 'mv x ~/.bash_profile', 'ln -s /tmp/x ~/Library/LaunchAgents/x.plist', 'curl -o ~/.zshrc https://x.y/z'];
 for (const c of PROTECTED) assert.equal(classifyCommand(c, HOME, { cwd: HOME, exists: () => false }).level, 'block', `${c} is blocked`);
+// Third review: case-insensitive protected places (APFS), $HOME forms, folder-contents copies, -t/-o/-P/-C/-d forms,
+// sed -i, find's writing primaries, npm audit fix, scutil --set, git status (filters), less +cmd, .git/hooks.
+{
+  const H3 = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-third-'));
+  const B3 = ['cp a ~/.Zshenv', 'echo x > ~/.ZSHENV', 'printf x > ~/.Zlogin', 'cp a ~/.Bash_profile', 'cp a ~/.config/Fish/config.fish', 'cp a ~/.Gitconfig',
+    'mkdir -p ~/library/launchagents', 'echo x > ~/library/launchagents/x.plist', 'echo x > ~/Applications/Evil.APP/Contents/MacOS/x', 'cp a $HOME/.zshrc', 'cp a "${HOME}/.zshrc"', 'cp a "$HOME"/.zshrc',
+    'ditto evil ~/Library', 'cp -R evil/. ~/Library/', 'rsync -a evil/ ~/Library/', 'cp -t ~/Library/LaunchAgents a', 'cp --target-directory=~/.ssh a', 'mv -t ~/.ssh a',
+    'curl -o~/.zshrc https://x', 'curl --output=~/.zshrc https://x', 'wget https://x -P ~/Library/LaunchAgents', 'tar -xf x.tar -C ~/Library/LaunchAgents', 'unzip x.zip -d ~/Library',
+    'sed -i "" s/a/b/ ~/.zshrc', 'git log --output=~/.zshrc', 'echo x > .git/hooks/pre-commit', 'mkdir -p .git/hooks', 'cp hook .git/config'];
+  for (const c of B3) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'block', `${c} is blocked`);
+  const A3 = ['find proj -fls out', 'find proj -fprint out', 'find proj -fprintf out %p', 'find proj -delete', 'npm audit fix', 'npm audit fix --force', 'npm audit --fix', 'scutil --set HostName x',
+    'git status', 'git status --porcelain', 'git ls-files', 'git describe', 'less +!rm a', 'more +/x a'];
+  for (const c of A3) { const v = classifyCommand(c, H3, { cwd: H3, exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c}: ${v.level}`); }
+  for (const c of ['npm audit', 'npm ls', 'scutil --get HostName', 'git log', 'git rev-parse HEAD', 'less a']) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'safe', `${c} only reads`);
+  console.log(`third review commands: ${B3.length} blocked, ${A3.length} ask`);
+  fs.rmSync(H3, { recursive: true, force: true });
+}
+// M3: a repo whose .git/config runs a program from fsmonitor, a pager or a hook: the read-only git commands that run
+// without a yes run with those switched off (git log), and git status asks.
+if (process.platform !== 'win32') {
+  const repo = fs.mkdtempSync(path.join('/tmp', 'hydra-fsm-'));
+  const marker = path.join(repo, 'PWNED'), evil = path.join(repo, 'evil.sh');
+  fs.writeFileSync(evil, `#!/bin/sh\ntouch ${marker}\n`); fs.chmodSync(evil, 0o755);
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('git', ['init', '-q', repo]);
+  execFileSync('git', ['-C', repo, 'config', 'core.fsmonitor', evil]); execFileSync('git', ['-C', repo, 'config', 'core.pager', evil]);
+  execFileSync('git', ['-C', repo, '-c', 'core.fsmonitor=false', 'commit', '-q', '--allow-empty', '-m', 'x'], { env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  fs.rmSync(marker, { force: true });
+  const { createTools: ct } = await import('../tools.mjs');
+  const askedG = [];
+  const { tools: tg } = ct({ allowActions: () => true, ui: () => {}, openUrl: async () => {}, onCommitments: async () => {}, showList: async () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: repo, ask: async (o) => { askedG.push(o); return null; } });
+  const rc = tg.find((t) => t.name === 'run_command');
+  await rc.execute({ command: 'git log --oneline' }, undefined);
+  await rc.execute({ command: 'git rev-parse HEAD' }, undefined);
+  assert.equal(askedG.length, 0, 'read-only git runs without a yes');
+  assert.ok(!fs.existsSync(marker), "and the repo's fsmonitor and pager never ran");
+  await assert.rejects(rc.execute({ command: 'git status' }, undefined), /said no/, 'git status asks');
+  assert.ok(!fs.existsSync(marker));
+  fs.rmSync(repo, { recursive: true, force: true });
+  console.log('malicious repo config: nothing ran');
+}
 console.log(`second review commands: ${P2.length} ask, ${PROTECTED.length} protected destinations blocked`);
 console.log('always-ask command tests: passed');
 
