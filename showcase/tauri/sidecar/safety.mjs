@@ -273,6 +273,7 @@ const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime playe
  *  any other (Terminal, a password manager, Messages) asks, naming the app (tenth review R10-11). { level, reason }.
  *  viewers: false (a relay turn: the owner is not at this Mac, R11-1): a window with no file asks in every app, a browser
  *  or Hydra too, since only plain reads in the three folders run unasked. */
+const DOC_APPS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint)|xcode|visual studio code|code|cursor|zed|windsurf|vscodium|antigravity|sublime text|nova|bbedit|textmate|macvim)$/i;
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -283,9 +284,13 @@ export function checkWindow(win, home, { viewers = true } = {}) {
     if (v.level === BLOCK) return verdict(BLOCK, `${app || 'That window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
     if (v.level === ASK) worst = verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`);
   }
-  if (!files.length && !(viewers && WINDOW_VIEWERS.test(app))) {
+  // A relay turn (viewers off, R11b-B): a file frees a window only in an app that just shows or edits it, never
+  // Terminal, Finder, a browser or a chat app (their window shows more than the file).
+  const plain = files.length ? viewers || DOC_APPS.test(app) : viewers && WINDOW_VIEWERS.test(app);
+  if (!plain && worst.level === SAFE) {
     const title = String(win?.title ?? '').trim();
-    worst = { ...verdict(ASK, `Look at ${app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name"}? It has no file I can check, so it could show anything (a password, a message, a terminal).`), app };
+    const name = app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name";
+    worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? It has no file I can check, so it could show anything (a password, a message, a terminal).`), app };
   }
   return worst;
 }

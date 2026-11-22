@@ -156,6 +156,8 @@ const actionsOff = `File edits and commands are switched off. Tell the user to t
 // macOS, hands-win on Windows; same commands and JSON). A .mjs one (a test's fake) runs on this Node.
 const HANDS = process.env.ROAMIES_HANDS || '';
 const runHands = (args, opts) => (HANDS.endsWith('.mjs') ? run(process.execPath, [HANDS, ...args], opts) : run(HANDS, args, opts));
+// A relay turn's whole screen (R11b-B): asked every time, naming it, whatever the helper lists on it.
+const WHOLE_SCREEN = 'Look at your whole screen? Every app and window on it, with banners, pop-ups and alerts, is in it.';
 const STALE_ID = 'The page changed since read_window, so that id is out of date. Call read_window again and use the new ids.';
 // An app named in read_window or act_in_app that isn't open: open it (with the open tool's safety check) and wait
 // up to 6 s for its window. True when it's there. Only plain app names, never paths or links.
@@ -405,8 +407,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
    *  before any of their text or picture reaches the model (checkWindow): a key file is refused, anything that isn't
    *  a plain read of the three folders or a viewer's page asks, once for all of them. */
   // okApp: the app the owner just said yes to acting in; its window after the steps needs no second yes (its files do).
-  async function windowShows(wins, ctx, { okApp = null } = {}) {
-    const asks = [];
+  // whole: a question asked whatever the windows say (a relay turn's whole screen: banners, pop-ups and small windows
+  // the helper doesn't list are in it too, R11b-B), with their own asks after it.
+  async function windowShows(wins, ctx, { okApp = null, whole = null } = {}) {
+    const asks = whole ? [whole] : [];
     for (const w of [wins].flat()) {
       const v = checkWindow(w, HOME, { viewers: !remote() });
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
@@ -416,6 +420,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
   }
 
+  /** The windows draw searches (spec: 'screen', 'front' or 'app:<name>'), checked like read_window's: the whole screen
+   *  always asks; an app's windows ask with app and title (viewers are off in a relay turn), and so does an app whose
+   *  windows the helper doesn't list. */
+  // ponytail: an app's small windows the helper doesn't list (a popover beside a listed editor window) are not asked
+  // about on their own; ask for the whole app every time if that matters.
+  async function searchedShows(spec, ctx) {
+    const all = (await hands('windows').catch(() => null))?.windows ?? [];
+    if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN });
+    const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
+    const app = String(front?.app ?? (spec.startsWith('app:') ? spec.slice(4) : '')).trim();
+    const wins = [...(front ? [front] : []), ...all.filter((w) => app && String(w.app ?? '').toLowerCase() === app.toLowerCase() && w.id !== front?.id)];
+    return windowShows(wins, ctx, { whole: wins.length ? null : `Look at ${app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
+  }
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
   async function handsShot(file, t, ctx) {
     const spec = t === 'screen' || t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
@@ -428,7 +445,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // the front one.
     try {
       const shown = res.window ? [res.window] : Array.isArray(res.shown) ? res.shown : [await hands('front').catch(() => null)];
-      await windowShows(shown, ctx);
+      await windowShows(shown, ctx, { whole: remote() && t === 'screen' ? WHOLE_SCREEN : null });
     } catch (e) { await fs.unlink(file).catch(() => {}); throw e; }
     const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
     const bounds = res.window?.bounds ?? res.bounds;
@@ -586,7 +603,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   const agentChangesScreen = () => { if (windowBound() && !ink.active) screenChanged('agent'); };
   const toClipboard = (text) => copyText(text, askShell);
   // How each kind of place is found. retry: just after a click, when a menu or dialog may still be opening.
-  function lookups(spec, retry) {
+  // gate: before any words or controls are read off a window (draw's relay check, R11b-A).
+  function lookups(spec, retry, gate = async () => {}) {
     let live = null, shotOk = null, controls = null, fitQueue = null, wins = null;
     // The same words marked twice in a segment (a ring and a connect to it): one helper round trip.
     const seen = new Map();
@@ -600,6 +618,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       // matters). Exact boxes; [] when it isn't there (or without the helper).
       async textAll(find) {
         if (!HANDS) return [];
+        await gate();
         // The window the latest screenshot showed, when there's one from this request: the front app can change
         // between looking and drawing.
         const where = lastShot?.turn === turn && lastShot.win != null ? `window:${lastShot.win}` : spec;
@@ -607,10 +626,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       },
       async findText(find) {
         if (!HANDS) throw new Error('Finding words on screen needs the Hydra app; take a screenshot and give x, y instead.');
+        await gate();
         // Text read off the screen: one match, or where each of several is, so the right one can be picked with within.
         const readOne = async () => {
           const all = await this.textAll(find);
-          if (all.length > 1) throw new Error(`"${find}" appears ${all.length} times on screen (${all.slice(0, 4).map((o) => `in "${String(o.text).slice(0, 40)}"`).join(', ')}). Add within: {x, y, w, h} (screenshot pixels round the one you mean), or every: true for all of them.`);
+          if (all.length > 1) throw new Error(`"${find}" appears ${all.length} times on screen. Add within: {x, y, w, h} (screenshot pixels round the one you mean), or every: true for all of them.`);
           return all[0] ?? null;
         };
         // One character: read the screen first (labels rarely hold one letter, and the case matters).
@@ -624,14 +644,15 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const o = await readOne();
           if (o) return o;
           if (k >= (retry ? 4 : 0)) {
-            const near = (res.matches ?? []).slice(0, 3).map((x) => `"${x.text.replace(/\s+/g, ' ').slice(0, 50)}"`).join(', ');
-            throw new Error(`No button, label or heading reads "${find}"${near ? ` (it only appears inside longer text: ${near})` : ''}. Use the exact words shown on screen; if you don't know them, take a screenshot first.`);
+            // What it matched is never quoted: the screen's words reach the model only through a checked read (R11b-A).
+            throw new Error(`No button, label or heading reads "${find}"${res.matches?.length ? ' (it only appears inside longer text)' : ''}. Use the exact words shown on screen; if you don't know them, take a screenshot first.`);
           }
           await new Promise((r) => setTimeout(r, 400));
         }
       },
       async id(n) {
         if (!HANDS) throw new Error('read_window ids need the Hydra app; give x, y from a screenshot instead.');
+        await gate();
         live ??= await liveControls(spec);
         const c = live(n);
         if (c.offscreen) throw new Error(`"${c.label || c.role}" is further down the page. Use its text instead; that scrolls to it.`);
@@ -655,6 +676,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       // The controls on screen now (once per segment), for loops drawn from screenshot pixels to snap to.
       async snap(rect) {
         if (!HANDS || spec === 'screen') return null;
+        await gate();
         controls ??= hands('ui', spec, 'controls').then((r) => (r.controls ?? []).filter((c) => !c.offscreen && c.bounds).map((c) => c.bounds), () => []);
         return snapRect(rect, await controls);
       },
@@ -756,13 +778,15 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const busy = lastRead?.turn === turn ? lastRead.controls.filter((c) => !c.offscreen && c.bounds).slice(0, 300).map((c) => c.bounds) : [];
     ink.active++;
     // Lookups are shared until a click or hover (then the screen may have changed, and words are retried a moment).
-    let look = null;
+    let look = null, checked = null;
+    // A relay turn (R11b-A): the windows draw reads words or controls in are checked first, as read_window's are.
+    const gate = () => (checked ??= remote() ? searchedShows(spec, ctx) : Promise.resolve());
     try {
       for (const [k, sg] of segs.entries()) {
         if (ctx?.signal?.aborted) return stopped();
         let seg;
         try {
-          if (!look || sg.after) look = lookups(spec, sg.after);
+          if (!look || sg.after) look = lookups(spec, sg.after, gate);
           seg = await resolveTargets(beats.slice(sg.from, sg.to), look);
           // Typing needs the original place (its words or id) to act on; resolveTargets keeps it.
           seg.forEach((b, j) => b.marks.forEach((m, n) => { if (m.at) m.at.src = beats[sg.from + j].marks[m.from ?? n]?.at; }));

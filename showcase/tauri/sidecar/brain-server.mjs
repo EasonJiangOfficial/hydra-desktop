@@ -75,22 +75,37 @@ export function askMacTool({ api, turn, alive = async () => true, signal, sleep 
     parameters: z.object({ instruction: z.string().trim().min(1).max(LIMITS.instruction) }),
     execute: async ({ instruction }) => {
       if (unsure) return MAC_UNSURE_TEXT;
-      const limit = Math.min(waitMs, Number.isFinite(deadline) ? deadline - now() - marginMs : Infinity);
-      if (limit <= 0) return 'This turn has no time left to ask your Mac. Tell the owner to ask again.';
+      // One absolute end, taken before the POST (R11b-C): every call's timeout fits inside it.
+      const end = Math.min(now() + waitMs, Number.isFinite(deadline) ? deadline - marginMs : Infinity);
+      const left = () => end - now();
+      const within = () => Math.max(1, Math.min(20_000, left()));
+      if (left() <= 0) return 'This turn has no time left to ask your Mac. Tell the owner to ask again.';
+      // Past this point the sub-turn may exist: anything but a clear answer is unsure (R11b-D, R11b-E).
+      const maybe = (why) => { unsure = true; log('ask_mac', { status: why, unsure: true }); return MAC_UNSURE_TEXT; };
       let r = null;
-      try { r = await api.req('/api/agent/relay/subturn', { method: 'POST', body: { turnId: turn.id, claimId: turn.claimId, instruction: String(instruction).trim() }, signal, timeout: 20_000 }); } catch { /* below */ }
+      try { r = await api.req('/api/agent/relay/subturn', { method: 'POST', body: { turnId: turn.id, claimId: turn.claimId, instruction: String(instruction).trim() }, signal, timeout: within() }); } catch (e) {
+        // Nothing was sent (R11b-F): no key here.
+        if (e?.code === 'unpaired') { log('ask_mac', { status: 'unpaired' }); return 'Nothing was sent to your Mac: Hydra is not paired here. Tell the owner to pair it again.'; }
+      }
       if (signal?.aborted) throw new Error('Stopped.');
-      if (!r || r.status >= 500) { unsure = true; log('ask_mac', { status: r?.status ?? 'unreachable', unsure: true }); return MAC_UNSURE_TEXT; }
+      if (!r || r.status >= 500) return maybe(r?.status ?? 'unreachable');
       const made = await r.json().catch(() => null);
-      if (r.status !== 201 || typeof made?.subTurnId !== 'string') {
+      if (r.ok && typeof made?.subTurnId !== 'string') return maybe(`${r.status} unread`);
+      if (!r.ok) {
         log('ask_mac', { status: r.status, error: String(made?.error ?? '').slice(0, 40) });
         throw new Error(r.status === 409 ? 'This turn is over, so your Mac was not asked.' : `Hydra did not pass this to your Mac (${made?.error ?? r.status}).`);
       }
-      const id = made.subTurnId, t0 = now();
+      const id = made.subTurnId;
       let beat = now(), sofar = '';
-      log('ask_mac', { subTurn: id, chars: instruction.length, limitMs: Number.isFinite(limit) ? limit : null });
+      const tooLong = () => {
+        unsure = true;
+        log('ask_mac', { subTurn: id, status: 'too_long', unsure: true });
+        return `Your Mac took too long to answer, so it may still be doing this. Do not call ask_mac again in this turn: tell the owner it may be under way on his Mac and to check there.${sofar ? ` What it said so far: ${sofar}` : ''}`;
+      };
+      log('ask_mac', { subTurn: id, chars: instruction.length, limitMs: Number.isFinite(end) ? left() : null });
       for (;;) {
-        const g = await api.req(`/api/agent/relay/subturn?id=${encodeURIComponent(id)}`, { signal, timeout: 20_000 }).catch(() => null);
+        if (left() <= 0) return tooLong();
+        const g = await api.req(`/api/agent/relay/subturn?id=${encodeURIComponent(id)}`, { signal, timeout: within() }).catch(() => null);
         const res = g?.ok ? subturnResultSchema.safeParse(await g.json().catch(() => null)) : null;
         if (res?.success && SUBTURN_ENDED.has(res.data.status)) {
           log('ask_mac', { subTurn: id, status: res.data.status, chars: res.data.text.length });
@@ -98,12 +113,15 @@ export function askMacTool({ api, turn, alive = async () => true, signal, sleep 
         }
         if (res?.success && res.data.text.trim()) sofar = res.data.text.trim();
         if (signal?.aborted) throw new Error('Stopped.');
-        if (now() - t0 >= limit) return `Your Mac took too long.${sofar ? ` What it said so far: ${sofar}` : ''}`;
+        if (left() <= 0) return tooLong();
         if (now() - beat >= beatMs) {
           beat = now();
-          if (!(await alive())) throw new Error('This turn is over, so I stopped waiting for your Mac.');
+          let timer;
+          const ok = await Promise.race([alive(), new Promise((r) => { timer = setTimeout(r, within(), 'late'); timer.unref?.(); })]).finally(() => clearTimeout(timer));
+          if (ok === 'late') return tooLong();
+          if (!ok) throw new Error('This turn is over, so I stopped waiting for your Mac.');
         }
-        await sleep(pollMs, signal);
+        await sleep(Math.min(pollMs, Math.max(0, left())), signal);
       }
     },
   };

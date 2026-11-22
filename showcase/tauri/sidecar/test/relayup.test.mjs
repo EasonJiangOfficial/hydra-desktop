@@ -388,7 +388,7 @@ const askMac = (hydra, parent, o = {}) => askMacTool({ api: hydra.api('brain-1',
   const t0 = Date.now();
   const tool = askMac(hydra, parent, { deadline: t0 + 30_000 + 80, marginMs: 30_000 });
   const text = await Promise.race([tool.execute({ instruction: 'take a screenshot' }), wait(3000).then(() => 'still waiting')]);
-  assert.equal(text, 'Your Mac took too long.', 'answered before the turn ends, not after 240 s');
+  assert.match(text, /^Your Mac took too long to answer, so it may still be doing this\./, 'answered before the turn ends, not after 240 s (R11b-E: and it may still be doing it)');
   assert.ok(Date.now() - t0 < 1500);
   const late = askMac(hydra, parent, { deadline: Date.now() + 1000, marginMs: 30_000 });
   assert.match(await late.execute({ instruction: 'take a screenshot' }), /no time left/);

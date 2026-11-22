@@ -448,7 +448,9 @@ async function* claudeCodeLoop(messages, o) {
   // Words the owner adds while this runs (W5 contract 2): one more user message on the same streaming input. Claude Code
   // takes it into the turn under way, or answers it right after; a result that comes before any assistant message
   // after the last addition is not the end yet (the addition is still to be answered).
-  let step = 0, addedAt = 0, answeredAt = 0, streamed = false;
+  // finalAt: the last top-level message that ended the turn (end_turn). A run cut by max turns or an error answered
+  // only what came before it; a message that merely started after an addition (a tool step) did not (R11b-G).
+  let step = 0, addedAt = 0, answeredAt = 0, finalAt = 0, msgAt = 0, streamed = false, cut = false;
   const added = []; // [{ at, text }]: what was not answered when the run ends goes to o.onLeft (R11-2)
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
   // After begin(): the first message is on the input already, so an addition always comes after it.
@@ -486,12 +488,13 @@ async function* claudeCodeLoop(messages, o) {
       if (message.type !== 'result') {
         // An assistant message that starts after an addition is its answer (or takes it in).
         if (!message.parent_tool_use_id) {
-          if (message.type === 'stream_event' && message.event?.type === 'message_start') { streamed = true; answeredAt = ++step; }
-          else if (message.type === 'assistant' && !streamed) answeredAt = ++step;
+          if (message.type === 'stream_event' && message.event?.type === 'message_start') { streamed = true; answeredAt = msgAt = ++step; }
+          else if (message.type === 'stream_event' && message.event?.type === 'message_delta' && message.event.delta?.stop_reason === 'end_turn') finalAt = msgAt;
+          else if (message.type === 'assistant' && !streamed) { answeredAt = ++step; if (message.message?.stop_reason === 'end_turn') finalAt = step; }
         }
         yield* mapper.handle(message); continue;
       }
-      if (message.subtype === 'error_max_turns') { hitMaxTurns = true; break; }
+      if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
         throw new Error(detail || `Claude Code stopped: ${message.subtype}`);
@@ -500,9 +503,9 @@ async function* claudeCodeLoop(messages, o) {
       if (addedAt > answeredAt) continue; // an addition came after the last answer: its own answer follows
       break;
     }
-  } finally {
+  } catch (e) { cut = true; throw e; } finally {
     o.takeInput?.(null);
-    o.onLeft?.(added.filter((a) => a.at > answeredAt).map((a) => a.text));
+    o.onLeft?.(added.filter((a) => a.at > (cut ? finalAt : answeredAt)).map((a) => a.text));
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
@@ -553,7 +556,7 @@ export class ClaudeCodeAgent {
   /** While a prompt runs: the owner's added words go into it as one more user message. False when nothing runs. */
   addInput(text) { return this.#add ? this.#add(text) : false; }
   /** After a prompt's run: the added words it took but ended before answering (max turns, an error), as given. */
-  unanswered() { return [...this.#left]; }
+  unanswered() { return [...this.#early, ...this.#left]; }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
@@ -563,7 +566,10 @@ export class ClaudeCodeAgent {
     this.#add = (t) => { this.#early.push(t); return true; };
     return new AgentStream(this.#run(), () => { this.#running = false; });
   }
-  async *#run() {
+  // Nothing runs after this (even when it threw before Claude Code took the additions, which then stay in #early for
+  // unanswered(), R11b-H): an addition is refused, not acknowledged and dropped.
+  async *#run() { try { return yield* this.#session(); } finally { this.#add = null; } }
+  async *#session() {
     const o = this.options;
     const resume = resumeId(this.resume, this.messages);
     // The live block and trimming apply to what's sent, not to the saved history.
