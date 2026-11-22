@@ -26,7 +26,8 @@
   };
   window.__roamieBuddy = (m) => { Roamie.wake?.(); Roamie.buddy.onEvent?.(m); };
   // handsBusy: Roamies is acting in another app (it may take the real cursor), so clicks always go through.
-  let hot = null, cursor = null, handsBusy = false;
+  let hot = null, cursor = null, handsBusy = false, handsN = 0;
+  Object.defineProperty(Roamie, 'handsBusy', { get: () => handsBusy, configurable: true });
   // Linux ("x11" or "wayland", set by the shell): clicks are let through by region instead (below).
   const LINUX = !!window.ROAMIE_LINUX;
   const setHot = (h) => { if (!LINUX && h !== hot) { hot = h; invoke('set_hot', { hot: h }).catch(() => { hot = null; }); } };
@@ -574,7 +575,8 @@
         // A spot on another display isn't this overlay's to show.
         if (px >= 0 && py >= 0 && px <= innerWidth && py <= innerHeight) { hand?.begin(); hand?.at(px, py, { tap: !m.step.hover }); }
       } else if (m.borrow) hand?.begin();
-      else { handsBusy = !!m.on; if (handsBusy) setHot(false); else hand?.end(); }
+      // Counted: the chat and background agents can each be acting; clicks go through until every one is done.
+      else { handsN = Math.max(0, handsN + (m.on ? 1 : -1)); handsBusy = handsN > 0; if (handsBusy) setHot(false); else hand?.end(); }
       return;
     }
     // Launch (and the relaunch after an update): the capsule says hi when it's on, else the Roamie waves by the cursor.

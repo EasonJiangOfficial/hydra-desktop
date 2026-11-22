@@ -236,7 +236,8 @@ Today is ${now.toDateString()}.`;
 }
 
 // ---------- the manager ----------
-const LIMITS = { running: 3, local: 1, workMs: 30 * 60_000, turns: 80, beatMs: 60_000, stuckMs: 3 * 60_000, killMs: 3000 };
+// askMs: a yes nobody gives in this long counts as a no, so a waiting agent never holds on for good.
+const LIMITS = { askMs: 24 * 3600_000, running: 3, local: 1, workMs: 30 * 60_000, turns: 80, beatMs: 60_000, stuckMs: 3 * 60_000, killMs: 3000 };
 const GLYPH = { write_file: 'pen', web_fetch: 'lens', web_search: 'lens', run_command: 'gear', read_file: 'eye', list_files: 'eye', search_files: 'eye' };
 const IMAGE = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 const one = (s, n) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
@@ -307,7 +308,8 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     const md = await config.model(sub ? { spec: sub.spec, slot: sub.slot } : modelName ? String(modelName) : undefined); // a model they named for it, else the usual
     // What they said this turn, verbatim (sidekick.mjs); a scheduled run belongs to no turn.
     const words = scheduled ? '' : String(config.userWords?.() ?? '').trim();
-    const cap = md.provider === 'local' ? LIMITS.local : LIMITS.running, busy = running().length;
+    // Agents waiting for the owner's yes don't count: they do nothing until he answers.
+    const cap = md.provider === 'local' ? LIMITS.local : LIMITS.running, busy = running().filter((x) => x.state === 'working').length;
     if (busy >= cap) throw new Error(`${busy} agent${busy === 1 ? ' is' : 's are'} already working, and ${cap} at once is the most${md.provider === 'local' ? ' on a local model' : ''}. Tell ${userName}: they can stop one (or wait for one to finish) and ask again.`);
     let to = null;
     if (deliverTo) {
@@ -396,13 +398,14 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     else if (m.t === 'ask') {
       // Every yes/no waits for the owner (a routine running alone waits too, as an approval on its row).
       if (a.state === 'working') { a.workMs += now() - a.workFrom; a.workFrom = null; }
-      a.state = 'waiting'; a.told = false; a.ask = { id: m.id, question: one(m.question, 300), always: m.always !== false };
+      a.state = 'waiting'; a.told = false; a.ask = { id: m.id, question: one(m.question, 300), always: m.always !== false, at: now() };
       tell('ask', a); saveState(a);
     } else if (m.t === 'ask_cancel') { if (a.ask?.id === m.id) resume(a); }
     else if (m.t === 'creds') {
       Promise.resolve().then(() => config.creds(a.model)).then((c) => ({ apiKey: c?.accessToken ?? c?.apiKey, accountId: c?.accountId }), (e) => ({ error: String(e?.message ?? e) }))
         .then((value) => { if (p.child.connected) p.child.send({ t: 'reply', id: m.id, value }); });
-    } else if (m.t === 'finish') a.result = m.result;
+    } else if (m.t === 'ui' && m.msg?.kind === 'hands') ui({ kind: 'hands', on: !!m.msg.on });
+    else if (m.t === 'finish') a.result = m.result;
     else if (m.t === 'end') p.end = m;
   }
   function resume(a) {
@@ -458,6 +461,14 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
       if (!p || p.stopping) continue;
       if (pub(a).workMs > LIMITS.workMs) stop(a.id, { state: 'failed', reason: 'Took longer than 30 minutes' });
       else if (t - p.beat > LIMITS.beatMs) stop(a.id, { state: 'failed', reason: 'Froze (no heartbeat for a minute)' });
+      // Unanswered for a day: a no (never a yes), and the owner is told.
+      else if (a.state === 'waiting' && a.ask?.at && t - a.ask.at > LIMITS.askMs) {
+        const q = a.ask.question;
+        log('agent_ask_expired', { id: a.id });
+        answer(a.id, false);
+        a.step = one(`No answer in 24 hours to "${q}", so it went on without that`, 60);
+        tell('update', a);
+      }
       else if (a.state === 'working' && t - p.event > LIMITS.stuckMs) stop(a.id, { state: 'failed', reason: 'Got stuck (nothing happened for 3 minutes)' });
     }
   }

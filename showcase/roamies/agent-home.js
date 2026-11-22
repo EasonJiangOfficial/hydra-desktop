@@ -211,7 +211,8 @@
       row.agent = { ...row.agent, state: 'working', ask: null, step: allow ? 'Carrying on' : 'Carrying on without that' };
       paint(row);
     };
-    yes.addEventListener('click', () => answer(true));
+    // Never while Hydra is acting in an app (a synthetic click on Allow would approve its own step).
+    yes.addEventListener('click', () => { if (!window.Roamie?.handsBusy) answer(true); });
     no.addEventListener('click', () => answer(false));
     rows.set(a.id, row);
     list.prepend(el);

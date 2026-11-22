@@ -1128,6 +1128,9 @@
       press: (x, y) => {
         if (!b) return;
         const ch = b.input?.choices;
+        // While Hydra acts in another app (its clicks are synthetic), an Allow here is never pressed: only the owner's
+        // own click answers an ask (the model can't approve its own step by clicking).
+        if (ch && R.handsBusy) return;
         if (ch) {
           const i = ch.rects.findIndex((r) => x >= r[0] && x <= r[0] + r[2] && y >= r[1] - 2 && y <= r[1] + r[3] + 3);
           if (i >= 0) { ch.down = i; ch.onChoose?.(i); } else b.input.onPress?.();
