@@ -84,12 +84,14 @@ export function askMacTool({ api, turn, alive = async () => true, signal: turnSi
       if (left() <= 0) return 'This turn has no time left to ask your Mac. Tell the owner to ask again.';
       // Past this point the sub-turn may exist: anything but a clear answer is unsure (R11b-D, R11b-E).
       const maybe = (why) => { unsure = true; log('ask_mac', { status: why, unsure: true }); return MAC_UNSURE_TEXT; };
+      if (signal?.aborted) throw new Error('Stopped.'); // nothing sent yet
       let r = null;
       try { r = await api.req('/api/agent/relay/subturn', { method: 'POST', body: { turnId: turn.id, claimId: turn.claimId, instruction: String(instruction).trim() }, signal, timeout: within() }); } catch (e) {
         // Nothing was sent (R11b-F): no key here.
         if (e?.code === 'unpaired') { log('ask_mac', { status: 'unpaired' }); return 'Nothing was sent to your Mac: Hydra is not paired here. Tell the owner to pair it again.'; }
       }
-      if (signal?.aborted) throw new Error('Stopped.');
+      // Stopped while or after the POST went out: it may have made the sub-turn (R11c-B3 follow-up).
+      if (signal?.aborted) { maybe('stopped'); throw new Error('Stopped.'); }
       if (!r || r.status >= 500) return maybe(r?.status ?? 'unreachable');
       const made = await r.json().catch(() => null);
       if (r.ok && typeof made?.subTurnId !== 'string') return maybe(`${r.status} unread`);
@@ -124,7 +126,8 @@ export function askMacTool({ api, turn, alive = async () => true, signal: turnSi
           if (ok === 'late') return tooLong();
           if (!ok) throw new Error('This turn is over, so I stopped waiting for your Mac.');
         }
-        await sleep(Math.min(pollMs, Math.max(0, left())), signal);
+        // The real sleep rejects when stopped: the sub-turn exists, so that is unsure too.
+        try { await sleep(Math.min(pollMs, Math.max(0, left())), signal); } catch { unsure = true; throw new Error('Stopped.'); }
       }
     },
   };

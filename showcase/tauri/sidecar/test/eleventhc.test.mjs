@@ -99,7 +99,7 @@ console.log(JSON.stringify(o));
   const out5 = String(r5?.message ?? r5);
   assert.ok(!out5.includes('sk-live'), out5);
   assert.ok(asks.some((q) => q.includes('the Terminal window')), JSON.stringify(asks));
-  assert.match(out5, /pressed return/, 'it still says what ran');
+  assert.match(out5, /: press return\. /, 'it still says what ran, in the approved step\'s own words (R11d F4)');
 
   if (process.platform === 'darwin') {
     // ---- R11c-4: manage_app with a window names that window's own app, not the app given.

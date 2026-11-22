@@ -283,6 +283,18 @@ export function webQuestion(name, a = {}) {
   if (!urls.length) throw new Error('Give url.');
   return `Fetch ${urls.length === 1 ? String(urls[0]) : `these pages:\n${urls.map((u) => `- ${u}`).join('\n')}`}?`;
 }
+/** The helpers' own app match (hands/main.swift appMatches, hands-win logic.rs app_matches): find-text 'app:X'
+ *  searches every window it matches, so the windows checked first are found the same way (R11c review, F1). Both
+ *  helpers' browser lists and the program's file name: matching more only asks about more. */
+const HELPER_BROWSERS = new Set(['brave browser', 'google chrome', 'safari', 'arc', 'firefox', 'microsoft edge', 'opera', 'vivaldi', 'chromium', 'orion', 'zen', 'chrome', 'msedge', 'brave', 'librewolf', 'waterfox', 'floorp', 'thorium']);
+export function appMatches(w, want) {
+  const x = String(want ?? '').trim().toLowerCase().replace(/\.exe$/, '');
+  if (!x) return false;
+  const names = [w?.app, w?.exe].map((n) => String(n ?? '').toLowerCase()).filter(Boolean);
+  if (['browser', 'web browser', 'my browser'].includes(x)) return names.some((n) => HELPER_BROWSERS.has(n));
+  return names.some((a) => a === x || a.includes(x) || x.includes(a));
+}
+
 export function stepsText(steps, { clipboard } = {}) {
   const q = (t) => JSON.stringify(String(t ?? ''));
   const one = (s) => {
@@ -293,7 +305,7 @@ export function stepsText(steps, { clipboard } = {}) {
       case 'set': return `set control ${s.id} to ${q(s.text)}`;
       case 'type': return `type ${q(s.text)}`;
       case 'choose': return `choose ${q(s.option)}${s.field ? ` in ${q(s.field)}` : ''}`;
-      case 'key': return isPasteKey(s.key) ? `press ${s.key}, pasting ${clipboard == null ? 'what is on the clipboard (I can\'t read it)' : q(clipboard)}` : `press ${s.key}`;
+      case 'key': return isPasteKey(s.key) && clipboard !== false ? `press ${s.key}, pasting ${clipboard == null ? 'what is on the clipboard (I can\'t read it)' : q(clipboard)}` : `press ${s.key}`;
       case 'click_at': return `click at ${Math.round(s.x)}, ${Math.round(s.y)}`;
       case 'hover': return s.text ? `point at ${q(s.text)}` : `point at ${Math.round(s.x ?? 0)}, ${Math.round(s.y ?? 0)}`;
       case 'scroll': return `scroll ${s.direction ?? 'down'}${s.text ? ` in ${q(s.text)}` : ''}`;
@@ -436,9 +448,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const all = (await hands('windows').catch(() => null))?.windows ?? [];
     if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN });
     const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
-    const app = String(front?.app ?? (spec.startsWith('app:') ? spec.slice(4) : '')).trim();
+    const name = spec.startsWith('app:') ? spec.slice(4) : null;
+    const app = String(front?.app ?? name ?? '').trim();
     const one = spec.startsWith('window:');
-    const wins = [...(front ? [front] : []), ...(one ? [] : all.filter((w) => app && String(w.app ?? '').toLowerCase() === app.toLowerCase() && w.id !== front?.id))];
+    // 'app:X': every window the helper's fuzzy match takes ("Preview Terminal" is Preview and Terminal); 'front': the
+    // front app's windows.
+    const same = (w) => (name != null ? appMatches(w, name) : !!app && String(w.app ?? '').toLowerCase() === app.toLowerCase());
+    const wins = [...(front ? [front] : []), ...(one ? [] : all.filter((w) => same(w) && w.id !== front?.id))];
     return windowShows(wins, ctx, { ok, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
   }
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
@@ -1037,22 +1053,32 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
+          // A relay turn, before the window is said yes to (R11c review, F4): the helper's words quote the window (what a
+          // hover showed, a click's whole text, what a field shows), in what it did and in its errors. The model gets
+          // only the approved steps' own words, and errors with quoted text taken out.
+          const plain = (list) => stepsText(list.map(({ shown, ...st }) => st), { clipboard: false }).replace(/^\d+\. /gm, '').replace(/\n/g, ', ');
+          const ran = [];
+          const told = (before) => (remote() ? plain(ran) : before.join(', '));
+          const unq = (t) => (remote() ? String(t ?? '').replace(/"[^"]*"|“[^”]*”/g, '(words not shown)') : t);
+          const actOnce = () => hands('act', JSON.stringify(plan)).catch((e) => { throw remote() ? new Error(unq(e?.message ?? e)) : e; });
           const act = async () => {
-            let r = await hands('act', JSON.stringify(plan)), before = [];
+            let r = await actOnce(), before = [];
+            ran.length = 0;
             while (r.needsConfirm && Number.isInteger(r.step) && r.step >= 0 && r.step < plan.steps.length) {
               before = [...before, ...(r.done ?? [])];
+              ran.push(...plan.steps.slice(0, r.step));
               // The window has a file open: typing, keys and saving there write to that file (an editor autosaves), so
               // it's judged as a write: a protected file never, any other only with a yes naming its real path (F1).
               if (r.document) {
                 const v = checkWrite(String(r.document), HOME, { exists: true });
                 const where = r.app ?? (appName === 'front' ? 'the app in front' : appName);
-                if (v.level === BLOCK) throw new Error(`Blocked for safety: ${where} has ${r.document} open, and acting there could change it. ${v.reason}${before.length ? ` (done first: ${before.join(', ')})` : ''}`);
+                if (v.level === BLOCK) throw new Error(`Blocked for safety: ${where} has ${r.document} open, and acting there could change it. ${v.reason}${before.length ? ` (done first: ${told(before)})` : ''}`);
                 if (!(await confirm(`Change ${v.path} in ${where}? What I type or save there goes into that file.`, ctx))) {
-                  throw new Error(`${userName} said no, so I stopped before acting in ${v.path}${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                  throw new Error(`${userName} said no, so I stopped before acting in ${v.path}${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.docOk = [...(plan.docOk ?? []), String(r.document)];
                 plan.steps = plan.steps.slice(r.step);
-                r = await hands('act', JSON.stringify(plan));
+                r = await actOnce();
                 continue;
               }
               // The helper's own backstop: no yes for the whole plan in this app yet (a retry in an app just opened, or
@@ -1060,12 +1086,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               if (r.whole === 'plan') {
                 const left = plan.steps.slice(r.step);
                 if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}`, ctx))) {
-                  throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                  throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []).filter((x) => x !== 'plan'), 'plan'];
                 plan.planApp = r.app;
                 plan.steps = left;
-                r = await hands('act', JSON.stringify(plan));
+                r = await actOnce();
                 continue;
               }
               // A file panel (Save, Open, an upload) or Finder: any file in any folder can be picked, made or moved there,
@@ -1075,22 +1101,22 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 // A click the owner can't see the target of (a spot on screen, a control with no name) isn't taken there:
                 // in a file panel it could pick any file (V9-6).
                 const blind = left.find((s) => s.do === 'click_at' || (s.do === 'hover' && !s.text) || (['click', 'focus'].includes(s.do) && !s.shown));
-                if (blind) throw new Error(`Blocked for safety: ${r.why} There I only click things by their name (click_text), so ${userName} can see what; "${stepsText([blind]).slice(3)}" doesn't say${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                if (blind) throw new Error(`Blocked for safety: ${unq(r.why)} There I only click things by their name (click_text), so ${userName} can see what; "${stepsText([blind]).slice(3)}" doesn't say${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left, { clipboard })}`, ctx))) {
-                  throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                  throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []), String(r.whole)];
                 plan.steps = left;
-                r = await hands('act', JSON.stringify(plan));
+                r = await actOnce();
                 continue;
               }
               if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx))) {
-                throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
               }
               plan.steps = [{ ...plan.steps[r.step], confirmed: true, confirmedLabel: r.label ?? '' }, ...plan.steps.slice(r.step + 1)];
-              r = await hands('act', JSON.stringify(plan));
+              r = await actOnce();
             }
-            if (r.needsConfirm) throw new Error(r.why || 'That step needs a yes first.');
+            if (r.needsConfirm) throw new Error(unq(r.why) || 'That step needs a yes first.');
             return before.length && Array.isArray(r.done) ? { ...r, done: [...before, ...r.done] } : r;
           };
           // A retry acts somewhere else (the app just opened, or another window): no yes carries over to it.
@@ -1120,7 +1146,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           async function seen(res) {
             try { await windowShows(res.window, ctx, { okApp: plan.planApp }); } catch (e) {
               if (!/said no/.test(e.message)) throw e;
-              return `In ${res.window.app}: ${res.done.join(', ')}. ${userName} said no to reading the window after, so I can't see what it shows now.`;
+              return `In ${res.window.app}: ${remote() ? plain(mapped) : res.done.join(', ')}. ${userName} said no to reading the window after, so I can't see what it shows now.`;
             }
             return finish(res);
           }

@@ -450,7 +450,7 @@ async function* claudeCodeLoop(messages, o) {
   // after the last addition is not the end yet (the addition is still to be answered).
   // finalAt: the last top-level message that ended the turn (end_turn). A run cut by max turns or an error answered
   // only what came before it; a message that merely started after an addition (a tool step) did not (R11b-G).
-  let step = 0, addedAt = 0, answeredAt = 0, finalAt = 0, msgAt = 0, streamed = false, cut = false;
+  let step = 0, addedAt = 0, answeredAt = 0, finalAt = 0, msgAt = 0, streamed = false, cut = false, byUuid = false;
   const added = []; // [{ at, text }]: what was not answered when the run ends goes to o.onLeft (R11-2)
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
   // After begin(): the first message is on the input already, so an addition always comes after it.
@@ -506,13 +506,15 @@ async function* claudeCodeLoop(messages, o) {
       // follows, even when it came before this turn's answer started (sent while the last request was out). An older
       // Claude Code doesn't say: an addition after the last answer started waits for its own answer, as before.
       const took = Array.isArray(message.user_message_uuids) ? message.user_message_uuids : typeof message.user_message_uuid === 'string' ? [message.user_message_uuid] : null;
-      if (took) { for (const a of added) if (took.includes(a.uuid)) a.done = true; if (added.some((a) => !a.done)) continue; }
+      if (took) { byUuid = true; for (const a of added) if (took.includes(a.uuid)) a.done = true; if (added.some((a) => !a.done)) continue; }
       else if (addedAt > answeredAt) continue;
       break;
     }
   } catch (e) { cut = true; throw e; } finally {
     o.takeInput?.(null);
-    o.onLeft?.(added.filter((a) => !a.done && a.at > (cut ? finalAt : answeredAt)).map((a) => a.text));
+    // Claude Code named what it took: on a cut, every addition it didn't take is unanswered, whenever it was sent (one
+    // sent during the final answer's first token is before finalAt, R11c-B1 follow-up). Else by step, as before.
+    o.onLeft?.(added.filter((a) => !a.done && ((cut && byUuid) || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
