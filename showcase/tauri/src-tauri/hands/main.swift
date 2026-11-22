@@ -1806,6 +1806,9 @@ func manage(_ spec: [String: Any]) -> Never {
     if let id = spec["window"] as? Int { target = all.first { $0.id == id }; if target == nil { fail("No window with id \(id) (it may have closed). Call list_windows again.") } }
     let running: NSRunningApplication? = {
         if let t = target { return NSRunningApplication(processIdentifier: t.pid) }
+        // pid: the very process 'front' or 'resolve' named when the sidecar asked (two apps can share a name: Xcode and
+        // Xcode-beta), and only while it still has that name; gone or renamed, nothing is acted on (E0-1).
+        if let p = spec["pid"] as? Int { return NSRunningApplication(processIdentifier: pid_t(p)).flatMap { !$0.isTerminated && $0.localizedName == appName ? $0 : nil } }
         // exact: the sidecar named this very app (resolve's pick) in its question, so no other app is acted on (B4-3).
         if !appName.isEmpty { return runningPick(appName, exact: spec["exact"] as? Bool == true) }
         return NSWorkspace.shared.frontmostApplication
@@ -2062,6 +2065,8 @@ case "front":
     let frontPid = NSWorkspace.shared.frontmostApplication.flatMap { isRoamies($0.processIdentifier) ? nil : $0.processIdentifier }
     guard let pid = frontPid ?? wins.first?.pid, let app = NSRunningApplication(processIdentifier: pid) else { out(o) }
     o["app"] = app.localizedName ?? "?"
+    // The process too, so manage acts on this very one, not the first app with its name (E0-1).
+    o["pid"] = Int(pid)
     if let b = app.bundleIdentifier { o["bundle"] = b }
     let ax = AXUIElementCreateApplication(pid)
     AXUIElementSetMessagingTimeout(ax, 0.25)
@@ -2083,7 +2088,7 @@ case "resolve":
     let name = String(args[1].dropFirst(4))
     var o: [String: Any] = ["ok": true]
     if let w = mainWindow(windows().filter { appMatches($0.app, name) }) { o["window"] = winInfo(w) }
-    if let n = runningPick(name)?.localizedName { o["running"] = n }
+    if let r = runningPick(name), let n = r.localizedName { o["running"] = n; o["runningPid"] = Int(r.processIdentifier) }
     out(o)
 
 case "locate":

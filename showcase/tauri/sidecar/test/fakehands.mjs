@@ -1,8 +1,9 @@
 // A fake hands helper for tests: sends what hands/main.swift (or, with win: true, hands-win main.rs) sends, command by
 // command, from a state file the test writes. Never touches the Mac: it only reads that file and appends to a log.
 // In a test: const fake = fakeHands(dir); then fake.set({ wins, frontPid, hidden, running, win, act }), fake.calls().
-// running: the regular apps running, in order (default: every window's app); hidden: apps running with no window on
-// screen (hands-win: minimised). Bringing one forward is logged as ['UNHIDE', app], an app managed as ['MANAGE', do, app].
+// running: the regular apps running, in order (default: every window's app), each a name or { app, pid } (a name's pid:
+// that of a window of its app not taken by an earlier one); hidden: apps running with no window on screen (hands-win:
+// minimised). Bringing one forward is logged as ['UNHIDE', app], an app managed as ['MANAGE', do, app].
 // Run as the helper itself (ROAMIES_HANDS points here): node fakehands.mjs <command> <args…>.
 // A window: { id, pid, app, exe?, title, doc?, url?, text (lines), bounds?, listed? (false: a panel above layer 0 or
 // 80x60 and smaller, which 'windows' and find-text leave out but the screen's pixels show) }.
@@ -67,16 +68,27 @@ function main(a) {
   // by exe).
   const matches = (w, want) => {
     if (!win) return macMatches(w.app, want);
-    const x = want.trim().toLowerCase().replace(/\.exe$/, '');
+    // Rust's str::trim: White_Space (U+0085 too, never U+FEFF), not JS trim (E0-3).
+    const x = want.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '').toLowerCase().replace(/\.exe$/, '');
     if (!x) return false;
     if (['browser', 'web browser', 'my browser'].includes(x)) return BROWSER_EXES.includes(exe(w).toLowerCase());
     return [w.app, exe(w)].map((n) => n.toLowerCase()).some((n) => n && (n === x || n.includes(x) || x.includes(n)));
   };
   // main.swift pickRunning over the regular apps running (exact: that very name only); hands-win: the first minimised
   // window's app that app_matches.
-  const running = st.running ?? [...new Set(st.wins.map((w) => w.app))];
-  const pickRunning = (want, exact = false) => (exact ? running.find((n) => sEq(n, want))
-    : running.find((n) => sEq(sLow(n), sTrim(sLow(want)))) ?? running.find((n) => macMatches(n, want))) ?? null;
+  const taken = new Set();
+  const procs = (st.running ?? [...new Set(st.wins.map((w) => w.app))]).map((r) => {
+    if (typeof r !== 'string') return r;
+    const w = st.wins.find((x) => x.app === r && !taken.has(x.pid));
+    if (w) taken.add(w.pid);
+    return { app: r, pid: w?.pid };
+  });
+  const pickProc = (want, exact = false) => (exact ? procs.find((p) => sEq(p.app, want))
+    : procs.find((p) => sEq(sLow(p.app), sTrim(sLow(want)))) ?? procs.find((p) => macMatches(p.app, want))) ?? null;
+  const pickRunning = (want, exact = false) => pickProc(want, exact)?.app ?? null;
+  // main.swift reads a spec with JSONSerialization, which drops one leading U+FEFF from each string; hands-win's serde
+  // keeps it (E0-3).
+  const spec = (s) => JSON.parse(s, win ? undefined : (k, v) => (typeof v === 'string' && v[0] === '\uFEFF' ? v.slice(1) : v));
   const pick = (want) => (win ? st.wins.find((x) => hidden.has(x.app) && matches(x, want))?.app ?? null : pickRunning(want));
   // ROAMIES_FORWARD: the app said yes to (main.swift mayBringForward, logic.rs may_bring_forward).
   const forward = process.env.ROAMIES_FORWARD || '';
@@ -112,27 +124,37 @@ function main(a) {
       done({ ok: true, ...(win ? {} : { all: every }), windows: (every ? listed : listed.slice(0, 30)).map((w) => ({ ...shows(w, false), ...(win ? { exe: exe(w) } : {}), ...(w.pid === st.frontPid ? { frontApp: true } : {}) })) });
     }
     case 'front': {
-      const w = resolve('front');
-      if (!w) done({ ok: true });
-      done({ ok: true, app: w.app, ...(win ? { exe: exe(w) } : {}), ...(w.title ? { title: w.title } : {}), ...(w.url ? { url: w.url } : {}), ...(!win && w.doc ? { document: w.doc } : {}) });
+      if (win) {
+        const w = resolve('front');
+        if (!w) done({ ok: true });
+        done({ ok: true, app: w.app, exe: exe(w), ...(w.title ? { title: w.title } : {}), ...(w.url ? { url: w.url } : {}) });
+      }
+      // main.swift: the front app (frontPid) even with no window on screen, its pid too; the first window's app only
+      // when none is known in front (E0-3).
+      const pid = st.frontPid ?? listed[0]?.pid, w = mainWindow(listed.filter((x) => x.pid === pid));
+      const app = w?.app ?? procs.find((p) => p.pid === pid)?.app ?? st.wins.find((x) => x.pid === pid)?.app;
+      if (pid == null || !app) done({ ok: true });
+      done({ ok: true, app, pid, ...(w?.title ? { title: w.title } : {}), ...(w?.url ? { url: w.url } : {}), ...(w?.doc ? { document: w.doc } : {}) });
     }
     case 'resolve': {
       // The window 'app:X' uses on screen, and the app it would bring forward (main.swift: the running pick always;
       // hands-win: the minimised pick when no window is on screen), doing neither.
       const name = String(a[1]).slice(4), w = mainWindow(listed.filter((x) => matches(x, name))), app = win && w ? null : pick(name);
-      done({ ok: true, ...(w ? { window: info(w) } : {}), ...(app ? { running: app } : {}) });
+      const pid = win ? null : pickProc(name)?.pid;
+      done({ ok: true, ...(w ? { window: info(w) } : {}), ...(app ? { running: app } : {}), ...(pid != null ? { runningPid: pid } : {}) });
     }
     case 'manage': {
-      // main.swift manage: the window's own app, else the running app picked for app (exact: that very name), else the
-      // front app. Force quit needs confirmed.
-      const spec = JSON.parse(a[1]), name = sTrim(String(spec.app ?? ''));
+      // main.swift manage: the window's own app, else the process pid while it has that very name, else the running app
+      // picked for app (exact: that very name), else the front app. Force quit needs confirmed.
+      const s = spec(a[1]), name = sTrim(String(s.app ?? ''));
       let app = null;
-      if (spec.window != null) { app = listed.find((x) => x.id === spec.window)?.app; if (!app) fail(`No window with id ${spec.window} (it may have closed). Call list_windows again.`); }
-      else app = name ? pickRunning(name, spec.exact === true) : resolve('front')?.app ?? null;
+      if (s.window != null) { app = listed.find((x) => x.id === s.window)?.app; if (!app) fail(`No window with id ${s.window} (it may have closed). Call list_windows again.`); }
+      else if (s.pid != null) { const p = procs.find((x) => x.pid === s.pid) ?? (st.running ? null : st.wins.find((x) => x.pid === s.pid)); app = p && sEq(p.app, name) ? p.app : null; }
+      else app = name ? pickRunning(name, s.exact === true) : resolve('front')?.app ?? null;
       if (!app) fail(name ? `${name} isn't open.` : 'No app is in front.');
-      if (spec.do === 'force_quit' && !spec.confirmed) done({ ok: false, needsConfirm: true, why: `Force quitting ${app} loses anything unsaved.`, app });
-      log(['MANAGE', spec.do, app]);
-      done({ ok: true, done: { quit: `asked ${app} to quit`, force_quit: `force quit ${app}`, hide: `hid ${app}`, activate: `switched to ${app}`, close: `closed a ${app} window`, minimize: `minimised a ${app} window`, arrange: `put the ${app} window on the ${spec.layout}` }[spec.do] ?? spec.do });
+      if (s.do === 'force_quit' && !s.confirmed) done({ ok: false, needsConfirm: true, why: `Force quitting ${app} loses anything unsaved.`, app });
+      log(['MANAGE', s.do, app]);
+      done({ ok: true, done: { quit: `asked ${app} to quit`, force_quit: `force quit ${app}`, hide: `hid ${app}`, activate: `switched to ${app}`, close: `closed a ${app} window`, minimize: `minimised a ${app} window`, arrange: `put the ${app} window on the ${s.layout}` }[s.do] ?? s.do });
     }
     case 'locate': {
       if (a[1] === 'screen') done({ ok: true, what: 'screen' });
@@ -175,7 +197,7 @@ function main(a) {
     }
     case 'refine': done({ ok: true, boxes: JSON.parse(a[1]).map(() => null) });
     case 'act': {
-      const plan = JSON.parse(a[1]);
+      const plan = spec(a[1]);
       const t = plan.window != null ? `window:${plan.window}` : plan.app ? `app:${plan.app}` : 'front';
       if (!resolve(t)) fail(noWindow(t));
       done(st.act ?? { ok: true, done: [], window: shows(resolve(t)) });

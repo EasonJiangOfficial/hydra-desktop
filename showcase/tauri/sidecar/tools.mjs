@@ -1,5 +1,6 @@
 // The agent's tools: screen capture, reading and working other apps (the "hands" helper), files, web pages and
 // memory. Every file, URL and open goes through safety.mjs first. There is no shell: the agent runs no commands.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -380,8 +381,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // Mac and in a relay turn, naming the app the helper itself picks (resolve, never a guess here: B4-1, B4-2), before
   // any helper call that can do it (hands() checks every one). The helper does it only for the app passed back in
   // ROAMIES_FORWARD after that yes, at most once a run. forward: in this request, each name asked for -> the app said
-  // yes to, until a helper call takes that yes (one yes, one bring-forward); a later need asks again.
+  // yes to ({ real, call }), until a helper call takes that yes (one yes, one bring-forward) or the tool call that asked
+  // ends without using it (E0-2); a later need asks again.
   let forward = { turn: -1, apps: new Map() };
+  const toolCall = new AsyncLocalStorage(); // the tool call under way (an object of its own), for forward's yeses
   const TARGET_AT = { locate: 1, ui: 1, 'locate-control': 1, 'ocr-find': 1, capture: 2 };
   const appOf = (args) => {
     if (args[0] === 'act') { try { const p = JSON.parse(args[1]); return p.window == null && p.app ? String(p.app) : null; } catch { return null; } }
@@ -400,14 +403,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const real = r && !r.window && r.running ? String(r.running) : null;
     if (!real) return null;
     if (!(await confirm(`Bring ${real} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx))) throw new Error(`${userName} said no, so I didn't bring ${real} forward.`);
-    forward.apps.set(name, real);
+    forward.apps.set(name, { real, call: toolCall.getStore() });
     return look ? real.trim().toLowerCase() : null;
   }
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Hydra app.');
     const app = appOf(args);
     if (app != null) await bringForward(app);
-    const fwd = app != null && forward.turn === turn ? forward.apps.get(app) : undefined;
+    const fwd = app != null && forward.turn === turn ? forward.apps.get(app)?.real : undefined;
     // Used up by this call: a yes never brings the app forward again later in the request (after a hide said yes to).
     if (fwd !== undefined) forward.apps.delete(app);
     // Acting in an app may take the real cursor: meanwhile clicks go through the overlay, even where the Sidekick or
@@ -1289,10 +1292,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         if (window != null && !owner) throw new Error(`There's no window ${window} now. Use list_windows for its id.`);
         // With an app, the helper picks a running app by its name first, else by a part of it ("Code" is Xcode); with
         // neither, the app in front now. That app is named, and the helper acts on exactly it or on nothing (exact,
-        // B4-3), never on whatever app is in front once the owner has answered.
-        const real = window != null ? null : app ? (await hands('resolve', `app:${app}`).catch(() => null))?.running : (await hands('front').catch(() => null))?.app;
+        // B4-3), never on whatever app is in front once the owner has answered. pid: that very process, while it keeps
+        // that name, not another app of the same name (Xcode and Xcode-beta, E0-1).
+        const seen = window != null ? null : app ? await hands('resolve', `app:${app}`).catch(() => null) : await hands('front').catch(() => null);
+        const real = app ? seen?.running : seen?.app, pid = app ? seen?.runningPid : seen?.pid;
         if (window == null && !real) throw new Error(app ? `${app} isn't open.` : 'No app is in front.');
-        const spec = { do: what === 'switch' ? 'activate' : what, ...(real ? { app: String(real), exact: true } : app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
+        const spec = { do: what === 'switch' ? 'activate' : what, ...(real ? { app: String(real), exact: true, ...(Number.isInteger(pid) ? { pid } : {}) } : app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
         const name = owner ?? real;
         const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
         if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
@@ -1305,6 +1310,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           res = await hands('manage', JSON.stringify({ ...spec, confirmed: true }));
         }
         if (res.ok === false) throw new Error(res.error || res.why || 'That did not work.');
+        // Hidden or quit now: a bring-forward yes still held for it never undoes that unasked (E0-2).
+        if (['hide', 'minimize', 'quit', 'force_quit'].includes(what)) for (const [k, v] of forward.apps) if (v.real === name) forward.apps.delete(k);
         return `Done: ${res.done}.`;
       },
     }] : []),
@@ -1704,6 +1711,15 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     const r = await Promise.race([hands('locate', 'front').catch(() => null), new Promise((res) => setTimeout(() => res(null), 1500))]);
     const b = r?.window?.bounds;
     return Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) ? b : null;
+  }
+  // Each tool call runs as its own context: a bring-forward yes it asked for and didn't use ends with it (E0-2).
+  for (const t of tools) {
+    const run = t.execute;
+    if (typeof run !== 'function') continue;
+    t.execute = (...a) => {
+      const call = {};
+      return toolCall.run(call, async () => { try { return await run(...a); } finally { for (const [k, v] of forward.apps) if (v.call === call) forward.apps.delete(k); } });
+    };
   }
   return { tools, hands, whereNow, frontNow, frontBounds, ink: inkEvents, nextTurn: () => ++turn };
 }

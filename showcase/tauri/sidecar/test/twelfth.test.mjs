@@ -120,7 +120,7 @@ if (['darwin', 'win32'].includes(process.platform)) {
   // The shared fake as main.swift: its own match (its self-test checks the same names), and nothing brought forward
   // unless it's the app in ROAMIES_FORWARD.
   fake.set(mailHidden);
-  assert.deepEqual(helper({}, 'resolve', `app:${JOINED}`), { ok: true, running: 'Mail' });
+  assert.deepEqual(helper({}, 'resolve', `app:${JOINED}`), { ok: true, running: 'Mail', runningPid: 20 });
   assert.equal(helper({}, 'locate', `app:${JOINED}`).ok, false);
   assert.equal(helper({ ROAMIES_FORWARD: 'Finder' }, 'locate', `app:${JOINED}`).ok, false);
   assert.deepEqual(unhid(), []);

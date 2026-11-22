@@ -460,6 +460,7 @@ async function* claudeCodeLoop(messages, o) {
   // turnAt: the step the turn under way started after (the last result). turnTook: what Claude Code's stream stamps say
   // this turn took so far (user_message_uuids on its replies): all a crash leaves to go by (R11f-1).
   let turnAt = 0, turnTook = null;
+  const results = []; // the step of each turn that ended well (turnAt), for what Stop counts answered (E0-4)
   // folds: where a tool round ended and a new message began after it (R11g-5). Claude Code folds what was queued into a
   // turn only there, and a typed turn's stream names none of it (sdk.d.ts: only its first frame is stamped). Counted
   // only where the order is provable (R11h-1): our tools' results go back to Claude Code on the same stdin as the
@@ -550,7 +551,7 @@ async function* claudeCodeLoop(messages, o) {
       settle(took, true);
       // The first turn to end well is the head's own: the head is always the first message it takes.
       headDone = true;
-      turnAt = step; turnTook = null;
+      turnAt = step; turnTook = null; results.push(step);
       if (took) { if (added.some((a) => !a.done)) continue; }
       else if (addedAt > answeredAt) continue;
       break;
@@ -559,8 +560,12 @@ async function* claudeCodeLoop(messages, o) {
     o.takeInput?.(null);
     // Claude Code named what it took: unless Stop ended it, every addition it didn't take is unanswered, whenever it was
     // sent (one sent during the final answer's first token is before finalAt, R11c-B1 follow-up), on a cut or a stream
-    // that simply ended (R11e-7). Else by step, as before.
-    o.onLeft?.(added.filter((a) => !a.done && ((byUuid && !aborted) || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
+    // that simply ended (R11e-7). After Stop, only what provably got its answer started is left out (E0-4): folded into
+    // a message of the turn under way (a fold after it), or a message that started after a turn that ended after it
+    // (its own turn). A message that merely started after it (the head's next step, already built) answers nothing.
+    // Else by step, as before.
+    const started = (a) => folds.some((f) => f > a.at && f > turnAt) || results.some((r) => r >= a.at && r < answeredAt);
+    o.onLeft?.(added.filter((a) => !a.done && (aborted ? !started(a) : byUuid || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
     // Answered: its turn ended well, or the run was cut (an error, max turns, a stream that just ended) after that turn's
     // final answer, as settle counts it for additions. Else not: carried words in it are then unanswered (B4-5..B4-7).
     o.onAnswered?.(headDone || (!aborted && finalAt > 0 && finalAt === answeredAt));
@@ -620,7 +625,13 @@ export class ClaudeCodeAgent {
   /** After a prompt's run whose words were named unanswered: takes them back out when nothing came after them in the
    *  history, so no later run sends them again (claudeCodeLoop's first message takes every user message at the end).
    *  Its Claude Code session isn't resumed then (resumeId: the anchor was those words), since it may hold them. */
-  forget() { if (!this.#running && this.#last && this.messages.at(-1) === this.#last) this.messages.pop(); }
+  forget() {
+    if (this.#running || !this.#last || this.messages.at(-1) !== this.#last) return;
+    this.messages.pop();
+    // The anchor was those very words: said again word for word they'd match it and resume that session (E0-6).
+    this.resume = null;
+    this.options.onResume?.(null);
+  }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
