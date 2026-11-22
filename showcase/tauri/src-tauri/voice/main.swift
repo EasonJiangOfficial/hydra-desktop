@@ -115,6 +115,8 @@ struct RecognizerCallbacks {
     let onText: (String) -> Void
     let onDone: () -> Void
     let onError: (Error) -> Void
+    /// The recogniser's other readings of the same moment (wake listening only, macOS 26+): the phrase may be in one.
+    var onAlternatives: (([String]) -> Void)? = nil
 }
 
 // Locale.current is limited to the bundle's localizations (none ship), so it is always English:
@@ -196,7 +198,10 @@ final class AnalyzerRecognizer: Recognizer {
             var analyzer: SpeechAnalyzer?, reader: Task<Void, Error>?
             do {
                 let (locale, format) = try await Self.prepare(locale: wanted).value
-                let tr = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+                // Wake listening also asks for the other readings it weighed ("Hey Hydra" under "Hey, Heidler").
+                let p = SpeechTranscriber.Preset.progressiveTranscription
+                let tr = cb.onAlternatives == nil ? SpeechTranscriber(locale: locale, preset: p)
+                    : SpeechTranscriber(locale: locale, transcriptionOptions: p.transcriptionOptions, reportingOptions: p.reportingOptions.union([.alternativeTranscriptions]), attributeOptions: p.attributeOptions)
                 let a = SpeechAnalyzer(modules: [tr])
                 analyzer = a
                 // Lean toward the app's names, as contextualStrings does for the older recogniser ("Hey Roamies").
@@ -222,9 +227,11 @@ final class AnalyzerRecognizer: Recognizer {
                     for try await r in tr.results {
                         let text = String(r.text.characters)
                         guard let self else { return }
+                        let before = self.finalized
                         if r.isFinal { self.finalized = Self.join(self.finalized, text); self.volatile = "" } else { self.volatile = text }
                         let shown = Self.join(self.finalized, self.volatile).trimmingCharacters(in: .whitespaces)
-                        DispatchQueue.main.async { cb.onText(shown) }
+                        let alts = cb.onAlternatives == nil ? [] : r.alternatives.dropFirst().map { Self.join(before, String($0.characters)).trimmingCharacters(in: .whitespaces) }
+                        DispatchQueue.main.async { cb.onText(shown); if !alts.isEmpty { cb.onAlternatives?(alts) } }
                     }
                 }
                 // Hold until the user stops talking (end()), then flush what's left.
@@ -361,12 +368,26 @@ enum OutputMute {
 }
 
 // Where the mic's buffers go: swapped on the main thread while the audio thread feeds it, so wake listening can
-// start a fresh recogniser without reopening the mic.
+// start a fresh recogniser without reopening the mic. It keeps the last 0.7 s of sound, so a new wake window can hear
+// that first (preroll) and nothing said as the windows change falls between them.
 final class Feed {
     private let lock = NSLock()
     private var target: Recognizer?
-    func set(_ r: Recognizer?) { lock.lock(); target = r; lock.unlock() }
-    func append(_ buffer: AVAudioPCMBuffer) { lock.lock(); let t = target; lock.unlock(); t?.append(buffer) }
+    private var recent: [AVAudioPCMBuffer] = [], recentFrames = 0
+    static let keep = 0.7
+    func set(_ r: Recognizer?, preroll: Bool = false) {
+        lock.lock(); defer { lock.unlock() }
+        if let r, preroll { for b in recent { r.append(b) } }
+        target = r
+    }
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        let t = target
+        recent.append(buffer); recentFrames += Int(buffer.frameLength)
+        while let first = recent.first, recentFrames - Int(first.frameLength) >= Int(Self.keep * buffer.format.sampleRate) { recentFrames -= Int(first.frameLength); recent.removeFirst() }
+        lock.unlock()
+        t?.append(buffer)
+    }
 }
 
 // Wake listening keeps the mic open. On a Bluetooth headset that drops it (AirPods too) to call-quality sound for as
@@ -438,19 +459,13 @@ enum InputDevice {
         for d in [current, builtIn] { if let d, !out.contains(d) { out.append(d) } }
         return out
     }
-    /// Opens the first mic in `tries` that `open` gets running. Every engine (a take, wake listening, the clap detector,
-    /// barge-in) goes through this order, so none of them stays stuck on a mic the process lost (AVAudioEngine's start
-    /// then fails with kAudioHardwareBadDeviceError, '!dev', 560227702, from canPerformIO).
+    /// Opens the first mic in `tries` that `open` gets running. The one mic (mic.swift) goes through this order, so it
+    /// never stays stuck on a mic the process lost (AVAudioEngine's start then fails with kAudioHardwareBadDeviceError,
+    /// '!dev', 560227702, from canPerformIO).
     static func firstOpening<T>(_ tries: [AudioDeviceID?], _ open: (AudioDeviceID?) -> T?) -> T? {
         for dev in tries { if let t = open(dev) { return t } }
         return nil
     }
-    /// When an engine last let go of the mic (barge-in's voice processing, wake listening, the clap detector). Core Audio
-    /// tears the old input down after stop() returns (voice processing's aggregate device most of all), so an engine
-    /// started in the same moment opens a device that's going away. The clap detector waits `settle` after it.
-    static var freedAt = -10.0
-    static let settle = 0.4
-    static func settled(now: Double, freedAt: Double) -> Bool { now - freedAt >= settle }
     static func use(_ dev: AudioDeviceID, on input: AVAudioInputNode) -> Bool {
         guard let unit = input.audioUnit else { return false }
         var id = dev
@@ -489,34 +504,42 @@ final class AutoGain {
     }
 }
 
-// The wake phrase, "Hey Roamies": a greeting, then the name, at the start of something said (the text's start or
-// after a sentence end). Near-misses the recogniser really writes count too ("Romies", "Roamie's", "Roomies").
-// The name can be the user's own ("Hey Jarvis"); the greeting stays, so the name alone in a sentence never wakes it.
+// The wake phrase, "Hey Hydra": a greeting, then the name, at the start of something said (the text's start or after a
+// sentence end), or the name alone as the first word ("Hydra, open Mail"). Words are compared by Spoken.same
+// (phrase.swift): "Hey Hydro", "Hay Hidra", "A Hydra" all wake; "hydrate" and "Hyundai" don't.
+// The name can be the user's own ("Hey Jarvis"), or Hydra's wake phrase another phrase entirely ("Okay Computer").
 enum WakeWord {
-    static let greetings: Set<String> = ["hey", "hi", "hay", "heya", "hiya"]
+    // Greetings as the recogniser writes "Hey" ("hay", "a", "high"...), and the stray words that may come before it.
+    static let greetings: Set<String> = ["hey", "hi", "hay", "heya", "hiya", "hei", "high", "hello", "a", "ay", "eh", "okay", "ok", "yo", "they", "he"]
+    static let fillers: Set<String> = ["um", "uh", "erm", "er", "oh", "so", "and", "well", "okay", "ok", "hm", "hmm", "the", "a"]
     static let defaultNames = ["hydra"]
     // Set and read on the main thread.
     private(set) static var names = defaultNames
     /// The chosen name as a word for the recogniser's hints ("Jarvis"); nil for Hydra.
     private(set) static var custom: String?
-    static var hints: [String] { ["Hydra"] + (custom.map { [$0] } ?? []) + (phrase.map { [$0.joined(separator: " ")] } ?? []) }
+    /// The words the recogniser leans toward: the name, the phrase and the sleep word ("three kill" for "3 kill").
+    static var hints: [String] { ["Hydra", "Hey Hydra"] + (custom.map { [$0, "Hey \($0)"] } ?? []) + (phrase.map { [$0.joined(separator: " ")] } ?? []) + [SleepWord.words.joined(separator: " ")] }
     /// Hydra's wake phrase when it isn't a greeting and a name ("Okay Computer"): its words, else nil.
     private(set) static var phrase: [String]?
+    /// What the names and phrase are now, to tell a real change from the same setting sent again.
+    static var signature: String { "\(names)|\(phrase ?? [])" }
 
     /// The wake phrase from Hydra's settings (agent_settings.wake_phrase, W5 contract 1). A greeting and one name
-    /// ("Hey Hydra", "Hi Jarvis") keep the tuned greeting rule (setName); any other phrase must be heard word for word
-    /// at the start of what's said, words of 5 letters or more one letter off. A phrase with no words, more than six,
-    /// or one short word is refused (false) and the last one stays.
+    /// ("Hey Hydra", "Hi Jarvis") keep the greeting rule (setName); any other phrase must be heard word for word at the
+    /// start of what's said. A phrase with no words, more than six, or one short word is refused (false) and the last
+    /// one stays.
     @discardableResult static func setPhrase(_ raw: String) -> Bool {
-        let w = tokens(raw).map(\.word)
+        let w = Spoken.words(raw).map(\.word)
         guard !w.isEmpty, w.count <= 6, w.count > 1 || w[0].count >= 5 else { return false }
-        if w.count == 2, greetings.contains(w[0]), setName(w[1]) { phrase = nil; return true }
+        // Only a real greeting makes it "a greeting and a name": "Okay Computer" stays a phrase, heard word for word.
+        if w.count == 2, ["hey", "hi", "hay", "heya", "hiya", "hello"].contains(w[0]), setName(w[1]) { phrase = nil; return true }
+        if w.count == 1, setName(w[0]) { phrase = nil; return true }
         phrase = w
         return true
     }
 
-    /// Sets the name after the greeting; nil, "" or Roamies goes back to Roamies. Letters only, 4 to 20 of them;
-    /// anything else is refused (returns false) and the name stays as it was.
+    /// Sets the name after the greeting; nil, "" or Hydra goes back to Hydra. Letters only, 4 to 20 of them; anything
+    /// else is refused (returns false) and the name stays as it was.
     @discardableResult static func setName(_ raw: String?) -> Bool {
         let w = (raw ?? "").lowercased().filter { $0.isLetter }
         if w.isEmpty || defaultNames.contains(w) { names = defaultNames; custom = nil; return true }
@@ -526,25 +549,11 @@ enum WakeWord {
         return true
     }
 
-    /// Whether a heard word (within the allowed edits) is shaped like the name. Roamies keeps its own tuned rule.
-    static func plausible(_ heard: String) -> Bool {
-        guard custom != nil, let n = names.first else { return heard.hasPrefix("h") && heard.count >= 4 && heard.count <= 7 }
-        return heard.first == n.first && heard.count >= n.count - 1
-    }
-
-    /// Edits allowed for the next word, and one fewer for two words joined ("Roam ies"). A short name of the user's own
-    /// must be heard exactly ("Nova" mustn't take "Nora"); 6 or 7 letters allow one edit, longer ones two.
-    static var allowedEdits: Int {
-        guard custom != nil else { return 1 } // Hydra: one edit ("Hidra", "Hydro"), never "Heather"
-        let n = names.first?.count ?? 0
-        return n >= 8 ? 2 : n >= 6 ? 1 : 0
-    }
-
     /// What was said after the phrase ("" if nothing yet), or nil when the phrase isn't there.
     static func match(_ text: String) -> String? { scan(text).rest }
 
     /// What follows the first n words of the text: the wake phrase as first heard, once a later reading of it no
-    /// longer matches ("Hey Romies" revised to "Hey Romy is"), so it still isn't sent as part of the request.
+    /// longer matches ("Hey Hydra" revised to "Hey high drama"), so it still isn't sent as part of the request.
     static func dropping(_ n: Int, from text: String) -> String {
         let words = tokens(text)
         guard n > 0 else { return text }
@@ -552,95 +561,74 @@ enum WakeWord {
         return String(text[words[n].range.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// The match, plus the closest name's edit distance after a greeting (nil if no greeting), and when there's no match
-    /// but it looks like a try, why it missed (for the log: never the words themselves).
+    static func tokens(_ text: String) -> [(word: String, range: Range<String.Index>)] { Spoken.words(text) }
+    /// Whether the reading ends inside a word that may still grow (no full stop, comma or question mark after it).
+    static func endsOpen(_ text: String) -> Bool { text.trimmingCharacters(in: .whitespaces).last.map { $0.isLetter || $0.isNumber } ?? false }
+
+    private static func isName(_ w: String) -> Bool { names.contains { Spoken.same(w, $0) } }
+    /// The name alone needs to be closer: two letters off at most ("header" sounds like "hydra" but isn't it).
+    private static func isNameAlone(_ w: String) -> Bool { names.contains { Spoken.same(w, $0) && Spoken.edits(w, $0) <= 2 } }
+
+    /// The match, plus the closest name's edit distance (nil if no word came near), and when there's no match but it
+    /// looks like a try, why it missed (for the log).
     static func scan(_ text: String) -> (rest: String?, distance: Int?, miss: String?) {
-        let words = tokens(text)
+        let words = tokens(text), ws = words.map(\.word)
+        func gap(_ i: Int) -> Substring { text[(i == 0 ? text.startIndex : words[i - 1].range.upperBound) ..< words[i].range.lowerBound] }
+        // Up to two stray words may come first ("um", "okay", a cough heard as "the"); live text rarely has a full stop.
+        func atStart(_ i: Int) -> Bool { i <= 2 || gap(i).contains(where: { ".?!".contains($0) }) }
+        // The name alone: the very first word, after a sentence end, or after stray words only ("Um, Hydra").
+        func nameStarts(_ i: Int) -> Bool { i == 0 || gap(i).contains(where: { ".?!".contains($0) }) || (i <= 2 && ws[..<i].allSatisfy { fillers.contains($0) || greetings.contains($0) }) }
+        func rest(after j: Int) -> String {
+            String(text[words[j].range.upperBound...].drop(while: { !$0.isLetter && !$0.isNumber })).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         if let want = phrase {
-            for i in 0 ..< words.count where i + want.count <= words.count {
-                let before = text[(i == 0 ? text.startIndex : words[i - 1].range.upperBound) ..< words[i].range.lowerBound]
-                guard i <= 2 || before.contains(where: { ".?!".contains($0) }) else { continue }
-                guard zip(words[i...], want).allSatisfy({ a, b in a.word == b || (b.count >= 5 && edits(a.word, b) <= 1) }) else { continue }
-                let rest = text[words[i + want.count - 1].range.upperBound...].drop(while: { !$0.isLetter && !$0.isNumber })
-                return (String(rest).trimmingCharacters(in: .whitespacesAndNewlines), 0, nil)
+            for i in ws.indices where atStart(i) {
+                if let end = Spoken.follows(want, in: ws, at: i, loose: true) { return (rest(after: end - 1), 0, nil) }
             }
-            return (nil, nil, words.contains { $0.word == want[0] } ? "part of the phrase" : nil)
+            return (nil, nil, ws.contains { Spoken.same($0, want[0]) } ? "part of the phrase" : nil)
         }
         var closest: Int?, late = false
-        for (i, w) in words.enumerated() where greetings.contains(w.word) && i + 1 < words.count {
-            let before = text[(i == 0 ? text.startIndex : words[i - 1].range.upperBound) ..< w.range.lowerBound]
-            // Up to two stray words may come first ("um", "okay", a cough heard as "the"); live text rarely has a full stop.
-            let atStart = i <= 2 || before.contains(where: { ".?!".contains($0) })
-            // Only spaces or a comma between greeting and name ("Hey, Roamies").
-            guard text[w.range.upperBound ..< words[i + 1].range.lowerBound].allSatisfy({ $0 == " " || $0 == "," }) else { continue }
-            var candidates = [(words[i + 1].word, words[i + 1].range.upperBound, allowedEdits)]
-            // Split in two ("Roam ies"): joined, it must be a closer match.
-            if i + 2 < words.count { candidates.append((words[i + 1].word + words[i + 2].word, words[i + 2].range.upperBound, allowedEdits - 1)) }
-            for (name, end, allowed) in candidates {
-                let d = distance(name)
-                closest = min(closest ?? d, d)
-                if d <= allowed && plausible(name) {
-                    guard atStart else { late = true; continue }
-                    let rest = text[end...].drop(while: { !$0.isLetter && !$0.isNumber })
-                    return (String(rest).trimmingCharacters(in: .whitespacesAndNewlines), d, nil)
+        for i in ws.indices {
+            closest = names.map { Spoken.edits(ws[i], $0) }.min().map { min(closest ?? $0, $0) } ?? closest
+            // A greeting, then the name (or the name split in two: "Hi dra"), with only spaces or a comma between.
+            if greetings.contains(ws[i]), i + 1 < ws.count, text[words[i].range.upperBound ..< words[i + 1].range.lowerBound].allSatisfy({ $0 == " " || $0 == "," }) {
+                var hit: Int?
+                if isName(ws[i + 1]) { hit = i + 1 } else if i + 2 < ws.count, isName(ws[i + 1] + ws[i + 2]) { hit = i + 2 }
+                if let j = hit {
+                    if atStart(i) { return (rest(after: j), Spoken.edits(ws[i + 1], names[0]), nil) }
+                    late = true
                 }
+            }
+            // The name alone, first.
+            if isNameAlone(ws[i]) || i + 1 < ws.count && isNameAlone(ws[i] + ws[i + 1]) && !isName(ws[i + 1]) {
+                let j = isNameAlone(ws[i]) ? i : i + 1
+                if nameStarts(i) { return (rest(after: j), Spoken.edits(ws[i], names[0]), nil) }
+                late = true
             }
         }
         if late { return (nil, closest, "the phrase came after other words") }
-        if let c = closest, c <= 4 { return (nil, closest, "a greeting, then a name \(c) letters off") }
-        let initial = names.first?.first ?? "r"
-        if words.contains(where: { $0.word.first == initial && distance($0.word) <= 2 }) { return (nil, closest, "the name without a greeting") }
+        if let c = closest, c <= 3 { return (nil, closest, "a word \(c) letters off the name") }
         return (nil, closest, nil)
     }
 
-    /// Lowercased words without apostrophes ("Roamie's" -> "roamies"), with where each sits in the text.
-    static func tokens(_ text: String) -> [(word: String, range: Range<String.Index>)] {
-        var out: [(word: String, range: Range<String.Index>)] = []
-        var start: String.Index?
-        var i = text.startIndex
-        while true {
-            let c: Character? = i == text.endIndex ? nil : text[i]
-            let inWord = c.map { $0.isLetter || $0.isNumber || (($0 == "'" || $0 == "\u{2019}") && start != nil) } ?? false
-            if inWord { if start == nil { start = i } }
-            else if let s = start {
-                let w = text[s ..< i].lowercased().filter { $0 != "'" && $0 != "\u{2019}" }
-                if !w.isEmpty { out.append((w, s ..< i)) }
-                start = nil
-            }
-            if c == nil { break }
-            i = text.index(after: i)
-        }
-        return out
-    }
-
-    static func distance(_ word: String) -> Int { names.map { edits(word, $0) }.min() ?? Int.max }
-
-    static func edits(_ a: String, _ b: String) -> Int {
-        let a = Array(a), b = Array(b)
-        if a.isEmpty || b.isEmpty { return max(a.count, b.count) }
-        var prev = Array(0 ... b.count), cur = prev
-        for i in 1 ... a.count {
-            cur[0] = i
-            for j in 1 ... b.count { cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)) }
-            swap(&prev, &cur)
-        }
-        return prev[b.count]
-    }
+    static func distance(_ word: String) -> Int { names.map { Spoken.edits(word, $0) }.min() ?? Int.max }
+    static func edits(_ a: String, _ b: String) -> Int { Spoken.edits(a, b) }
 }
 
 // The sleep word (default "Hydra, sleep"; a setting): heard while Hydra listens, it puts Hydra to sleep at once.
-// Its words in order, anywhere in what was said; words of 5 letters or more may be one letter off ("Hidra").
+// Its words in order, anywhere in what was said, compared as the wake phrase's are ("3 kill" is "three kill").
 enum SleepWord {
     private(set) static var words = ["hydra", "sleep"]
-    static func set(_ phrase: String) {
-        let w = WakeWord.tokens(phrase).map(\.word)
-        words = w.isEmpty ? ["hydra", "sleep"] : w
+    /// True when it changed.
+    @discardableResult static func set(_ phrase: String) -> Bool {
+        let w = Spoken.words(phrase).map(\.word)
+        let next = w.isEmpty ? ["hydra", "sleep"] : w
+        defer { words = next }
+        return next != words
     }
     static func heard(in text: String) -> Bool {
-        let got = WakeWord.tokens(text).map(\.word)
-        guard got.count >= words.count else { return false }
-        for i in 0 ... got.count - words.count where zip(got[i...], words).allSatisfy({ a, b in a == b || (b.count >= 5 && WakeWord.edits(a, b) <= 1) }) { return true }
-        return false
+        let got = Spoken.words(text).map(\.word)
+        return got.indices.contains { Spoken.follows(words, in: got, at: $0, loose: true) != nil }
     }
 }
 
@@ -657,35 +645,70 @@ final class Voice {
     private var blocked = false, prevChord = false, authorizing = false, reportEmpty = false, failed = false
     // The keys already reading down when the chord went down: they can't be part of its shortcut (isShortcut).
     private var heldAtArm = Set<CGKeyCode>()
-    private var engine: AVAudioEngine?
     // Kept across sessions (same mic, usually), so later takes start at the right boost.
     private let autoGain = AutoGain()
     private var rec: Recognizer?
     private var best = ""
     private var finishTimer: Timer?
     private let feed = Feed()
-    private var configObserver: NSObjectProtocol?
-    // Wake word: on in settings; held off while Roamies answers and speaks; resting just after a take.
+    // The one mic: wake listening, takes, the clap detector and barge-in all hear the same tap (mic.swift).
+    let hub = MicHub()
+    // Wake word: on in settings; held off while Hydra speaks; resting just after a take.
     private var wakeOn = false
-    // The double-clap detector (clap.swift): asleep, the mic is open only for it and no words are made of anything;
-    // awake, a double clap starts a take (clap-to-talk). With the key phrase on, wake listening's mic hears claps too.
-    private var clapOn = false, clapRetryAt = 0.0
+    // The double-clap detector (clap.swift): on whenever clapOn (asleep it wakes Hydra, awake with clap-to-talk it
+    // starts a take), and while Hydra speaks with interrupting on. Never makes words of anything.
+    private var clapOn = false
     private(set) var asleep = false, clapTalk = false
-    lazy var clapper = ClapListener { [weak self] in self?.clapHeard() }
-    func setClap(_ on: Bool, asleep: Bool? = nil, talk: Bool? = nil) {
+    let claps = ClapTap()
+    private var clapSensitivity = 0.5, clapCalibration: ClapDetector.Calibration?
+    // "Clap twice" in the panel: the claps heard until then, and when it gives up. clapMeter: the panel shows the level.
+    private var calibrateUntil: Double?, calibrated: [(t: Double, peak: Double, rise: Double)] = []
+    var clapMeter = false
+    private var meterAt = 0.0
+    func setClap(_ on: Bool, asleep: Bool? = nil, talk: Bool? = nil, sensitivity: Double? = nil, calibration: ClapDetector.Calibration?? = nil) {
         if let asleep { self.asleep = asleep }
         if let talk { clapTalk = talk }
-        guard on != clapOn else { return }
-        clapOn = on; clapRetryAt = 0
-        if !on { clapper.stop() }
+        var changed = false
+        if let k = sensitivity, k != clapSensitivity { clapSensitivity = min(1, max(0, k)); changed = true }
+        if let c = calibration, c != clapCalibration { clapCalibration = c; changed = true }
+        if changed { claps.configure(sensitivity: clapSensitivity, calibration: clapCalibration); log("clap sensitivity \(String(format: "%.2f", clapSensitivity))\(clapCalibration.map { String(format: ", calibrated to %.1f dB", $0.peakDb) } ?? "")") }
+        if on != clapOn { clapOn = on; log("double clap \(on ? "on" : "off")") }
     }
-    /// A double clap from any of the mics listening (the clap detector, wake listening, or barge-in while Hydra speaks).
+    /// "Clap twice": the next 8 s of claps (any level) set the detector for this room.
+    func calibrateClaps() {
+        calibrateUntil = uptime() + 8; calibrated = []
+        claps.setCalibrating(true)
+        log("clap calibration: listening for two claps")
+    }
+    private func clapTransient(_ peak: Double, _ rise: Double) {
+        guard let until = calibrateUntil, uptime() <= until else { return }
+        calibrated.append((uptime(), peak, rise))
+        log(String(format: "clap calibration: a clap at %.1f dB, rise %.1f dB", peak, rise))
+        // Two claps close together: the quieter one's peak and rise set it (a softer clap still counts at Medium).
+        if let last = calibrated.last, let first = calibrated.dropLast().last(where: { last.t - $0.t >= 0.15 && last.t - $0.t <= 1.5 }) {
+            finishCalibration(ClapDetector.Calibration(peakDb: min(first.peak, last.peak), riseDb: min(first.rise, last.rise)))
+        }
+    }
+    private func finishCalibration(_ c: ClapDetector.Calibration?) {
+        calibrateUntil = nil
+        claps.setCalibrating(false)
+        if let c {
+            clapCalibration = c
+            claps.configure(sensitivity: clapSensitivity, calibration: c)
+            log(String(format: "clap calibration: set to %.1f dB, rise %.1f dB", c.peakDb, c.riseDb))
+            emit(["type": "clap_calibrated", "ok": true, "peakDb": (c.peakDb * 10).rounded() / 10, "riseDb": (c.riseDb * 10).rounded() / 10])
+        } else {
+            log("clap calibration: heard \(calibrated.count) clap\(calibrated.count == 1 ? "" : "s"), not two")
+            emit(["type": "clap_calibrated", "ok": false, "heard": calibrated.count])
+        }
+    }
+    /// A double clap from the clap detector.
     func clapHeard() {
         guard clapOn || speaking else { return }
         switch Trigger.decide(.clap, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) {
         case .wake: log("double clap"); emit(["type": "clap"])
         case .take: guard phase == .idle || phase == .wake else { return }; log("double clap: listening"); startTake(via: "clap")
-        case .none: break
+        case .none: log("double clap: nothing to do (clap-to-talk off)")
         }
     }
     // Barge-in: while Hydra speaks, the owner talking over it (or a double clap) stops the speech and starts a take.
@@ -694,38 +717,29 @@ final class Voice {
     /// Hydra is speaking: the overlay says so, or its voice is playing here (hydraout.swift).
     private var shellSpeaking = false
     var speaking: Bool { shellSpeaking || out.busy }
-    private var bargeRetryAt = 0.0
     let out = HydraOut()
-    lazy var barger: BargeListener = { let b = BargeListener(onTalk: { [weak self] in self?.talkedOver() }, onClap: { [weak self] in self?.clapHeard() }); b.out = out; return b }()
+    let barge = BargeTap()
     /// The cursor visualizer (the pill) only for a take from the talk keys (W5 contract 4).
     static func cursorShows(via: String) -> Bool { via == "keys" }
     /// Wake listening waits while Hydra's own voice plays (it mustn't wake itself); while it thinks, the phrase adds on.
     static func wakeHeld(hold: Bool, speaking: Bool) -> Bool { hold && speaking }
-    /// A chunk of Hydra's voice: it plays in the barge-in mic's engine when that can run now (echo reference), else
-    /// on an output-only engine.
+    /// A chunk of Hydra's voice: it plays in the mic's engine when that runs with echo cancellation (the echo
+    /// reference), opening the mic for it when it can; else on an output-only engine.
     func play(id: String, pcm: Data, rate: Double) {
-        if !barger.running && !out.busy { startBarge(uptime()) }
+        if !out.busy, bargeCan, !hub.echoCancel, micAllowed { hub.open(device: InputDevice.forListening(), echoCancel: true); micReopened() }
         out.play(id: id, pcm: pcm, rate: rate)
     }
     // bargeBroken: this mic had no echo cancellation; tried again when the mic changes.
     private var bargeBroken = false, bargeWanted = true
-    func setBarge(_ on: Bool) { bargeWanted = on; bargeOn = on && !bargeBroken; if !bargeOn { barger.stop() } }
-    func setSpeaking(_ on: Bool) { shellSpeaking = on; if !speaking { barger.stop() } }
+    func setBarge(_ on: Bool) { bargeWanted = on; bargeOn = on && !bargeBroken }
+    func setSpeaking(_ on: Bool) { shellSpeaking = on }
     private var bargeCan: Bool { bargeOn && !asleep && (phase == .idle || phase == .wake) && !dryRun && LiveTest.url == nil }
-    /// The barge-in mic (echo cancellation; Hydra's voice plays in its engine).
-    private func startBarge(_ now: Double) {
-        guard bargeCan, now >= bargeRetryAt, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        if phase == .wake { stopWake() }
-        if engine != nil { stopAudio(close: true) }
-        if clapper.running { clapper.stop() }
-        barger.clapSensitivity = clapper.sensitivity
-        switch barger.start(device: InputDevice.forListening()) {
-        case .started: break
-        case .failed: bargeRetryAt = now + 30
-        // No echo cancellation on this Mac: listening over Hydra could hear Hydra and interrupt itself, so
-        // barge-in stays off for this session (the panel says so).
-        case .noEchoCancel: bargeBroken = true; bargeOn = false; emit(["type": "barge_unavailable"]); log("barge-in off for this session: no echo cancellation")
-        }
+    private var micAllowed: Bool { LiveTest.url != nil || !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+    /// Echo cancellation on the mic while interrupting is on (Hydra's voice is then its reference), unless Hydra is
+    /// already speaking on its own engine (moving it now would cut the sentence off).
+    private var echoWanted: Bool {
+        guard #available(macOS 14, *) else { return false }
+        return bargeOn && !(out.onOwnEngine && out.busy)
     }
     private func talkedOver() {
         guard Trigger.decide(.voice, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take, phase == .idle || phase == .wake else { return }
@@ -734,7 +748,7 @@ final class Voice {
     }
     /// A hands-free take, as the talk keys start one; mode tells the overlay what started it.
     private func startTake(via: String) {
-        barger.stop()
+        hub.remove("barge")
         emit(["type": "trigger", "via": via])
         listenNow()
     }
@@ -743,11 +757,6 @@ final class Voice {
     }
     private var wakeLoud = 0.0, wakeLevelAt = 0.0 // seconds loud enough to be speech in this wake window
     private var wakeCooldownUntil = 0.0, wakeRetryAt = 0.0, wakeAt = 0.0
-    private var wakeStartedAt = 0.0, wakeDrops = 0 // wake listening that keeps stopping soon after it starts (backOffWake)
-    private var engineRestarted = false // this engine was restarted once after a device change
-    // The mic the open engine listens on (nil: the default input). With the wake word on, the engine stays open between
-    // takes: closing and reopening it reconfigures the audio devices, which briefly drops what's playing.
-    private var engineDevice: AudioDeviceID?
     private var wakeText = "", woke = false, wakeMiss: String?
     private var wakeWords = 0 // how many words the wake phrase took, in the take it started
     private var useAnalyzer: Bool { if #available(macOS 26, *) { return SpeechTranscriber.isAvailable } else { return false } }
@@ -819,6 +828,20 @@ final class Voice {
     init() {
         // Resolve the locale and fetch the model up front so the first ⌃⌥ is instant.
         if #available(macOS 26, *), SpeechTranscriber.isAvailable { _ = AnalyzerRecognizer.prepare() }
+        hub.out = out
+        hub.setSpeech(makeIngest())
+        hub.onRebuilt = { [weak self] in self?.micReopened() }
+        hub.onNoEchoCancel = { [weak self] in
+            // No echo cancellation on this Mac: listening over Hydra could hear Hydra and interrupt itself, so barge-in
+            // stays off for this session (the panel says so); another mic tries again.
+            guard let self, !self.bargeBroken else { return }
+            self.bargeBroken = true; self.bargeOn = false
+            emit(["type": "barge_unavailable"]); log("barge-in off for this session: no echo cancellation")
+        }
+        claps.onClap = { [weak self] in self?.clapHeard() }
+        claps.onTransient = { [weak self] p, r in self?.clapTransient(p, r) }
+        barge.onTalk = { [weak self] in self?.talkedOver() }
+        if LiveTest.url != nil { hub.fileMode = true; LiveTest.sink = { [weak self] b in self?.hub.deliver(b) } }
     }
 
     // The talk chord: any two of ⌃ ⌥ ⌘ ⇧ (default ⌃⌥). Set with --chord or {"cmd":"chord"}.
@@ -916,33 +939,16 @@ final class Voice {
             return now - (releasedAt ?? now) >= Self.releaseDebounce
         }()
 
-        // Hydra speaking (and interrupting allowed): the barge-in mic, with echo cancellation, has the mic to itself.
-        let barging = bargeCan && speaking
-        if barger.running && !barging { barger.stop() }
-        // Hydra's voice already on its output-only engine: moving it now would cut the sentence off.
-        else if barging && !barger.running && !out.onOwnEngine { startBarge(now) }
-        // The clap detector has the mic only while nothing else does: a take, wake listening (which hears claps itself)
-        // or barge-in stops it.
-        // Based on whether wake listening really runs now, not on its setting: with the key phrase on but its mic not
-        // open (no permission yet, backing off after errors, held while Hydra answers), the clap detector listens.
-        let clapAlone = Trigger.clapDetectorRuns(clapOn: clapOn, idle: phase == .idle, barging: barger.running, wakeCanRun: wakeAllowed(now))
-        // Kept on across wake listening's retries: it stops only once wake listening has run for 10 s (it hears claps
-        // itself), not each time a retry starts, so the mic isn't opened and closed over and over.
-        let keepClap = clapOn && phase == .wake && now - wakeStartedAt < 10 && !barger.running
-        if clapper.running && !clapAlone && !keepClap { clapper.stop() }
-        else if clapAlone && !clapper.running && now >= clapRetryAt && !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
-            if engine != nil { stopAudio(close: true) }
-            // Only once the last engine's mic is gone (InputDevice.settle); a failure tries again in 10 s.
-            if InputDevice.settled(now: now, freedAt: InputDevice.freedAt), !clapper.start(device: InputDevice.forListening()) { clapRetryAt = now + 10 }
-        }
+        syncMic(now)
 
         switch phase {
         case .idle:
             if chord && !prevChord && !blocked { arm(now) }
-            else if !barger.running && wakeAllowed(now) { startWake(now) }
+            else if wakeAllowed(now) { startWake(now) }
         case .wake:
             if chord && !prevChord && !blocked { stopWake(); arm(now); return }
             if !wakeOn || Self.wakeHeld(hold: wakeHold, speaking: speaking) { stopWake(); return } // Hydra's own voice playing: the mic stays open but unheard
+            if let t = tentative, now - t.at >= 0.35 { heardWhileWaiting(t.text, confirmed: true); if phase != .wake { return } }
             let paused = !wakeText.isEmpty && now - heardAt > Self.wakePause && now - voiceAt > Self.wakePause / 2
             // The 30 s refresh waits for a quiet moment, so it can't split "Hey" from "Roamies".
             let quiet = now - voiceAt > Self.wakePause / 2 && now - heardAt > Self.wakePause
@@ -968,6 +974,26 @@ final class Voice {
         }
     }
 
+    /// The one mic each frame: who listens (barge-in while Hydra speaks, the clap detector while it's on, the
+    /// recogniser's feed during wake listening and takes), and whether it's open (mic.swift).
+    private func syncMic(_ now: Double) {
+        let barging = bargeCan && speaking && hub.echoCancel
+        if barging != hub.has("barge") { if barging { barge.reset(); hub.add("barge", barge.feed) } else { hub.remove("barge") } }
+        if let until = calibrateUntil, now > until { finishCalibration(nil) }
+        let clapWanted = clapOn || bargeOn && speaking || calibrateUntil != nil || clapMeter
+        if clapWanted != hub.has("clap") { if clapWanted { hub.add("clap", claps.feed) } else { hub.remove("clap") } }
+        let take = phase == .armed || phase == .holding || phase == .handsFree || phase == .finishing
+        let wanted = micAllowed && (hub.hasSpeech || take || phase == .wake || clapWanted || bargeCan && speaking || out.busy && hub.echoCancel)
+        hub.tick(now: now, wanted: wanted, device: InputDevice.forListening(), echo: echoWanted)
+        if clapMeter, hub.running, now - meterAt >= 0.1, let m = claps.meter() {
+            meterAt = now
+            let r = { (x: Double) in (max(-120, x) * 10).rounded() / 10 }
+            emit(["type": "clap_level", "db": r(m.db), "floor": r(m.floor), "needs": r(m.needs)])
+        }
+    }
+    /// The mic was opened again (a device change, or another way): wake listening starts a fresh recogniser on it.
+    func micReopened() { if phase == .wake { recycleWake(uptime(), preroll: false) } }
+
     private func end(_ why: String) { log("session end: \(why) after \(String(format: "%.1f", uptime() - listenAt))s, mic boost \(String(format: "%.1f", autoGain.gain))x") }
 
     // ---------- session ----------
@@ -987,7 +1013,7 @@ final class Voice {
         if dryRun { best = ProcessInfo.processInfo.environment["ROAMIES_VOICE_DRYRUN_TEXT"] ?? ""; return }
         // Already allowed: start the mic now so the first word isn't lost. Otherwise wait until
         // the press is clearly a talk (hold or tap), so shortcuts like ⌃⌥S never trigger a prompt.
-        if authorized() { startAudio(device: InputDevice.picked()) }
+        if authorized() { startAudio() }
     }
 
     // Whether the recogniser needs Speech Recognition permission: a take's (its speech language decides), or the wake word's.
@@ -1007,7 +1033,7 @@ final class Voice {
         if !dryRun && rec == nil {
             ensureAuthorized { [weak self] in
                 guard let self, self.phase == .holding || self.phase == .handsFree, self.rec == nil else { return }
-                self.startAudio(device: InputDevice.picked())
+                self.startAudio()
             }
         }
         if !dryRun { OutputMute.begin() }
@@ -1114,9 +1140,9 @@ final class Voice {
     func setWake(_ on: Bool) {
         guard on != wakeOn else { return }
         wakeOn = on
-        if on { wakeDrops = 0; wakeRetryAt = 0 }
+        if on { wakeRetryAt = 0 }
         log("wake word \(on ? "on" : "off")")
-        if !on { stopWake(); if phase == .idle { stopAudio(close: true) } }
+        if !on { stopWake() }
     }
 
     // Never asks for permission: wake listening starts only once talking has been allowed.
@@ -1127,37 +1153,27 @@ final class Voice {
 
     private func startWake(_ now: Double) {
         wakeRetryAt = now + 5 // if the mic won't open, try again in a moment rather than every frame
-        wakeStartedAt = now
         phase = .wake
         best = ""; wakeText = ""; wakeMiss = nil; woke = false; wakeLoud = 0
         wakeAt = now; heardAt = now; voiceAt = now
         let device = InputDevice.forListening()
-        startAudio(device: device)
+        startAudio()
         if phase == .wake { wakeLog("listening\(device == nil ? "" : InputDevice.picked() != nil ? " on the picked mic" : " on the built-in mic (the default input is Bluetooth)")") }
     }
 
-    /// Another mic was picked: wake listening, or a mic kept open between takes, starts again on it next time.
     /// Another mic (picked, or the Mac's default input changed): it may have echo cancellation, so try barge-in again.
     func retryBarge() {
-        if bargeBroken { bargeBroken = false; bargeOn = bargeWanted; bargeRetryAt = 0; emit(["type": "barge_available"]) }
+        if bargeBroken { bargeBroken = false; bargeOn = bargeWanted; emit(["type": "barge_available"]) }
     }
+    /// Another mic was picked, or the default input changed: the one mic is rebuilt on it once (debounced, mic.swift).
     func micChanged() {
         retryBarge()
-        if phase == .wake { stopWake() }
-        if phase == .idle { stopAudio(close: true) }
-    }
-
-    // Wake listening that stops soon after starting, again and again: wait longer each time (5 s, 30 s, 2 min, 10 min),
-    // so a mic that keeps reporting changes doesn't interrupt what's playing every few seconds.
-    private func backOffWake(_ now: Double) {
-        wakeDrops = now - wakeStartedAt < 20 ? wakeDrops + 1 : 1
-        let wait = [5.0, 30, 120, 600][min(wakeDrops - 1, 3)]
-        wakeRetryAt = now + wait
-        if wakeDrops > 1 { wakeLog("stopped again soon after starting: next try in \(Int(wait)) s") }
+        hub.changed()
     }
 
     private func stopWake() {
         guard phase == .wake else { return }
+        tentative = nil
         logNearMiss()
         stopAudio()
         rec?.cancel(); rec = nil
@@ -1165,32 +1181,44 @@ final class Voice {
         best = ""; wakeText = ""
     }
 
-    // A fresh recogniser on the open mic: after a pause with no phrase (so it must start what's said next), or every 30 s.
-    private func recycleWake(_ now: Double) {
+    // A fresh recogniser on the open mic: after a pause with no phrase (so it must start what's said next), or every 30 s,
+    // well before the recogniser's own limit. preroll: it hears the last moment of sound first (Feed keeps it), so a
+    // phrase said just as the windows change isn't cut in two. Not after the sleep word (it would hear it again).
+    private func recycleWake(_ now: Double, preroll: Bool = true) {
+        if let t = tentative { tentative = nil; heardWhileWaiting(t.text, confirmed: true); guard phase == .wake else { return } }
         logNearMiss()
         feed.set(nil)
         rec?.cancel(); rec = nil
         guard let r = makeRecognizer() else { stopWake(); wakeRetryAt = now + 30; return }
-        rec = r; feed.set(r)
+        rec = r; feed.set(r, preroll: preroll)
         wakeAt = now; heardAt = now; wakeText = ""
     }
 
-    // Only how close it came, never what was said.
     private func logNearMiss() {
-        // How a window ended, never what was said: a near try, other words, or sound the recogniser made no words of.
-        if let m = wakeMiss { wakeLog("missed (\(m))") }
+        // How a window ended: a near try (with what was heard, in this Mac's local log only, to tune the matcher), other
+        // words (only how many), or sound the recogniser made no words of.
+        if let m = wakeMiss { wakeLog("missed (\(m)): \"\(wakeText.prefix(120))\"") }
         else if !wakeText.isEmpty { wakeLog("heard \(WakeWord.tokens(wakeText).count) words, not the phrase") }
         else if wakeLoud >= 0.5 { wakeLog("heard sound for \(String(format: "%.1f", wakeLoud)) s, but no words came back") }
         wakeMiss = nil; wakeLoud = 0
     }
 
-    private func heardWhileWaiting(_ text: String) {
-        guard text != wakeText else { return }
+    /// A match that ends on the reading's last word, with no full stop after it, may be a word still being written ("The
+    /// Hydra" before "The hydraulic press"): it waits for the next reading, or 0.35 s without one (tick).
+    private var tentative: (text: String, at: Double)?
+    private func heardWhileWaiting(_ text: String, confirmed: Bool = false) {
+        guard text != wakeText || confirmed else { return }
         let now = uptime()
-        wakeText = text; heardAt = now
-        if SleepWord.heard(in: text) { wakeLog("heard the sleep word"); emit(["type": "sleep_word"]); recycleWake(now); return }
+        if !confirmed { wakeText = text; heardAt = now }
+        tentative = nil
+        let open = !confirmed && WakeWord.endsOpen(text)
+        if SleepWord.heard(in: text) {
+            if open { tentative = (text, now); return }
+            wakeLog("heard the sleep word"); emit(["type": "sleep_word"]); wakeMiss = nil; wakeText = ""; wakeLoud = 0; recycleWake(now, preroll: false); return
+        }
         let (rest, d, miss) = WakeWord.scan(text)
         guard let rest else { if let miss { wakeMiss = miss }; return }
+        if open && rest.isEmpty { tentative = (text, now); return }
         guard Trigger.decide(.phrase, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take else { return }
         wakeLog("heard the phrase (distance \(d ?? 0))\(asleep ? " while asleep: waking" : "")")
         // Asleep: it wakes, and this take goes on at once (the app skips its greeting).
@@ -1203,6 +1231,16 @@ final class Voice {
         chordAt = now
         best = rest
         showListening("wake", now, via: "phrase")
+    }
+
+    /// The recogniser's other readings while wake listening: one that has the sleep word or the phrase, ended (not a word
+    /// still being written), counts as hearing it.
+    private func heardAlternatives(_ alts: [String]) {
+        for t in alts where !WakeWord.endsOpen(t) && (SleepWord.heard(in: t) || WakeWord.match(t) != nil) {
+            wakeLog("heard it in another reading")
+            heardWhileWaiting(t, confirmed: true)
+            return
+        }
     }
 
     // ---------- permissions ----------
@@ -1246,7 +1284,8 @@ final class Voice {
                 guard let self, self.rec === mine else { return }
                 if self.phase == .wake { self.recycleWake(uptime()) } else if self.phase == .finishing { self.finalize() }
             },
-            onError: { [weak self] err in guard let self, self.rec === mine else { return }; self.onError(err) }
+            onError: { [weak self] err in guard let self, self.rec === mine else { return }; self.onError(err) },
+            onAlternatives: phase == .wake ? { [weak self] alts in guard let self, self.rec === mine, self.phase == .wake else { return }; self.heardAlternatives(alts) } : nil
         )
         let engine = takeEngine()
         if phase != .wake { // one line per take, not per wake window
@@ -1257,26 +1296,29 @@ final class Voice {
         return mine
     }
 
-    /// device: a particular mic instead of the default one (wake listening, when the default is Bluetooth).
-    private func startAudio(device: AudioDeviceID? = nil) {
+    /// A recogniser on the one mic (opened now if it isn't, so a take that can't have it says so at once).
+    private func startAudio() {
         failed = false
-        // The wake word's open mic, on the mic this session wants: just a fresh recogniser on it.
-        if let eng = engine, eng.isRunning, engineDevice == device, LiveTest.url == nil, let r = makeRecognizer() {
-            rec = r; feed.set(r)
-            return
-        }
-        if engine != nil { stopAudio(close: true) }
         // Wake listening fails quietly and tries again later; a take tells the user.
         let fail = { (code: String, extra: [String: Any]) in
             if self.phase == .wake { self.phase = .idle; self.wakeRetryAt = uptime() + 30; wakeLog("couldn't start (\(code))") } else { emit(["type": "error", "code": code].merging(extra) { a, _ in a }); self.cancel() }
         }
         guard let r = makeRecognizer() else { return fail("unavailable", [:]) }
+        if !hub.running && !hub.open(device: InputDevice.forListening(), echoCancel: echoWanted) {
+            r.cancel()
+            // A mic that's there but won't open isn't a missing mic.
+            return fail("no_input", ["reason": "failed"])
+        }
+        rec = r
+        feed.set(r, preroll: phase == .wake)
+    }
+
+    /// The recogniser's side of the mic, on the tap's thread: the orb's spectrum while a take listens, the quiet-mic
+    /// boost, the feed (which keeps the last moment for the next wake window), and the level for pauses.
+    private func makeIngest() -> MicHub.Consumer {
         let gain = autoGain, feed = feed
-        // Wake listening keeps the mic, so it listens for a double clap too (made on the first buffer, at its rate).
-        var clapDet: ClapDetector?
-        let clapK = clapper.sensitivity
         var pacer = BandPacer()
-        let ingest = { [weak self] (buffer: AVAudioPCMBuffer) in
+        return { [weak self] buffer in
             guard let samples = buffer.floatChannelData?[0] else { feed.append(buffer); return }
             let n = Int(buffer.frameLength)
             // The orb's spectrum while a take listens (W5 contract 5): the mic's own sound, before the boost.
@@ -1284,8 +1326,6 @@ final class Voice {
                 let b = Spectrum.bands(samples, count: n, rate: buffer.format.sampleRate)
                 DispatchQueue.main.async { if self?.takeBands == true { emit(["type": "bands", "b": b.map { ($0 * 1000).rounded() / 1000 }]) } }
             }
-            if clapDet == nil { clapDet = ClapDetector(rate: buffer.format.sampleRate, sensitivity: clapK) }
-            if clapDet?.feed(samples, count: n) == true { DispatchQueue.main.async { if self?.phase == .wake { self?.clapHeard() } } }
             var sum: Float = 0
             for i in 0 ..< n { sum += samples[i] * samples[i] }
             let rms = sqrt(sum / Float(max(n, 1)))
@@ -1295,82 +1335,13 @@ final class Voice {
             let level = min(1, max(0, (Double(20 * log10(max(rms, 1e-7))) + 55) / 40))
             DispatchQueue.main.async { self?.onLevel(level) }
         }
-        if LiveTest.url != nil { feed.set(r); rec = r; LiveTest.sink = ingest; return }
-
-        feed.set(r)
-        var started: AVAudioEngine?, problem: String?
-        for dev in InputDevice.tries(picked: device, current: InputDevice.current(), builtIn: InputDevice.builtIn()) {
-            let eng = AVAudioEngine()
-            let input = eng.inputNode
-            if let dev, !InputDevice.use(dev, on: input) { log("couldn't switch to mic \(dev)"); continue }
-            let format = input.outputFormat(forBus: 0)
-            guard format.sampleRate > 0, format.channelCount > 0 else { continue }
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in ingest(buffer) }
-            do {
-                eng.prepare()
-                try eng.start()
-                if dev != device { log("mic opened on device \(dev ?? 0) after the default one failed") }
-                started = eng
-                break
-            } catch {
-                log("engine start failed\(dev.map { " on device \($0)" } ?? ""): \(error)")
-                input.removeTap(onBus: 0)
-                problem = "\(error)"
-            }
-        }
-        guard let eng = started else {
-            feed.set(nil)
-            r.cancel()
-            // A mic that's there but won't open isn't a missing mic.
-            return fail("no_input", problem.map { ["reason": "failed", "message": $0] } ?? [:])
-        }
-        engine = eng
-        engineDevice = device
-        rec = r
-        engineRestarted = false
-        // A mic plugged in or out stops the engine: wake listening starts again on the new one.
-        configObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: eng, queue: .main) { [weak self] _ in
-            guard let self, self.engine === eng, self.phase == .wake else { return }
-            // Switching to the built-in mic (the default input is Bluetooth) reports a change of its own: restart on that
-            // mic once rather than stopping, which reopened the mic every 5 s and kept interrupting what was playing.
-            if let device, !self.engineRestarted, InputDevice.forListening() == device {
-                self.engineRestarted = true
-                let input = eng.inputNode
-                input.removeTap(onBus: 0)
-                eng.stop()
-                _ = InputDevice.use(device, on: input)
-                let format = input.outputFormat(forBus: 0)
-                if format.sampleRate > 0, format.channelCount > 0 {
-                    input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in ingest(buffer) }
-                    eng.prepare()
-                    do {
-                        try eng.start()
-                        wakeLog("restarted on the built-in mic after a device change")
-                        self.recycleWake(uptime()) // a fresh recogniser for the restarted mic's format
-                        return
-                    } catch { wakeLog("restart on the built-in mic failed: \(error)") }
-                }
-            }
-            wakeLog("audio devices changed")
-            self.stopWake()
-            self.backOffWake(uptime())
-        }
     }
 
-    /// With the wake word on, a running engine on the wake word's own mic stays open with its sound going nowhere (see
-    /// engineDevice), unless close. Any other mic closes: an open Bluetooth mic would keep the headset at call quality.
-    private func stopAudio(close: Bool = false) {
+    /// The take or wake window is over: its recogniser hears nothing more. The mic stays with whoever else listens.
+    private func stopAudio() {
         OutputMute.end()
         takeBands = false
         feed.set(nil)
-        if !close, wakeOn, LiveTest.url == nil, let eng = engine, eng.isRunning, engineDevice == InputDevice.forListening() { return }
-        LiveTest.sink = nil
-        if let o = configObserver { NotificationCenter.default.removeObserver(o); configObserver = nil }
-        guard let eng = engine else { return }
-        eng.inputNode.removeTap(onBus: 0)
-        eng.stop()
-        engine = nil
-        InputDevice.freedAt = uptime()
     }
 
     private func onLevel(_ v: Double) {
@@ -1458,6 +1429,16 @@ if args.contains("--test-gain") {
 }
 // --test-clap checks the double-clap detector on made-up sounds (clap.swift); exits 1 on a failure.
 if args.contains("--test-clap") { exit(ClapTest.run()) }
+// --test-phrase: how heard words are compared with the phrase's (phrase.swift); exits 1 on a failure.
+if args.contains("--test-phrase") { exit(PhraseTest.run()) }
+// --test-mic: the one mic's consumers (mic.swift), with no mic; exits 1 on a failure.
+if args.contains("--test-mic") { exit(MicTest.run()) }
+// --bench-claps [set dir]: the double-clap detector's rates on made-up recordings (benchclaps.swift).
+if let i = args.firstIndex(of: "--bench-claps") {
+    let dir = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : nil
+    let rs = ClapBench.run(make: { rate, k, cal in let d = ClapDetector(rate: rate, sensitivity: k, calibration: cal); if ProcessInfo.processInfo.environment["CLAP_BENCH"] != nil { d.onCandidate = { print(String(format: "  %.2f ", d.now) + $0) } }; return { d.feed($0) } }, setDir: dir)
+    exit(ClapBench.report(rs, label: "double clap (this build)"))
+}
 // --test-bands: the orb's spectrum (24 bands from an FFT) and its 30-a-second pace; exits 1 on a failure.
 if args.contains("--test-bands") { exit(OutTest.bands()) }
 // --test-ducking: voice processing never turns other audio down, and mute-while-listening never mutes Hydra.
@@ -1486,18 +1467,33 @@ if args.contains("--test-wake") {
     check("Hey Hey", nil)
     check("Hey Harry, come here", nil)
     check("Hey hi", nil)
-    check("Hydra is great", nil)
+    // The name alone, first in what was said, wakes it too (owner: the phrase "still barely works").
+    check("Hydra is great", "is great")
+    check("Hydra", "")
+    check("Hydra, open Mail.", "open Mail.")
+    check("Um, Hydra what time is it", "what time is it")
+    check("Hey hydro open Notes", "open Notes")
+    check("A Hydra, play music", "play music")
+    check("Hay Hydra", "")
+    check("High Hydra, what's up", "what's up")
+    check("Hi dra, open Mail", "open Mail")
+    check("I need to hydrate", nil)
+    check("My new car is a Hyundai", nil)
+    check("Hydrate after the run", nil)
+    check("The hydraulic press", nil)
+    check("Heather is here", nil)
     check("I told him hey Hydra", nil)
     check("Um hey Hydra, open Mail", "open Mail")
     check("Okay, hi Hydra", "")
     check("So I said hey Hydra", nil)
     check("Hey there", nil)
     check("Hey", nil)
-    check("Hey. Hydra", nil)
+    check("Hey. Hydra", "")
     check("", nil)
     // The sleep word, anywhere in what was said.
     func sleeps(_ text: String, _ want: Bool) { let got = SleepWord.heard(in: text); print("\(got == want ? "ok" : "FAIL") sleep \"\(text)\" -> \(got)"); if got != want { bad += 1 } }
     sleeps("Hydra, sleep.", true)
+    sleeps("Hydro sleep", true)
     sleeps("hydra sleep", true)
     sleeps("Okay Hidra sleep now", true)
     sleeps("Hydra, open Sleep Cycle", false)
@@ -1506,6 +1502,14 @@ if args.contains("--test-wake") {
     SleepWord.set("Goodnight Hydra")
     sleeps("goodnight, Hydra", true)
     sleeps("Hydra, sleep", false)
+    SleepWord.set("Good night Hydra")
+    sleeps("Goodnight Hydra", true)
+    SleepWord.set("3 kill")
+    sleeps("Three kill.", true)
+    sleeps("3 kill", true)
+    sleeps("three-kill", true)
+    sleeps("We killed three hours", false)
+    sleeps("three skills", false)
     SleepWord.set("")
     sleeps("Hydra, sleep", true)
     // A later reading of the take that no longer matches the phrase: its words still come off.
@@ -1527,7 +1531,7 @@ if args.contains("--test-wake") {
     check("Hey Travis", nil)
     check("Hey Service", nil)
     check("Hey Hydra", nil)
-    check("Jarvis is great", nil)
+    check("Jarvis is great", "is great")
     check("I told him hey Jarvis", nil)
     named(true, "Nova")
     check("Hey Nova, play music", "play music")
@@ -1551,6 +1555,10 @@ if args.contains("--test-wake") {
     phrased(false, "Yo")
     phrased(false, "one two three four five six seven")
     check("okay computer what's on", "what's on") // a refused phrase keeps the last one
+    check("Okay, compute the total for me", nil)
+    phrased(true, "3 kill")
+    check("three kill", "")
+    check("Three Kill, open Mail", "open Mail")
     phrased(true, "Hey Hydra")
     check("Hey Hydra, open Mail", "open Mail")
     check("Okay computer", nil)
@@ -1680,6 +1688,11 @@ if args.contains("--test-clicks") {
     check("a link inside a list still counts", ClickTarget.acts(roles: ["AXLink", "AXCell", "AXRow", "AXTable"], count: 1))
     exit(bad == 0 ? 0 : 1)
 }
+// --bench <set dir> [--out readings.jsonl]: the wake phrase and sleep word on the recorded set (benchwake.swift).
+if let i = args.firstIndex(of: "--bench"), i + 1 < args.count {
+    let out = args.firstIndex(of: "--out").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+    WakeBench.run(dir: args[i + 1], out: out)
+}
 // --wake-file <wav>: a recording through the real recogniser (with the mic boost) and the wake matcher, as live
 // listening would hear it. Prints one JSON line: whether it woke, what followed the phrase, the closest name.
 if let i = args.firstIndex(of: "--wake-file"), i + 1 < args.count {
@@ -1739,7 +1752,7 @@ if LiveTest.url != nil { OutputMute.enabled = false; voice.setWake(true); LiveTe
 let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in voice.tick() }
 // The Mac's default input changing (headset in or out): barge-in gets another try with echo cancellation.
 var defaultInputAddr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultInputAddr, DispatchQueue.main) { _, _ in voice.retryBarge() }
+AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultInputAddr, DispatchQueue.main) { _, _ in voice.micChanged() }
 RunLoop.main.add(timer, forMode: .common)
 Thread.detachNewThread {
     while let line = readLine() {
@@ -1762,7 +1775,13 @@ Thread.detachNewThread {
         // Awake, with clap-to-talk on: a double clap starts a take ({"asleep":false,"talk":true}).
         case "clap":
             let on = msg["on"] as? Bool == true, k = msg["sensitivity"] as? Double, asleep = msg["asleep"] as? Bool, talk = msg["talk"] as? Bool
-            DispatchQueue.main.async { if let k { voice.clapper.sensitivity = k }; voice.setClap(on, asleep: asleep, talk: talk) }
+            // The owner's own claps ("Clap twice"): {"cal": {"peakDb": -24, "riseDb": 30}}; null or missing: none.
+            let cal: ClapDetector.Calibration?? = msg.keys.contains("cal") ? (msg["cal"] as? [String: Any]).flatMap { c in
+                (c["peakDb"] as? Double).flatMap { p in (c["riseDb"] as? Double).map { ClapDetector.Calibration(peakDb: p, riseDb: $0) } } } : nil
+            DispatchQueue.main.async { voice.setClap(on, asleep: asleep, talk: talk, sensitivity: k, calibration: cal) }
+        // The panel's "Clap twice", and its live clap level ({"cmd":"clap_meter","on":true}).
+        case "clap_calibrate": DispatchQueue.main.async { voice.calibrateClaps() }
+        case "clap_meter": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.clapMeter = on }
         // Interrupt by talking (a setting), and whether Hydra is speaking now (from the overlay's player).
         case "barge": let on = msg["on"] as? Bool != false; DispatchQueue.main.async { voice.setBarge(on) }
         case "speaking": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.setSpeaking(on) }
@@ -1774,12 +1793,15 @@ Thread.detachNewThread {
         case "play_pause": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.out.pause(on) }
         case "play_volume": if let v = msg["v"] as? Double { DispatchQueue.main.async { voice.out.volume = Float(max(0, min(1, v))) } }
         // Hydra's wake phrase (agent_settings.wake_phrase). Only whether it was taken is logged, never the words.
-        case "wake_phrase": let p = msg["phrase"] as? String ?? ""; DispatchQueue.main.async { log(WakeWord.setPhrase(p) ? "wake phrase set" : "wake phrase refused") }
-        case "sleep_word": let p = msg["phrase"] as? String ?? ""; DispatchQueue.main.async { SleepWord.set(p) }
+        // Set again with every settings message: logged only when it changes.
+        case "wake_phrase":
+            let p = msg["phrase"] as? String ?? ""
+            DispatchQueue.main.async { let was = WakeWord.signature; let ok = WakeWord.setPhrase(p); if !ok { log("wake phrase refused") } else if WakeWord.signature != was { log("wake phrase set") } }
+        case "sleep_word": let p = msg["phrase"] as? String ?? ""; DispatchQueue.main.async { if SleepWord.set(p) { log("sleep word set") } }
         // The name after "Hey" (empty: Roamies). Only whether it's custom is logged, never the word.
         case "wake_name":
             let word = msg["word"] as? String ?? ""
-            DispatchQueue.main.async { log(WakeWord.setName(word) ? "wake name: \(WakeWord.custom == nil ? "Hydra" : "custom")" : "wake name refused") }
+            DispatchQueue.main.async { let was = WakeWord.signature; let ok = WakeWord.setName(word); if !ok { log("wake name refused") } else if WakeWord.signature != was { log("wake name: \(WakeWord.custom == nil ? "Hydra" : "custom")") } }
         // Roamies is answering or speaking: don't listen for the phrase (it mustn't wake itself).
         case "wake_hold": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.wakeHold = on }
         case "mute": if let on = msg["on"] as? Bool { DispatchQueue.main.async { OutputMute.enabled = on; if !on { OutputMute.end() } } }

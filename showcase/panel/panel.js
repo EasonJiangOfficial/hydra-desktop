@@ -790,9 +790,8 @@
         v.mac && v.on ? speakPicker(v) : null)
       : [group('Triggers', 'Ways to start talking without a key. Heard on this Mac only; nothing leaves it until you talk.', null,
         v.mac ? toggle('Clap to talk', needs('A double clap starts listening. Asleep, it wakes Hydra.'), v.clapTalk, () => act('claptalk'), 'claptalk') : null,
-        v.wake ? toggle('Key phrase', needs(`Say “Hey ${v.wakeName || 'Hydra'}” to start listening. Not while asleep.`), v.wakeWord, () => act('wakeword'), 'wakeword') : null,
-        v.wake ? el('div', { className: 'setting' }, el('span', {}, 'Phrase'),
-          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: `Hey ${v.wakeName || 'Hydra'}` }), link('Change', () => act('wakename'), { k: 'wakename', aria: 'Change the key phrase' }))) : null,
+        v.wake ? toggle('Key phrase', needs(`Say “${v.wakePhrase || 'Hey Hydra'}”, or just “Hydra”, to start listening. Asleep too: it wakes Hydra.`), v.wakeWord, () => act('wakeword'), 'wakeword') : null,
+        v.wake ? phraseRow(v) : null,
         // Set in Hydra (agent_settings.sleep_word): shown here, changed there.
         el('div', { className: 'setting' }, el('span', {}, 'Sleep word', info('Puts Hydra to sleep at once. Change it in Hydra.')),
           el('span', { className: 'val', textContent: v.sleepWord ?? 'Hydra, sleep' })),
@@ -804,6 +803,28 @@
           el('p', { className: 'sub', textContent: 'Mic waits for you' }),
           picks('Mic waits for you', v.listenChoices.map((s) => [String(s), `${s} s`]), String(v.listenSecs), (x) => act(`listensecs:${x}`), 'listensecs')) : null,
         toggle('Listen after reminders', needs('Mic opens after a reminder, so you can say “snooze 10 minutes”.'), v.snoozeListen, () => act('snoozelisten'), 'snoozelisten'))])];
+  }
+  // The wake phrase, typed in place (no prompt: that one rendered on the orb, hidden while it's in the Hydra window).
+  // Enter or leaving the field saves it; Esc puts it back.
+  function phraseRow(v) {
+    const now = v.wakePhrase || 'Hey Hydra';
+    const save = (input) => {
+      const t = input.value.trim().replace(/\s+/g, ' ');
+      ui.phrase = null;
+      if (t && t !== now) act(`wakephrase:${t}`); else input.value = now;
+    };
+    const input = el('input', { type: 'text', value: ui.phrase ?? now, 'aria-labelledby': 'lbl-wakephrase', 'data-k': 'wakephrase', autocomplete: 'off', spellcheck: false, maxLength: 40,
+      on: {
+        input: (e) => { ui.phrase = e.target.value; },
+        keydown: (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+          else if (e.key === 'Escape') { e.stopPropagation(); ui.phrase = null; e.target.value = now; e.target.blur(); }
+        },
+        change: (e) => save(e.target),
+      } });
+    return el('div', { className: 'setting' },
+      el('span', { id: 'lbl-wakephrase' }, 'Wake phrase', info('Two to six words, like Hey Hydra. Saved in Hydra too when paired.')),
+      el('span', { className: 'px field phrase' }, input));
   }
   // The keys that work from anywhere. On Wayland no app may hold its own, so it lists the commands to bind instead.
   const SHORTCUT_LABELS = { summon: 'Show or hide me', snap: 'Ask about an area', list: 'Your list' };
@@ -908,7 +929,7 @@
     const h = state.hydra ?? {};
     const clap = CLAP.reduce((best, [v]) => (Math.abs(+v - (h.clap ?? 0.5)) < Math.abs(+best - (h.clap ?? 0.5)) ? v : best), '0.5');
     return [
-      group('Agent', 'Asleep after 5 minutes without talk. A double clap wakes it. The sleep word and the other triggers are on the Listening page.', null,
+      group('Agent', 'Asleep after 5 minutes without talk. A double clap or the wake phrase wakes it. The sleep word and the other triggers are on the Listening page.', null,
         el('div', { className: 'setting' },
           el('span', {}, h.asleep ? 'Asleep' : 'Listening'),
           h.asleep ? btn('Wake', () => act('power:wake'), { kind: 'primary', k: 'power:wake' }) : btn('Sleep', () => act('power:sleep'), { k: 'power:sleep' })),
@@ -916,7 +937,13 @@
         state.sizes?.length > 1 ? [el('p', { className: 'sub', textContent: 'Size' }),
           picks('Size', state.sizes, state.size ?? 'default', (x) => act(`size:${x}`), 'size', { small: '40 px across.', default: '48 px across.', large: '64 px across.' })] : null,
         el('p', { className: 'sub', textContent: 'Clap sensitivity' }),
-        picks('Clap sensitivity', CLAP, clap, (x) => act(`clapsens:${x}`), 'clapsens', { '0.2': 'Only loud claps close by.', '0.5': 'Claps from across a desk.', '0.8': 'Softer claps from across the room.' })),
+        picks('Clap sensitivity', CLAP, clap, (x) => act(`clapsens:${x}`), 'clapsens', { '0.2': 'Only loud claps close by.', '0.5': 'Claps from across a desk.', '0.8': 'Softer claps from across the room.' }),
+        state.voice?.mac ? [el('div', { className: 'setting' },
+          el('span', {}, 'Your claps', info(h.clapCal ? 'Set from your own claps in this room. Clap twice again to set it anew.' : 'Clap twice and I learn how your claps sound in this room.')),
+          btn(h.clapCalibrating ? 'Listening…' : h.clapCal ? 'Again' : 'Clap twice', () => act('clapcal'), { k: 'clapcal', disabled: h.clapCalibrating, aria: 'Clap twice to set how your claps sound' })),
+        // The live clap level, and the mark a clap must reach (clap_level from the voice helper, 10 a second).
+        el('div', { className: 'clapmeter', id: 'clapmeter', role: 'meter', 'aria-label': 'Clap level', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', 'data-tip': 'Clap: the bar should pass the mark.' },
+          el('span', { className: 'fill' }), el('span', { className: 'mark' }))] : null),
       group("Hydra's data", 'The Hydra agent API. Pairing comes with it.', null,
         h.olderData ? el('div', { className: 'setting' },
           el('span', {}, 'Older data', info(`Hydra now keeps its data in ~/HydraAgent. ${h.olderData} is still there with older data; nothing in it was changed or removed.`)),
@@ -991,6 +1018,46 @@
       clearTimeout(render.t); render.t = setTimeout(() => pane.classList.remove('enter'), 600);
     }
     if (keep) (document.querySelector(`.pane [data-k="${CSS.escape(keep)}"]`) ?? document.getElementById(keep))?.focus();
+    meterWanted(tab === 'hydra' && !!state.voice?.mac);
+  }
+  // The live clap level runs only while the Agent page shows.
+  function meterWanted(on) { if (on !== !!ui.meter) { ui.meter = on; act(on ? 'clapmeter:on' : 'clapmeter:off'); } }
+  const dbTo = (db) => Math.max(0, Math.min(1, (db + 80) / 80));
+  function clapLevel(m) {
+    const n = $('clapmeter');
+    if (!n) return;
+    const v = dbTo(m.db), mark = dbTo(m.needs);
+    n.style.setProperty('--v', v.toFixed(3)); n.style.setProperty('--n', mark.toFixed(3));
+    n.classList.toggle('hit', m.db >= m.needs);
+    n.setAttribute('aria-valuenow', String(Math.round(v * 100)));
+  }
+
+  // ---- an ask from the agent while the orb is in the Hydra window (the overlay that draws asks is hidden then) ----
+  // It slides down over the page: a question with its choices (the first one is yes), or a field with Send.
+  let askNow = null;
+  function askSheet(m) {
+    closeAsk(null, false);
+    const question = m.prompt || m.placeholder || '';
+    const answer = (text) => { const id = m.id; closeAsk(id, true); send({ type: 'answer', id, text }); };
+    const choices = Array.isArray(m.choices) && m.choices.length ? m.choices.map(String) : null;
+    const input = choices ? null : el('input', { type: m.mask ? 'password' : 'text', value: m.value || '', placeholder: m.prompt ? (m.placeholder || '') : '', 'aria-label': question, autocomplete: 'off', spellcheck: false, maxLength: 2000,
+      on: { keydown: (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); answer(input.value); } else if (e.key === 'Escape') { e.stopPropagation(); answer(null); } } } });
+    const sheet = el('div', { className: 'asksheet', role: 'dialog', 'aria-label': question, 'data-ask': m.id },
+      el('p', { className: 'askq', dir: 'auto', textContent: question }),
+      choices
+        ? el('div', { className: 'askrow' }, choices.map((c, i) => btn(c, () => answer(i === 0 ? 'yes' : null), { kind: i === 0 ? 'primary' : 'ghost', k: `ask-${i}` })))
+        : el('div', { className: 'askrow' }, el('span', { className: 'px field' }, input), btn('Send', () => answer(input.value), { kind: 'primary', k: 'ask-send' }), btn('Cancel', () => answer(null), { k: 'ask-cancel' })));
+    document.querySelector('.body').prepend(sheet);
+    askNow = { id: m.id, sheet };
+    setTimeout(() => (input ?? sheet.querySelector('button'))?.focus(), 30);
+  }
+  function closeAsk(id, animate) {
+    if (!askNow || (id != null && askNow.id !== id)) return;
+    const { sheet } = askNow;
+    askNow = null;
+    if (!animate || REDUCED.matches) return sheet.remove();
+    sheet.classList.add('out');
+    setTimeout(() => sheet.remove(), 170);
   }
   document.addEventListener('focusout', (e) => { if (deferred && e.target.tagName === 'INPUT') setTimeout(() => deferred && render(), 0); });
   // The window changes size with the screen it opens on: as many rows as fit there.
@@ -1097,7 +1164,8 @@
     render(null, true);
   };
   window.__panelShut = () => {
-    disarm(); ui.key = null; unarmQuit();
+    disarm(); ui.key = null; unarmQuit(); meterWanted(false);
+    if (askNow) { const id = askNow.id; closeAsk(id, false); send({ type: 'answer', id, text: null }); }
     body.classList.remove('opening');
     if (REDUCED.matches) { body.classList.add('shut'); return; }
     body.classList.add('shutting');
@@ -1119,6 +1187,9 @@
       if (m.state.tab) show(m.state.tab, true); // opened for a reason (asked with nothing signed in: the Model page)
     }
     else if (m.kind === 'note') note(m.text, m.bad, m.copy);
+    else if (m.kind === 'ask') askSheet(m);
+    else if (m.kind === 'cancel_ask') closeAsk(m.id, true);
+    else if (m.kind === 'clap_level') clapLevel(m);
     else if (m.kind === 'copied' && m.which === 'problem') note(m.ok ? 'Copied the error details. Paste them into your report.' : "Couldn't copy the error details. Try Save diagnostics.", !m.ok);
     else if (m.kind === 'copied') {
       if (!m.ok && state?.bind?.[m.which]) { ui.bindShown.add(m.which); render(`bind-${m.which}`); }
@@ -1206,7 +1277,7 @@
       fallbacks: { on: true, slots: ['gemini:gemini-3.8-flash', ''], limited: [{ label: 'Claude', until: at + 40 * 60e3 }], using: 'gemini:gemini-3.8-flash' },
       // Effort per slot: '' is automatic (low); computer use is set to High, and backup 1 (Gemini, which only thinks at High) too.
       efforts: { default: '', computer: 'high', code: '', agents: '', draw: '', web: '', backup1: 'high', backup2: '' },
-      voice: { on: true, keys: '⌃⌥', ready: true, mac: true, lang: 'auto', langOnline: null, studioSpeak: 'short', mute: true, autoListen: q.has('listen'), listenEvery: false, listenSecs: 8, listenChoices: [3, 5, 8, 10, 15], mics: [{ id: 'BuiltIn', name: 'MacBook Pro Microphone' }, { id: 'airpods', name: 'AirPods Pro' }], mic: '', micAuto: 'MacBook Pro Microphone', wake: !q.has('nowake'), wakeWord: true, wakeName: 'Hydra', clapTalk: true, barge: !q.has('nobarge'), bargeNA: q.has('nobarge'), sleepWord: 'Hydra, sleep', download: null }, askKeys: '⌥⌘', brief: { on: true, todoist: false, canTodoist: true }, focus: { until: null, task: '', list: ['YouTube', 'Reddit', 'X', 'Steam', 'Netflix'], custom: false }, sync: { dir: '', at: null, error: null, paused: false }, shortcuts: { talk: { value: 'control+option', pairs: [['control+option', 'Control+Option'], ['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] }, keys: [{ id: 'summon', words: 'Control+Option+S' }, { id: 'snap', words: 'Control+Option+A' }, { id: 'list', words: 'Control+Option+L' }] }, writeKeys: { value: 'option+command', pairs: [['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] },
+      voice: { on: true, keys: '⌃⌥', ready: true, mac: true, lang: 'auto', langOnline: null, studioSpeak: 'short', mute: true, autoListen: q.has('listen'), listenEvery: false, listenSecs: 8, listenChoices: [3, 5, 8, 10, 15], mics: [{ id: 'BuiltIn', name: 'MacBook Pro Microphone' }, { id: 'airpods', name: 'AirPods Pro' }], mic: '', micAuto: 'MacBook Pro Microphone', wake: !q.has('nowake'), wakeWord: true, wakeName: 'Hydra', wakePhrase: 'Hey Hydra', clapTalk: true, barge: !q.has('nobarge'), bargeNA: q.has('nobarge'), sleepWord: 'Hydra, sleep', download: null }, askKeys: '⌥⌘', brief: { on: true, todoist: false, canTodoist: true }, focus: { until: null, task: '', list: ['YouTube', 'Reddit', 'X', 'Steam', 'Netflix'], custom: false }, sync: { dir: '', at: null, error: null, paused: false }, shortcuts: { talk: { value: 'control+option', pairs: [['control+option', 'Control+Option'], ['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] }, keys: [{ id: 'summon', words: 'Control+Option+S' }, { id: 'snap', words: 'Control+Option+A' }, { id: 'list', words: 'Control+Option+L' }] }, writeKeys: { value: 'option+command', pairs: [['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] },
       sound: true, notch: q.has('notch') || q.has('capsule') ? 'drop' : null, notchReal: q.has('notch'), actions: q.has('actions'), login: { on: true },
       update: { available: new URLSearchParams(location.search).has('update') && new URLSearchParams(location.search).get('update') !== 'failed' ? '0.9.1' : null, installing: false, checking: false, result: null },
       intro: false,

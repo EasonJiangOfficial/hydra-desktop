@@ -1932,6 +1932,9 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         // The panel's mic picker: ask for the list, and pass on the pick (an id from it, or "" for automatic).
         Some("voice_mics") => to_voice(app, &json!({ "cmd": "mics" })),
         Some("voice_mic") => to_voice(app, &json!({ "cmd": "mic", "id": msg.get("id").and_then(Value::as_str).unwrap_or("") })),
+        // The panel's "Clap twice" and its live clap level.
+        Some("voice_clap_calibrate") => to_voice(app, &json!({ "cmd": "clap_calibrate" })),
+        Some("voice_clap_meter") => to_voice(app, &json!({ "cmd": "clap_meter", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
         // Where the orb lives: attached to the Hydra window (default) or detached on the desktop.
         Some("orb_mode") => {
             DETACHED.store(msg.get("detached").and_then(Value::as_bool).unwrap_or(false), Ordering::Relaxed);
@@ -1960,7 +1963,9 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 // The sleep word, while it's awake. Barge-in: talking over Hydra stops it and starts a take.
                 let clap = msg.get("clap").and_then(Value::as_bool).unwrap_or(false);
                 to_voice(app, &json!({ "cmd": "clap", "on": clap, "sensitivity": msg.get("clapSensitivity").and_then(Value::as_f64).unwrap_or(0.5),
-                    "asleep": msg.get("asleep").and_then(Value::as_bool).unwrap_or(false), "talk": msg.get("clapTalk").and_then(Value::as_bool).unwrap_or(false) }));
+                    "asleep": msg.get("asleep").and_then(Value::as_bool).unwrap_or(false), "talk": msg.get("clapTalk").and_then(Value::as_bool).unwrap_or(false),
+                    // The owner's own claps from "Clap twice" ({ peakDb, riseDb }), or null.
+                    "cal": msg.get("clapCal").cloned().unwrap_or(Value::Null) }));
                 to_voice(app, &json!({ "cmd": "barge", "on": msg.get("barge").and_then(Value::as_bool).unwrap_or(true) }));
                 to_voice(app, &json!({ "cmd": "sleep_word", "phrase": msg.get("sleepWord").and_then(Value::as_str).unwrap_or("") }));
                 // Hydra's wake phrase (agent_settings.wake_phrase), after wake_name: it decides.

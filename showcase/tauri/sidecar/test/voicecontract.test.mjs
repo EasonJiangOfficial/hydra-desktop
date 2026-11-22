@@ -28,10 +28,11 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
 
 // ---- 1. Shared settings.
 {
-  assert.deepEqual(SETTINGS_DEFAULTS, { wakePhrase: 'Hey Hydra', sleepWord: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium' }, 'the contract\'s defaults');
+  // clapSensitivity (W6): null until Hydra sends one, so the Mac keeps its own (an older server sends none).
+  assert.deepEqual(SETTINGS_DEFAULTS, { wakePhrase: 'Hey Hydra', sleepWord: null, clapSensitivity: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium' }, 'the contract\'s defaults');
   assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
   const snake = cleanSettings({ settings: { wake_phrase: '  Okay   Computer ', sleep_word: 'Goodnight Hydra', model: 'claude-sonnet-5-5', effort_live: 'high', effort_routine: 'low' } });
-  assert.deepEqual(snake, { wakePhrase: 'Okay Computer', sleepWord: 'Goodnight Hydra', model: 'claude-sonnet-5-5', effortLive: 'high', effortRoutine: 'low' });
+  assert.deepEqual(snake, { wakePhrase: 'Okay Computer', sleepWord: 'Goodnight Hydra', clapSensitivity: null, model: 'claude-sonnet-5-5', effortLive: 'high', effortRoutine: 'low' });
   assert.deepEqual(cleanSettings({ settings: { wakePhrase: 'Hey Jarvis', model: 'claude-haiku-5-5', effortLive: 'medium' } }).model, 'claude-haiku-5-5', 'camelCase too');
   const bad = cleanSettings({ settings: { wake_phrase: 'x', model: 'gpt-9', effort_live: 'ultra', effort_routine: 3 } }, snake);
   assert.deepEqual(bad, snake, 'values out of range keep what was there');
@@ -328,7 +329,8 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.match(side, /const \{ model, thinking \} = brainFor\(agentSettings\.current, turn\.surface\);/, 'relay turns too');
   assert.match(side, /agentSettings\.start\(\);/, 'read when paired');
   assert.match(side, /m\.type === 'hydra_settings_changed'\) agentSettings\.refresh\(\);/, 'and on a change push from the window');
-  assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: agentSettings\.current\.wakePhrase,/, 'the wake phrase reaches the helper; it listens asleep too');
+  assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: wakePhraseNow\(\),/, 'the wake phrase reaches the helper; it listens asleep too');
+  assert.match(side, /const wakePhraseNow = \(\) => \(servedNow\('wakePhrase'\) \? agentSettings\.current\.wakePhrase : config\.wakePhrase \|\|/, 'Hydra\'s phrase when the server sends one');
   assert.match(side, /if \(!asleep && why !== 'talk' && why !== 'phrase'\)/, 'a phrase wake keeps its own take (no greeting over the owner)');
   assert.match(side, /state === 'listening' && busy && m\.mode === 'wake'\) \{ addOnTake = true;/, 'the phrase while thinking adds on');
   assert.match(side, /if \(addOnTake\) \{ addOnTake = false; if \(addOn\(text\)\) return; \}/);

@@ -9,7 +9,7 @@ import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
 import { DANGER, HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
 import { INPUT_PREFIX, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, toolFilter, turnPrompt } from './relay.mjs';
-import { brainFor, createSettingsWatch } from './agentsettings.mjs';
+import { brainFor, CLAP_LEVELS, cleanWakePhrase, createSettingsWatch } from './agentsettings.mjs';
 import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
@@ -36,7 +36,7 @@ import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPromp
 import { briefNote } from './brief.mjs';
 import { CHECK_MS, DEFAULT_DISTRACTIONS, check as focusCheck, parseDistractions, startBlock } from './focus.mjs';
 import { saveCardImage } from './cardimage.mjs';
-import { cleanWakeName, wakeName } from './wakename.mjs';
+import { wakeName } from './wakename.mjs';
 import { cleanSleepWord, createPower, DEFAULT_SLEEP_WORD, heardSleepWord } from './power.mjs';
 import { cleanDeviceKey, cleanHydraUrl, createHydraLink, HYDRA_KEY_SECRET } from './hydralink.mjs';
 import { SystemVoice, spokenText, systemStatus } from './sysvoice.mjs';
@@ -267,6 +267,7 @@ const saveConfig = () => writeJson(CONFIG_PATH, routed && defaultPick ? { ...con
 const phraseOn = () => WAKE_OK && config.wakeWord !== false;
 const clapTalkOn = () => MAC && config.clapTalk !== false;
 let bargeUnavailable = false; // the voice helper found no echo cancellation: barge-in is off this session
+let clapCalibrating = false; // the panel's "Clap twice" is listening
 const bargeOn = () => MAC && config.barge !== false && !bargeUnavailable;
 // Where the orb lives (owner: "the voice agent is completely separate from the app, which shouldn't be the case unless I
 // detatch it"). Attached, the default: in the Hydra window (the web app draws it from the bridge) and the menu bar icon
@@ -280,7 +281,21 @@ function setOrbMode(detached, from = 'panel') {
   send({ type: 'orb_mode', detached: !!detached });
   menu(); if (panelOpen) panel();
 }
-const clapSensitivity = () => (Number.isFinite(Number(config.clapSensitivity)) ? Math.max(0, Math.min(1, Number(config.clapSensitivity))) : 0.5);
+// Paired, Hydra's own settings decide (W6: one source, every surface); an older server that doesn't send a field, or
+// not paired: this Mac's own value.
+const servedNow = (field) => !!hydraKey && !hydraRevoked && agentSettings.served.has(field);
+const clapSensitivity = () => (servedNow('clapSensitivity') ? CLAP_LEVELS[agentSettings.current.clapSensitivity]
+  : Number.isFinite(Number(config.clapSensitivity)) ? Math.max(0, Math.min(1, Number(config.clapSensitivity))) : 0.5);
+const wakePhraseNow = () => (servedNow('wakePhrase') ? agentSettings.current.wakePhrase : config.wakePhrase || `Hey ${wakeName(config)}`);
+// A wake phrase the voice helper takes (WakeWord.setPhrase): 1 to 6 words, a single word of 5 letters or more.
+function cleanPhrase(raw) {
+  const t = cleanWakePhrase(raw);
+  const words = t ? t.split(/[^\p{L}\p{N}]+/u).filter(Boolean) : [];
+  if (!t || !words.length) return { ok: false, why: 'Say it in 2 to 40 letters, like Hey Hydra.' };
+  if (words.length > 6) return { ok: false, why: 'Six words at most.' };
+  if (words.length === 1 && words[0].length < 5) return { ok: false, why: 'One short word is heard by mistake. Add a word, like Hey Nova.' };
+  return { ok: true, phrase: t };
+}
 const power = createPower({
   onChange: ({ asleep, why }) => {
     logLine('power', { asleep, why });
@@ -941,7 +956,7 @@ const livePrompt = (context = '') => {
   const open = commitmentsText(), done = doneTodayText(), working = agents.liveText(), scheduled = jobsText(fmtWhen), learned = skillIndex(), linked = mcp.liveText();
   const turn = `Live state (current as of this moment):
 ${frontNow ? `${frontNow}\n` : ''}${lookLine(session?.looks, config.look ?? 'hydra', nameOfLook, userName)}${inkLine()}${focusLine()}${crewLine()}${linked ? `- Connections (connection_tools shows a server's tools, use_connection calls one):\n${linked}\n` : ''}- Editing files, running commands and controlling other apps: ${config.allowActions ? 'ALLOWED' : `switched OFF (tell the user to turn on "Allow File Edits & Commands" on the General page in ${PANEL} if they want it)`}.
-${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${HOTKEYS_OK ? `${userName} holds ${talkWords()} to talk` : `${userName} presses the key they bound to ${BIND.talk} to start talking and again to send (a pause sends too)`}${config.autoListen ? (config.listenEvery ? `. Auto-listen is on for every reply: after each spoken reply the mic opens by itself for ${listenSecs()} seconds, so they can just keep talking` : '. Auto-listen is on: when your reply to a spoken question ends with a question, the mic opens by itself for their answer') : ''}${!WAKE_OK ? '. There is no wake word on this computer: to talk they use the talk keys' : ''}${phraseOn() ? `. Wake word is on: ${userName} can also say "Hey ${wakeName(config)}" to start talking hands-free, and what they say right after it is the request (a request that still starts with "Hey ${wakeName(config)}" is them waking you, not calling you by another name: never correct it)${config.wakeName ? ` (they chose "${config.wakeName}" as the wake word; your own name is unchanged)` : ''}` : ''}` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Listening page in ${PANEL}`})`}.` : ''}
+${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${HOTKEYS_OK ? `${userName} holds ${talkWords()} to talk` : `${userName} presses the key they bound to ${BIND.talk} to start talking and again to send (a pause sends too)`}${config.autoListen ? (config.listenEvery ? `. Auto-listen is on for every reply: after each spoken reply the mic opens by itself for ${listenSecs()} seconds, so they can just keep talking` : '. Auto-listen is on: when your reply to a spoken question ends with a question, the mic opens by itself for their answer') : ''}${!WAKE_OK ? '. There is no wake word on this computer: to talk they use the talk keys' : ''}${phraseOn() ? `. Wake word is on: ${userName} can also say "${wakePhraseNow()}" to start talking hands-free, and what they say right after it is the request (a request that still starts with "${wakePhraseNow()}" is them waking you, not calling you by another name: never correct it)${config.wakeName ? ` (they chose "${config.wakeName}" as the wake word; your own name is unchanged)` : ''}` : ''}` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Listening page in ${PANEL}`})`}.` : ''}
 - Shortcuts: ${HOTKEYS_OK ? `${keys().write ? `type a question to you: a quick tap of ${writeWords()} (press both and let go), which opens a text field beside the cursor (Enter sends, Shift+Enter adds a line, Esc or another tap closes it)` : `the tap that opens a text field to type a question is turned off (the Ask button in ${PANEL} still opens it; the Shortcuts page there turns the tap back on)`}; show or hide you ${keyWords(keys().summon)}` : `on this Wayland desktop no app can have global shortcuts, so ${userName} binds keys to these commands in their desktop's keyboard settings: ${BIND.summon} (show or hide you), ${BIND.ask} (ask you), ${BIND.list} (the list), ${BIND.talk} (talk) and ${BIND.panel} (the panel)`}${SNAP_OK ? `; ask about an area ${keyWords(keys().snap)}` : ''}${CIRCLE_OK ? "; while holding the talk keys, moving the cursor round something circles it (no clicking; it snaps shut with a click when the circle closes, and loose lines don't count) and you'll see what they circled" : ''}${HOTKEYS_OK ? `; show the list ${keyWords(keys().list)}` : ''}.${HANDS_OK ? '' : ' Asking about an area, reading app windows, finding things on screen by their words and working other apps need the Hydra app, which isn\'t running here; draw there with x, y from a screenshot.'}`;
   const memory = `${open ? `Open commitments:\n${open}` : 'No open commitments.'}${done ? `\nDone today (ticked off on the list or by you; still shown struck through until midnight):\n${done}` : ''}
 ${facts.length ? `What you know about ${userName}${total > facts.length ? ` (${facts.length} most relevant of ${total})` : ''}:\n${facts.map((f) => `- ${f.id}: ${f.text}`).join('\n')}` : `You don't know anything lasting about ${userName} yet.`}${working ? `\n${working}` : ''}${scheduled ? `\nScheduled jobs (update_job changes them):\n${scheduled}` : ''}${learned ? `\nSkills you've learned (use_skill reads the steps):\n${learned}` : ''}`;
@@ -1819,9 +1834,13 @@ function ask(opts, signal) {
   askQueued ??= oneYesNoAtATime(showAsk);
   return askQueued(opts, signal);
 }
+// While the orb lives in the Hydra window (attached), the overlay that draws asks is hidden: an ask there was never
+// seen (owner: "when I hit change starting phrase the menu closes"), so it opens in the panel instead.
+const panelAsk = (msg) => send({ type: 'panel', msg });
 function showAsk(opts, signal) {
   const id = `a${++askSeq}`;
-  const to = onboarding ? ob : ui;
+  const to = onboarding ? ob : !orbDetached() ? panelAsk : ui;
+  if (to === panelAsk) send({ type: 'panel_show' });
   // The setup guide has no buttons: its answer box takes a typed y.
   if (onboarding && opts.choices) opts = { ...opts, placeholder: `${opts.placeholder} Type y to allow.` };
   to({ kind: 'ask', id, ...opts });
@@ -2419,7 +2438,7 @@ function panelState() {
     geminiModel: config.geminiModel, geminiModels: GEMINI_CHOICES,
     studio: tts().local ? studioState() : null,
     voice: VOICE_OK ? {
-      on: !!config.voice, lang: speechLangId(), langOnline: langInfo && langInfo.id === speechLangId() ? langInfo.online : null, studioSpeak: config.studioSpeak === 'full' || config.studioSpeak === 'medium' ? config.studioSpeak : 'short', keys: HOTKEYS_OK ? talkSymbols() : null, ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false, autoListen: !!config.autoListen, listenEvery: !!config.listenEvery, listenSecs: listenSecs(), listenChoices: LISTEN_SECS, snoozeListen: !!config.snoozeListen, wake: WAKE_OK, wakeWord: phraseOn(), wakeName: wakeName(config), clapTalk: clapTalkOn(), barge: bargeOn(), bargeNA: bargeUnavailable, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD,
+      on: !!config.voice, lang: speechLangId(), langOnline: langInfo && langInfo.id === speechLangId() ? langInfo.online : null, studioSpeak: config.studioSpeak === 'full' || config.studioSpeak === 'medium' ? config.studioSpeak : 'short', keys: HOTKEYS_OK ? talkSymbols() : null, ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false, autoListen: !!config.autoListen, listenEvery: !!config.listenEvery, listenSecs: listenSecs(), listenChoices: LISTEN_SECS, snoozeListen: !!config.snoozeListen, wake: WAKE_OK, wakeWord: phraseOn(), wakeName: wakeName(config), wakePhrase: wakePhraseNow(), clapTalk: clapTalkOn(), barge: bargeOn(), bargeNA: bargeUnavailable, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD,
       // The mic picker: what the voice helper lists, the pick ('' is automatic) and the mic automatic uses now.
       mics: mics.list, mic: config.mic ?? '', micAuto: mics.list.find((x) => x.id === mics.auto)?.name ?? '',
       download: NEEDS_MODEL && config.voice && !voiceReady() ? { status: voiceModel.status, pct: voiceModel.total ? Math.floor((voiceModel.done / voiceModel.total) * 100) : 0, size: sizeLabel() } : null,
@@ -2429,7 +2448,7 @@ function panelState() {
     update: { available: update.available, installing: update.installing, checking: update.checking, result: update.result, page: update.page, done: update.done },
     intro: !!intro,
     // Hydra: asleep or awake, the sleep word, the clap wake's sensitivity, and the link to Hydra's data.
-    hydra: { olderData: OLDER_DATA ? OLDER_DATA.replace(os.homedir(), '~') : null, detached: orbDetached(), asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), wake: phraseOn(),
+    hydra: { olderData: OLDER_DATA ? OLDER_DATA.replace(os.homedir(), '~') : null, detached: orbDetached(), asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), clapCal: !!config.clapCalibration, clapCalibrating, wake: phraseOn(),
       url: hydraLink.url, link: hydraKey ? (hydraRevoked ? 'unpaired' : 'ready') : hydraLink.status(), tools: hydraTools.count, relay: relay.running },
     // The latest error anyone saw, for Copy last error.
     problem: lastProblem ? { code: lastProblem.code, at: lastProblem.at } : null,
@@ -2443,13 +2462,18 @@ const speechLangId = () => (SPEECH_LANGS.includes(config.speechLang) ? config.sp
 let langInfo = null; // what the voice helper settled on for it: { id, engine, online }
 // The helper listens for the key phrase (and only for it) while this is true; the overlay tells the bridge (wake).
 const phraseListening = () => VOICE_OK && !!config.voice && voiceReady() && phraseOn() && !power.asleep;
+// The last settings sent to the voice helper: the same ones again aren't sent (they were, 127 times in an evening).
+// Cleared when the helper starts again, so a new one hears them all.
+let voiceConfigSent = '';
 const voiceConfig = () => {
   ui({ kind: 'wake_phrase', on: phraseListening() });
   const enabled = VOICE_OK && config.voice && voiceReady();
   if (!enabled) voiceHelperUp = false; // the helper stops; it says when it's up again
   nativeNow();
   // The key phrase listens asleep too (it wakes Hydra, W5 contract 4); it's Hydra's own (agent_settings.wake_phrase).
-  send({ type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: agentSettings.current.wakePhrase, lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
+  const msg = { type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: wakePhraseNow(), lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), clapCal: config.clapCalibration ?? null, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) };
+  const key = JSON.stringify(msg);
+  if (key !== voiceConfigSent) { voiceConfigSent = key; send(msg); }
   // The native listening pill beside the cursor stays hidden while the notch capsule is where I appear.
   send({ type: 'pill', on: notchMode() === 'off' });
 };
@@ -2506,7 +2530,16 @@ function onVoice(m) {
     onSpoken(m.text.trim(), m.area);
   }
   else if (m.type === 'voice_state' && m.state === 'idle' && snap?.waitingVoice) snap.waitingVoice = false;
-  else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; nativeNow(); }
+  else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; voiceConfigSent = ''; voiceConfig(); }
+  // "Clap twice" (the panel): the owner's claps set the detector for his room; the live level while the page is open.
+  else if (m.type === 'voice_clap_calibrated') {
+    if (m.ok && Number.isFinite(m.peakDb) && Number.isFinite(m.riseDb)) {
+      config.clapCalibration = { peakDb: Math.max(-90, Math.min(0, m.peakDb)), riseDb: Math.max(0, Math.min(90, m.riseDb)) }; saveConfig(); voiceConfig();
+      panelNote('Got your claps. Clapping twice wakes me in this room now.');
+    } else panelNote(`I heard ${Number(m.heard) || 0} clap${m.heard === 1 ? '' : 's'}, not two. Try again, a bit louder.`, true);
+    clapCalibrating = false; if (panelOpen) panel();
+  }
+  else if (m.type === 'voice_clap_level' && panelOpen) send({ type: 'panel', msg: { kind: 'clap_level', db: Number(m.db) || -120, floor: Number(m.floor) || -120, needs: Number(m.needs) || -40 } });
   else if (m.type === 'voice_play_failed') { nativeFailed = true; logLine('voice_native', { failed: String(m.why ?? '') }); nativeNow(); }
   else if (m.type === 'voice_mics') { mics = cleanMics(m); panel(); }
   else if (m.type === 'voice_lang') { langInfo = { id: String(m.id ?? ''), engine: String(m.engine ?? ''), online: !!m.online }; logLine('speech_lang', langInfo); panel(); }
@@ -2789,14 +2822,17 @@ async function onMenu(id, via) {
   else if (id === 'wakeword' && WAKE_OK) { config.wakeWord = !phraseOn(); saveConfig(); agentStale = true; voiceConfig(); menu(); }
   else if (id === 'claptalk' && MAC) { config.clapTalk = !clapTalkOn(); saveConfig(); voiceConfig(); menu(); }
   else if (id === 'barge' && MAC) { config.barge = !bargeOn(); saveConfig(); voiceConfig(); menu(); }
-  else if (id === 'wakename' && WAKE_OK) {
-    const typed = await ask({ prompt: `Key phrase: "Hey" and a name (now "Hey ${wakeName(config)}"; leave empty for "Hey Hydra")`, placeholder: 'Hey Hydra' });
-    if (typed == null) return;
-    const r = cleanWakeName(typed);
-    if (!r.ok) { say(r.why, 'concerned'); return; }
-    config.wakeName = r.name; saveConfig(); agentStale = true; voiceConfig(); menu();
-    say(phraseOn() ? `Got it. Say "Hey ${wakeName(config)}" and I'm listening.` : `Saved. Turn on the key phrase, then say "Hey ${wakeName(config)}".`, 'happy');
+  else if (id.startsWith('wakephrase:') && WAKE_OK) {
+    // Typed in place on the Listening page (no ask: that rendered on the overlay orb, hidden while it's attached).
+    const r = cleanPhrase(id.slice(11, 200));
+    if (!r.ok) { panelNote(r.why, true); return; }
+    config.wakePhrase = r.phrase; saveConfig();
+    // Paired: saved in Hydra too (one source for every surface), or the server's would come back.
+    if (hydraKey && !hydraRevoked) { const p = await agentSettings.patch({ wakePhrase: r.phrase }); if (!p.ok) panelNote(`Saved on this Mac. Hydra didn't take it (${p.status || 'offline'}), so its own phrase still counts.`, true); }
+    agentStale = true; voiceConfig(); menu(); if (panelOpen) panel();
   }
+  else if (id === 'clapcal' && MAC) { clapCalibrating = true; send({ type: 'voice_clap_calibrate' }); if (panelOpen) panel(); }
+  else if (id.startsWith('clapmeter:') && MAC) send({ type: 'voice_clap_meter', on: id === 'clapmeter:on' });
   else if (id === 'orb:detach') setOrbMode(true, 'menu');
   else if (id === 'orb:attach') setOrbMode(false, 'menu');
   else if (id === 'orb:offer' && orbDetached()) {
@@ -2815,7 +2851,12 @@ async function onMenu(id, via) {
   }
   else if (id.startsWith('clapsens:')) {
     const k = Number(id.slice(9));
-    if (Number.isFinite(k) && k >= 0 && k <= 1) { config.clapSensitivity = Math.round(k * 100) / 100; saveConfig(); voiceConfig(); if (panelOpen) panel(); }
+    if (Number.isFinite(k) && k >= 0 && k <= 1) {
+      config.clapSensitivity = Math.round(k * 100) / 100; saveConfig();
+      const level = Object.keys(CLAP_LEVELS).reduce((a, b) => (Math.abs(CLAP_LEVELS[b] - k) < Math.abs(CLAP_LEVELS[a] - k) ? b : a));
+      if (hydraKey && !hydraRevoked) await agentSettings.patch({ clapSensitivity: level });
+      voiceConfig(); if (panelOpen) panel();
+    }
   }
   else if (id === 'hydra_url') {
     const typed = await ask({ prompt: 'Hydra address (empty to clear)', placeholder: 'https://', value: config.hydraUrl || '' });
@@ -2914,7 +2955,7 @@ function addOn(text) {
 function takeSnap() {
   if (!snap || Date.now() - snap.at > 120_000) { snap = null; return null; }
   const s = snap; snap = null;
-  for (const [id, resolve] of pending) { ui({ kind: 'cancel_ask', id }); resolve(null); pending.delete(id); }
+  for (const [id, resolve] of pending) { ui({ kind: 'cancel_ask', id }); panelAsk({ kind: 'cancel_ask', id }); resolve(null); pending.delete(id); }
   return s.image;
 }
 
