@@ -40,4 +40,14 @@ const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
 assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx\)\)/);
 assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?`, ctx\)/);
 assert.match(src, /skillExists\(args\.name\) && !\(await confirm\(`Replace the skill/, 'saving over a skill asks (second review M8)');
+// Fourth review: a fact said again after it was replaced is current again, and replaced facts never reach the model.
+{
+  const { supersedeFact, liveFacts, pickFacts } = await import('../store.mjs');
+  const a = await addFact('Has a cat called Miso');
+  const b = await addFact('Has a cat called Momo, not Miso'); await supersedeFact(a.id, b.id);
+  assert.ok(!liveFacts().some((f) => f.id === a.id) && !pickFacts('cat').some((f) => f.id === a.id), 'replaced: not used');
+  const c = await addFact('Has a cat called Miso'); await supersedeFact(b.id, c.id);
+  assert.equal(c.id, a.id, 'the same fact');
+  assert.ok(liveFacts().some((f) => f.id === a.id) && !liveFacts().some((f) => f.id === b.id), 'current again; the other one replaced');
+}
 console.log('memory deletes ask: passed');

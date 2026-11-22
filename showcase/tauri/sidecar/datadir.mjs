@@ -7,6 +7,7 @@
 // checks the copy and only then switches; the old copy is never deleted, and if anything fails this run keeps using it.
 // ROAMIES_DATA_DIR (tests and benchmarks) stands in for the home folder, so they exercise the same migration.
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -96,6 +97,8 @@ function verifyTree(files, tmp) {
   }
 }
 
+const digest = (f) => { try { return createHash('sha256').update(readFileSync(f)).digest('hex'); } catch { return null; } };
+
 // Removes a folder even when it holds read-only folders (a copy that got its original modes back).
 function forceRm(p) {
   const open = (d) => { try { chmodSync(d, 0o700); for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory() && !e.isSymbolicLink()) open(path.join(d, e.name)); } catch {} };
@@ -118,7 +121,8 @@ function treeFiles(root) {
 }
 
 // Whether ~/Roamies may hold data ~/HydraAgent doesn't. Marked moved: a file changed after the mark (an older Hydra
-// kept running and saving there). Not marked: a file the copy lacks or holds at another size. The whole tree is read.
+// kept running and saving there). Not marked: a file the copy lacks or holds with other contents (sha-256), or a link
+// pointing elsewhere; only when every one matches is the old folder marked moved. The whole tree is read.
 // Same data and no MOVED.txt (a crash right after the switch): it is marked now, and nothing is reported.
 function olderThere(from, to) {
   let moved = null;
@@ -130,7 +134,8 @@ function olderThere(from, to) {
     if (moved != null) { if (a.mtimeMs > moved + 1000) return true; continue; }
     // Not marked: the copy must hold every file, the same size.
     try { b = lstatSync(path.join(to, r)); } catch { return true; }
-    if (a.isFile() && (!b.isFile() || a.size !== b.size)) return true;
+    if (a.isFile() && (!b.isFile() || a.size !== b.size || digest(path.join(from, r)) !== digest(path.join(to, r)))) return true;
+    if (a.isSymbolicLink() && (!b.isSymbolicLink() || readlinkSync(path.join(from, r)) !== readlinkSync(path.join(to, r)))) return true;
   }
   if (moved == null) { try { writeFileSync(path.join(from, 'MOVED.txt'), `Hydra now keeps everything in ${to}.\n\nThis folder is the copy from before the move, kept in case you go back to an older version.\nYou can delete it.\n`); } catch {} }
   return false;

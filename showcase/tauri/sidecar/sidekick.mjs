@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import {
-  addFact, supersedeFact, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
+  addFact, supersedeFact, liveFacts, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
   touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
@@ -838,7 +838,7 @@ let lastFactIds = [];
 let frontNow = ''; // set just before each request (whereNow)
 const crewLine = () => { const t = crewText(crewNow(), (sp) => modelName(sp.model), config.delegate); return t ? `${t}\n` : ''; };
 const livePrompt = (context = '') => {
-  const facts = pickFacts(context, 40), total = listFacts().length;
+  const facts = pickFacts(context, 40), total = liveFacts().length;
   lastFactIds = facts.map((f) => f.id);
   const open = commitmentsText(), done = doneTodayText(), working = agents.liveText(), scheduled = jobsText(fmtWhen), learned = skillIndex(), linked = mcp.liveText();
   const turn = `Live state (current as of this moment):
@@ -1154,7 +1154,7 @@ function maybeCompact() {
   const s = session, t0 = Date.now();
   compacting = (async () => {
     try {
-      const facts = listFacts();
+      const facts = liveFacts();
       const { text, model } = await oneShot({ ...(await sideRoute()), system: foldPrompt(userName), text: foldInput({ facts, summary: plan.summary, turns: transcript(plan.folded, userName, stripNote), name: userName }) });
       const out = parseBrain(text, { knownIds: facts.map((f) => f.id), wantSummary: true });
       const learned = await learnFacts(out.facts);
@@ -1200,7 +1200,7 @@ async function memoryPass(s, why) {
   if (!turns.trim() || !config.model) return [];
   const t0 = Date.now();
   try {
-    const facts = listFacts();
+    const facts = liveFacts();
     const { text, model } = await oneShot({ ...(await sideRoute()), system: memoryPrompt(userName), text: memoryInput({ facts, turns }) });
     const out = parseBrain(text, { knownIds: facts.map((f) => f.id) });
     const learned = await learnFacts(out.facts);
@@ -1289,7 +1289,7 @@ async function wrongButton() {
 async function lessonPass(r, correction) {
   const t0 = Date.now();
   try {
-    const facts = listFacts();
+    const facts = liveFacts();
     const used = r.used.map((n) => readSkill(n)).filter(Boolean);
     const { text, model } = await oneShot({ ...(await sideRoute()), system: lessonPrompt(userName), text: lessonInput({ facts, index: skillIndex(), used, turns: transcript(r.messages, userName, stripNote).slice(-12_000), correction }) });
     const out = parseLesson(text, { knownIds: facts.map((f) => f.id) });
@@ -2768,13 +2768,13 @@ function takeSnap() {
 // here). The chat is its own conversation; when it ends, a memory pass over it saves what it learned as facts.
 let introKnown = new Set(); // facts that existed before the chat, so the end can show only what it learned
 let beforeIntro = null; // the conversation the chat interrupted: it carries on afterwards
-const introFacts = () => listFacts().filter((f) => !introKnown.has(f.id)).map((f) => ({ id: f.id, text: f.text }));
+const introFacts = () => liveFacts().filter((f) => !introKnown.has(f.id)).map((f) => ({ id: f.id, text: f.text }));
 async function startIntro() {
   if (intro) return ob({ kind: 'chat_state', status: 'busy' });
   await refreshAuth();
   if (!ensureModel()) return ob({ kind: 'chat_state', status: 'no_model' });
   intro = { n: 0 };
-  introKnown = new Set(listFacts().map((f) => f.id));
+  introKnown = new Set(liveFacts().map((f) => f.id));
   beforeIntro = session?.messages.length ? session : null;
   freshSession(null);
   session.kind = 'intro';
@@ -2936,6 +2936,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   } else if ((m.type === 'panel_fishkey' || m.type === 'panel_geminikey') && typeof m.key === 'string') voiceKeyLogin({ provider: m.type === 'panel_geminikey' ? 'gemini' : 'fish', given: m.key.slice(0, 1000), note: panelNote }).catch((e) => console.error('voice key', e));
   else if (m.type === 'answer') { pending.get(m.id)?.(m.text ?? null); pending.delete(m.id); }
   else if (m.type === 'ui_ready') {
+    ui({ kind: 'hands_reset' }); // nothing is acting in an app when the overlay or this sidecar (re)starts
     retired.then((notes) => { if (notes.length) { retired = Promise.resolve([]); say(`${notes.join(' ')} Do it on the Model page in ${PANEL}.`, 'concerned'); } });
     ui({ kind: 'sound', on: config.sound });
     ui({ kind: 'volume', v: volumeNow() / 100 });
@@ -3137,6 +3138,7 @@ if (process.platform === 'win32' && process.env.ROAMIES_EXE && !config.trayShown
   setTimeout(tryShow, 2000).unref?.();
 }
 pruneLogs(); pruneUsage();
+ui({ kind: 'hands_reset' }); // a restarted sidecar: nothing of its is acting in an app
 midnightClean();
 voiceConfig();
 // First run (or setup never finished): open the guide.

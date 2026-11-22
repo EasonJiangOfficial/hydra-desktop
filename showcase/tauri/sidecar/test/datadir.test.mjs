@@ -277,4 +277,12 @@ console.log('datadir tests: passed');
   fs.writeFileSync(path.join(R, 'Agents', 'late.md'), 'x'); fs.utimesSync(path.join(R, 'Agents', 'late.md'), later, later);
   assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).older, true, 'the whole tree is looked at');
 }
+// Fourth review: same size but other contents, with no MOVED.txt: reported, and never marked moved.
+{
+  const home = path.join(TMP, `r${n++}`), R = path.join(home, 'Roamies'), H = path.join(home, 'HydraAgent');
+  fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.mkdirSync(path.join(H, 'Data'), { recursive: true });
+  fs.writeFileSync(path.join(R, 'Data', 'memory.json'), 'aaaa'); fs.writeFileSync(path.join(H, 'Data', 'memory.json'), 'bbbb');
+  assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).older, true, 'other contents, same size: reported');
+  assert.ok(!fs.existsSync(path.join(R, 'MOVED.txt')), 'and the old folder is not marked (no "you can delete it")');
+}
 console.log('folder rename tests: passed');

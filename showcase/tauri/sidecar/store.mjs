@@ -484,6 +484,8 @@ export async function applySynced({ commitments, facts }, basis) {
 
 const FACT_CAP = 150;
 export const listFacts = () => loadMemory().facts.slice();
+/** The facts in use: replaced ones (kept for the owner to forget) are left out of everything the model sees. */
+export const liveFacts = () => loadMemory().facts.filter((f) => !f.supersededBy);
 
 /** Saves a fact; a near-duplicate of an existing one replaces it instead of piling up. */
 export async function addFact(text) {
@@ -491,7 +493,8 @@ export async function addFact(text) {
   const key = t.toLowerCase().replace(/[^a-z0-9 ]/g, '');
   const facts = loadMemory().facts;
   const same = facts.find((f) => f.text.toLowerCase().replace(/[^a-z0-9 ]/g, '') === key);
-  if (same) { same.updatedAt = Date.now(); await saveMemory(); return same; }
+  // Said again: it's current again, even if a later fact had replaced it.
+  if (same) { same.updatedAt = Date.now(); delete same.supersededBy; delete same.supersededAt; await saveMemory(); return same; }
   const f = { id: newId('f'), text: t, createdAt: Date.now() };
   facts.push(f);
   // No cap that deletes: every fact stays until the owner forgets it (pickFacts keeps the prompt small).
