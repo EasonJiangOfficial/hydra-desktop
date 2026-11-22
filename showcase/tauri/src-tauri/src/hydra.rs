@@ -47,22 +47,63 @@ pub fn route(url: &Url) -> Nav {
     }
 }
 
-/// What a bridge call asks the sidecar to do, or None (an unknown call, or a page that isn't Hydra's own).
-pub fn bridge_message(cmd: &str, on_hydra: bool) -> Option<Value> {
-    if !on_hydra { return None; }
-    match cmd {
-        "wake" | "sleep" => Some(json!({ "type": "agent_power", "on": cmd == "wake", "from": "web" })),
-        "detach" | "attach" => Some(json!({ "type": "orb_set", "detached": cmd == "detach", "from": "web" })),
+/// A random secret made at launch. Only the main frame gets it (the init script below is main-frame only on macOS:
+/// tauri's `initialization_script`, a WKUserScript with forMainFrameOnly), so a call from an embedded frame (Plaid's
+/// iframe, an ad) can't carry it, and is ignored.
+pub fn bridge_token() -> &'static str {
+    static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        use std::io::Read;
+        let mut b = [0u8; 16];
+        let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_ok();
+        if !ok {
+            // No /dev/urandom (never on a Mac): the clock and the process id, hashed.
+            use std::hash::{BuildHasher, Hasher};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+            h.write_u32(std::process::id());
+            b[..8].copy_from_slice(&h.finish().to_le_bytes());
+            b[8..].copy_from_slice(&std::collections::hash_map::RandomState::new().build_hasher().finish().to_le_bytes());
+        }
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    })
+}
+
+/// What a bridge call does: tell the sidecar something, or open a link in the default browser.
+#[derive(Debug, PartialEq)]
+pub enum BridgeAct { Sidecar(Value), Open(String) }
+
+/// A `hydra-desktop://<cmd>?t=<token>[&u=<link>]` call, or None: no token or the wrong one (another frame), a page that
+/// isn't Hydra's own, an unknown call, or a link that isn't https, http or mailto.
+pub fn bridge_action(url: &Url, token: &str, on_hydra: bool) -> Option<BridgeAct> {
+    if !on_hydra || url.scheme() != BRIDGE_SCHEME { return None; }
+    let param = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
+    if param("t").as_deref() != Some(token) || token.is_empty() { return None; }
+    match url.host_str().unwrap_or("") {
+        "wake" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": true, "from": "web" }))),
+        "sleep" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": false, "from": "web" }))),
+        "detach" => Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": true, "from": "web" }))),
+        "attach" => Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": false, "from": "web" }))),
+        // A link the owner clicked in Hydra that leaves Hydra: the default browser opens it (never in the window).
+        "open" => {
+            let link = param("u")?.parse::<Url>().ok()?;
+            ["https", "http", "mailto"].contains(&link.scheme()).then(|| BridgeAct::Open(link.to_string()))
+        }
         _ => None,
     }
 }
 
-/// window.hydraDesktop, for the Hydra web app (only on Hydra's own origin). Documented in docs/BRIDGE.md.
+/// window.hydraDesktop, for the Hydra web app (only on Hydra's own origin, main frame only). Documented in
+/// docs/BRIDGE.md. It also sends a click on a link that leaves Hydra to the default browser.
+pub fn bridge_js(token: &str) -> String {
+    BRIDGE_JS.replace("__HYDRA_TOKEN__", token)
+}
 const BRIDGE_JS: &str = r#"(() => {
-  if (location.origin !== 'https://hydra-olive-one.vercel.app' || window.hydraDesktop) return;
+  if (location.origin !== 'https://hydra-olive-one.vercel.app' || window.hydraDesktop || window.top !== window) return;
+  const T = '__HYDRA_TOKEN__';
   let snap = { state: 'Asleep', micLevel: 0, outputLevel: 0, detached: false };
   const subs = new Set();
-  const call = (cmd) => { location.href = 'hydra-desktop://' + cmd; };
+  const call = (cmd, extra = '') => { location.href = 'hydra-desktop://' + cmd + '?t=' + T + extra; };
   Object.defineProperty(window, 'hydraDesktop', { value: Object.freeze({
     version: 2,
     get state() { return snap.state; },
@@ -81,6 +122,18 @@ const BRIDGE_JS: &str = r#"(() => {
     for (const fn of subs) { try { fn({ ...snap }); } catch {} }
     window.dispatchEvent(new CustomEvent('hydradesktop', { detail: { ...snap } }));
   } });
+  // Links that leave Hydra (its sign-in and Plaid load in the window as usual): to the default browser.
+  const stays = (u) => u.origin === location.origin || u.origin === 'https://vtspmnippnixoqtomfxi.supabase.co'
+    || (u.protocol === 'https:' && !u.port && (u.hostname === 'plaid.com' || u.hostname.endsWith('.plaid.com')));
+  document.addEventListener('click', (e) => {
+    if (e.defaultPrevented || e.button !== 0) return;
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    let u; try { u = new URL(a.href, location.href); } catch { return; }
+    if (!['https:', 'http:', 'mailto:'].includes(u.protocol) || stays(u)) return;
+    e.preventDefault();
+    call('open', '&u=' + encodeURIComponent(u.href));
+  }, true);
 })();"#;
 
 /// Opens the main window, or brings it back.
@@ -99,13 +152,17 @@ pub fn open_main(app: &AppHandle) {
         .min_inner_size(900.0, 600.0)
         .center()
         .background_color(tauri::window::Color(255, 255, 255, 255))
-        .initialization_script(BRIDGE_JS)
+        .initialization_script(bridge_js(bridge_token()))
         .on_navigation(move |url| match route(url) {
             Nav::Allow => true,
-            Nav::Bridge(cmd) => {
-                // Only while the window shows Hydra itself: never for a page that got in some other way.
+            Nav::Bridge(_) => {
+                // Only while the window shows Hydra itself, and only with the main frame's secret.
                 let on_hydra = nav_app.get_webview_window(MAIN_LABEL).and_then(|w| w.url().ok()).is_some_and(|u| is_hydra(&u));
-                if let Some(msg) = bridge_message(&cmd, on_hydra) { crate::to_sidecar(&nav_app, &msg); }
+                match bridge_action(url, bridge_token(), on_hydra) {
+                    Some(BridgeAct::Sidecar(msg)) => crate::to_sidecar(&nav_app, &msg),
+                    Some(BridgeAct::Open(link)) => open_in_browser(&link),
+                    None => {}
+                }
                 false
             }
             // Blocked, and not opened anywhere: this fires for every frame (an ad or embed loading), not just clicks.
@@ -197,17 +254,38 @@ mod tests {
     }
 
     #[test]
-    fn bridge_calls_wake_sleep_detach_and_attach_only_from_hydra() {
-        assert_eq!(r("hydra-desktop://detach"), Nav::Bridge("detach".into()));
-        assert_eq!(r("hydra-desktop://attach"), Nav::Bridge("attach".into()));
-        assert_eq!(bridge_message("detach", true), Some(json!({ "type": "orb_set", "detached": true, "from": "web" })));
-        assert_eq!(bridge_message("attach", true), Some(json!({ "type": "orb_set", "detached": false, "from": "web" })));
-        assert_eq!(bridge_message("wake", true), Some(json!({ "type": "agent_power", "on": true, "from": "web" })));
-        assert_eq!(bridge_message("sleep", true), Some(json!({ "type": "agent_power", "on": false, "from": "web" })));
-        for c in ["wake", "sleep", "detach", "attach"] { assert_eq!(bridge_message(c, false), None, "{c} from a page that isn't Hydra"); }
-        assert_eq!(bridge_message("quit", true), None, "unknown calls do nothing");
-        assert!(BRIDGE_JS.contains("version: 2") && BRIDGE_JS.contains("detach: () => call('detach')") && BRIDGE_JS.contains("get detached()"));
+    fn bridge_calls_need_hydra_and_the_main_frames_secret() {
+        let u = |s: &str| s.parse::<Url>().unwrap();
+        let t = "0123456789abcdef0123456789abcdef";
+        assert_eq!(r("hydra-desktop://detach?t=x"), Nav::Bridge("detach".into()));
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://detach?t={t}")), t, true), Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": true, "from": "web" }))));
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://attach?t={t}")), t, true), Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": false, "from": "web" }))));
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://wake?t={t}")), t, true), Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": true, "from": "web" }))));
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://sleep?t={t}")), t, true), Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": false, "from": "web" }))));
+        // An embedded frame (Plaid's iframe) has no secret, or guesses one.
+        for c in ["wake", "sleep", "detach", "attach"] {
+            assert_eq!(bridge_action(&u(&format!("hydra-desktop://{c}")), t, true), None, "{c} without the secret");
+            assert_eq!(bridge_action(&u(&format!("hydra-desktop://{c}?t=guess")), t, true), None, "{c} with a wrong secret");
+            assert_eq!(bridge_action(&u(&format!("hydra-desktop://{c}?t={t}")), t, false), None, "{c} from a page that isn't Hydra");
+        }
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://quit?t={t}")), t, true), None, "unknown calls do nothing");
+        assert_eq!(bridge_action(&u("hydra-desktop://wake?t="), "", true), None, "an empty secret never matches");
+        // Links that leave Hydra: https, http and mailto go to the browser; nothing else.
+        let open = |link: &str| bridge_action(&u(&format!("hydra-desktop://open?t={t}&u={}", url_escape(link))), t, true);
+        assert_eq!(open("https://example.com/a?b=1"), Some(BridgeAct::Open("https://example.com/a?b=1".into())));
+        assert_eq!(open("http://example.com/"), Some(BridgeAct::Open("http://example.com/".into())));
+        assert_eq!(open("mailto:a@b.c"), Some(BridgeAct::Open("mailto:a@b.c".into())));
+        assert_eq!(open("javascript:alert(1)"), None);
+        assert_eq!(open("file:///etc/passwd"), None);
+        assert_eq!(open("x-apple.systempreferences:com.apple.preference.security"), None);
+        // The page script: main frame and Hydra only, carries the secret, version 2.
+        let js = bridge_js(t);
+        assert!(js.contains(&format!("const T = '{t}'")) && !js.contains("__HYDRA_TOKEN__"));
+        assert!(js.contains("window.top !== window") && js.contains("version: 2") && js.contains("detach: () => call('detach')") && js.contains("get detached()"));
+        assert_eq!(bridge_token().len(), 32);
+        assert_eq!(bridge_token(), bridge_token(), "one secret per launch");
     }
+    fn url_escape(s: &str) -> String { s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect() }
 
     #[test]
     fn the_bridge_and_pushes_only_answer_hydra() {
