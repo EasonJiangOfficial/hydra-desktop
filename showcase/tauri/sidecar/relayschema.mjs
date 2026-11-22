@@ -26,11 +26,26 @@ export const PANEL_PARAMS = panelParamSchema.options;
 export const scopeSchema = z.enum(["all", "personal", "ugc"]);
 export const SCOPES = scopeSchema.options;
 
-/** A path inside Hydra: one leading slash, no host, no whitespace, backslash or control character. */
+const PATH_BASE = "https://hydra.invalid";
+
+/**
+ * A path inside Hydra the agent may send the window to: one leading slash, no scheme or host, no `//`,
+ * backslash, whitespace or control character (the URL parser drops tabs and newlines, so "/\t/evil.example"
+ * would become "//evil.example"), and never an API, auth or login route, even after dot segments. The one
+ * navigate rule: the web's isSafePath (src/components/agent/words.ts) runs this same schema.
+ */
 export const internalHref = z
   .string()
   .max(LIMITS.href)
-  .regex(/^\/(?![/\\])[^\\\s\x00-\x1f\x7f]*$/, "A path inside Hydra, like /transactions?tx=...");
+  .refine((href) => {
+    if (!href.startsWith("/") || href.startsWith("//") || /[\u0000-\u001F\u007F-\u009F\s\\]/.test(href)) return false;
+    try {
+      const url = new URL(href, PATH_BASE);
+      return url.origin === PATH_BASE && !/^\/(api|auth|login)(\/|$)/i.test(url.pathname);
+    } catch {
+      return false;
+    }
+  }, "A path inside Hydra, like /transactions?tx=...");
 
 export const uiActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("navigate"), href: internalHref }).strict(),
@@ -81,3 +96,16 @@ export const relayApprovalSchema = z
 
 /** GET /api/agent/relay/next?slot=: the Mac serves one live turn and one routine turn at a time. */
 export const slotSchema = z.enum(["live", "routine"]);
+
+/**
+ * POST /api/agent/relay/local body: a turn the owner had with Hydra on the Mac itself (local voice).
+ * The server appends his words and the reply to threadId (when it is his), else to his newest thread
+ * updated in the last 30 minutes (counted back from `at`, never from the future), else to a new one,
+ * and answers {threadId}: the Mac keeps it as its current thread for 30 minutes of quiet.
+ */
+export const localTurnSchema = z.object({
+  user: z.string().min(1).max(8000),
+  assistant: z.string().max(32000),
+  threadId: z.uuid().optional(),
+  at: z.iso.datetime({ offset: true }).optional(),
+});

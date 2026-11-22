@@ -74,6 +74,12 @@ pub fn bridge_token() -> &'static str {
 #[derive(Debug, PartialEq)]
 pub enum BridgeAct { Sidecar(Value), Open(String), Setup(u32), Permission(u32, String) }
 
+/// A call's request id (the page's counter, 1 to 9 digits), or None.
+pub fn call_id(url: &Url) -> Option<u32> {
+    url.query_pairs().find(|(n, _)| n == "id").map(|(_, v)| v.into_owned())
+        .filter(|v| (1..=9).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit())).and_then(|v| v.parse::<u32>().ok())
+}
+
 /// A `hydra-desktop://<cmd>?t=<token>[&u=<link>]` call, or None: no token or the wrong one (another frame), a page that
 /// isn't Hydra's own, an unknown call, or a link that isn't https, http or mailto.
 pub fn bridge_action(url: &Url, token: &str, on_hydra: bool) -> Option<BridgeAct> {
@@ -81,7 +87,7 @@ pub fn bridge_action(url: &Url, token: &str, on_hydra: bool) -> Option<BridgeAct
     let param = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
     if param("t").as_deref() != Some(token) || token.is_empty() { return None; }
     // A promise call's id (version 3): the page's counter, echoed back in the answer.
-    let id = || param("id").filter(|v| (1..=9).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit())).and_then(|v| v.parse::<u32>().ok());
+    let id = || call_id(url);
     let req = |cmd: &str, extra: Value| -> Option<BridgeAct> {
         let mut m = json!({ "type": "bridge_req", "id": id()?, "cmd": cmd });
         if let (Some(o), Value::Object(x)) = (m.as_object_mut(), extra) { o.extend(x); }
@@ -137,17 +143,20 @@ const BRIDGE_JS: &str = r#"(() => {
   // resolves a call on this one (they stay 9 digits, as the app checks).
   let n = Math.floor(Math.random() * 4e8);
   // Every call is a top-level navigation to hydra-desktop://, caught and cancelled by the app (hydra.rs). The page's
-  // CSP doesn't govern top-level navigations (it would block a frame). They go one at a time with a short gap, so two
-  // calls in a row never replace each other.
+  // CSP doesn't govern top-level navigations (it would block a frame). They go one at a time: the next only once the
+  // app says it caught the last ({ ack: id } through the push channel), or after 500 ms, so two calls in a row never
+  // replace each other.
   const queue = [];
-  let sending = false;
+  let sending = 0, gap = null;
+  const next = () => { clearTimeout(gap); sending = 0; pump(); };
   const pump = () => {
     if (sending || !queue.length) return;
-    sending = true;
-    location.href = queue.shift();
-    setTimeout(() => { sending = false; pump(); }, 80);
+    const [url, id] = queue.shift();
+    sending = id;
+    location.href = url;
+    gap = setTimeout(next, 500);
   };
-  const call = (cmd, extra = '', id = ++n) => { queue.push('hydra-desktop://' + cmd + '?t=' + T + '&id=' + id + extra); pump(); };
+  const call = (cmd, extra = '', id = ++n) => { queue.push(['hydra-desktop://' + cmd + '?t=' + T + '&id=' + id + extra, id]); pump(); };
   // A call with an answer: the app replies through __hydraDesktopPush({ res: { id, result } }).
   const ask = (cmd, extra = '', ms = 180000) => new Promise((resolve, reject) => {
     const id = ++n;
@@ -178,6 +187,7 @@ const BRIDGE_JS: &str = r#"(() => {
     unpair: () => ask('unpair').then(() => undefined),
   }) });
   Object.defineProperty(window, '__hydraDesktopPush', { value: (m) => {
+    if (m && m.ack !== undefined) { if (m.ack === sending) next(); return; }
     if (m && m.res) { const done = waiting.get(m.res.id); if (done) { waiting.delete(m.res.id); done(m.res.result); } return; }
     snap = { ...snap, ...m };
     for (const fn of subs) { try { fn({ ...snap }); } catch {} }
@@ -227,6 +237,9 @@ pub fn open_main(app: &AppHandle) {
                     Some(BridgeAct::Permission(id, kind)) => crate::bridge_permission(&nav_app, id, kind),
                     None => {}
                 }
+                // Tell the page this call was caught, so its queue sends the next one (a navigation sent before the
+                // last was answered could replace it).
+                if on_hydra { if let Some(id) = call_id(url) { push(&nav_app, &json!({ "ack": id })); } }
                 false
             }
             // Blocked, and not opened anywhere: this fires for every frame (an ad or embed loading), not just clicks.
@@ -274,10 +287,16 @@ pub fn navigate(app: &AppHandle, link: &str) {
 }
 
 /// The relay's shared limits (Hydra's src/lib/agent/relay-schema.ts): the panels a UI action may open, and a path
-/// inside Hydra (one leading slash, no host, no whitespace, backslash or control character, at most 500).
+/// inside Hydra (one leading slash, no host, no whitespace, backslash or control character, at most 500, and never an
+/// API, auth or login route, even after dot segments: the schema's one navigate rule).
 const PANEL_PARAMS: [&str; 9] = ["tx", "day", "account", "task", "goal", "deal", "category", "routine", "taxline"];
 fn is_internal_href(h: &str) -> bool {
-    h.len() <= 500 && h.starts_with('/') && !h.starts_with("//") && !h.starts_with("/\\") && !h.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    if h.len() > 500 || !h.starts_with('/') || h.starts_with("//") || h.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control()) { return false; }
+    let Ok(base) = Url::parse("https://hydra.invalid") else { return false };
+    let Ok(u) = base.join(h) else { return false };
+    if u.origin() != base.origin() { return false; }
+    let first = u.path().trim_start_matches('/').split('/').next().unwrap_or("").to_ascii_lowercase();
+    !["api", "auth", "login"].contains(&first.as_str())
 }
 
 /// What may go to the page from the app: the orb's state and levels, attached or not (version 2); muted, paused, the
@@ -323,6 +342,10 @@ pub fn clean_push(msg: &Value) -> Option<Value> {
             v["at"] = a.get("at").filter(|x| x.is_u64()).cloned().unwrap_or(json!(0));
             out.insert("ui".into(), v);
         }
+    }
+    // A bridge call was caught: the page's queue sends its next one.
+    if let Some(id) = msg.get("ack").and_then(Value::as_u64) {
+        return Some(json!({ "ack": id }));
     }
     // A promise call's answer. Only these keys reach the page; the sidecar never puts a key or code in one.
     if let Some(r) = msg.get("res") {
@@ -445,7 +468,7 @@ mod tests {
         let js = bridge_js(t);
         for f in ["stop: () => call('stop')", "pause: () => call('pause')", "resume: () => call('resume')", "setMuted: (muted)", "setup: () => ask('setup')",
             "pair: (code)", "signInClaude: ()", "requestPermission: (kind)", "unpair: ()", "if (m && m.res)", "muted: false, paused: false, reply: null, heard: null, ui: null",
-            "location.href = queue.shift()", "'&id=' + id"] {
+            "location.href = url", "'&id=' + id", "if (m.ack === sending) next()", "setTimeout(next, 500)"] {
             assert!(js.contains(f), "the page script has {f}");
         }
         // Top-level navigations (CSP doesn't block them), never a frame (frame-src would).
@@ -476,11 +499,26 @@ mod tests {
         assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/a b" } })), None, "no whitespace");
         assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/\\evil.com" } })), None, "no backslash");
         assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/a\u{7}" } })), None, "no control characters");
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/api/agent/devices" } })), None, "never an API route");
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/money/../Auth/callback" } })), None, "not even after dot segments");
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/login" } })), None);
+        assert!(p(json!({ "ui": { "kind": "navigate", "href": "/apis-and-more" } })).is_some(), "only the route itself");
         assert_eq!(p(json!({ "ui": { "kind": "highlight", "selector": "x".repeat(201) } })), None, "selectors up to 200");
         assert!(p(json!({ "ui": { "kind": "highlight", "selector": "#total" } })).is_some());
         assert_eq!(p(json!({ "ui": { "kind": "eval", "code": "x" } })), None);
         assert_eq!(p(json!({ "res": { "id": 9, "result": { "ok": true } }, "state": "Asleep" })), Some(json!({ "res": { "id": 9, "result": { "ok": true } } })), "an answer goes alone");
         assert_eq!(p(json!({ "res": { "id": "9" } })), None);
+        assert_eq!(p(json!({ "ack": 7, "state": "Asleep" })), Some(json!({ "ack": 7 })), "an ack goes alone");
+        assert_eq!(p(json!({ "ack": "7" })), None);
+    }
+
+    #[test]
+    fn a_call_id_is_one_to_nine_digits() {
+        let id = |s: &str| call_id(&s.parse().unwrap());
+        assert_eq!(id("hydra-desktop://wake?t=x&id=42"), Some(42));
+        assert_eq!(id("hydra-desktop://wake?t=x&id=1234567890"), None);
+        assert_eq!(id("hydra-desktop://wake?t=x&id=4a"), None);
+        assert_eq!(id("hydra-desktop://wake?t=x"), None);
     }
 
     #[test]

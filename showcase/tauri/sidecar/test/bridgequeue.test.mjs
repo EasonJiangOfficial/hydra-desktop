@@ -1,6 +1,8 @@
 // window.hydraDesktop's transport (hydra.rs BRIDGE_JS, W3 contract-fixes 9), run as the page would run it: every call
 // is a top-level navigation to hydra-desktop:// (CSP doesn't govern those; a frame would be blocked by frame-src),
-// sent one at a time with a gap so quick calls never replace each other, each with the launch token and a request id.
+// sent one at a time so quick calls never replace each other: the next only once the app acks the last ({ ack: id }
+// through the push channel, sent by the navigation policy callback) or 500 ms passed. Each carries the launch token
+// and a request id.
 // Promise answers come back through __hydraDesktopPush by id; ids start at a random point on each page load.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,8 +28,10 @@ function page() {
 }
 const parse = (u) => { const url = new URL(u); return { cmd: url.host, t: url.searchParams.get('t'), id: url.searchParams.get('id'), q: url.searchParams }; };
 
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const { win, navs, bridge } = page();
 assert.equal(bridge.version, 3);
+const ack = (i) => win.__hydraDesktopPush({ ack: Number(parse(navs[i][0]).id) });
 // Five calls in a row, three with no answer and two promise calls.
 bridge.setMuted(true);
 bridge.wake();
@@ -35,9 +39,15 @@ const setup = bridge.setup();
 bridge.pause();
 const pair = bridge.pair('AB12-CD34');
 assert.equal(navs.length, 1, 'the first goes at once, the rest wait their turn');
-const until = Date.now() + 3000;
-while (navs.length < 5 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+await wait(150);
+assert.equal(navs.length, 1, 'nothing more before the app acks the first');
+win.__hydraDesktopPush({ ack: Number(parse(navs[0][0]).id) + 1 });
+assert.equal(navs.length, 1, 'an ack for another call does not release the queue');
+ack(0);
+assert.equal(navs.length, 2, 'the ack sends the next at once');
+for (let i = 1; i < 4; i++) { await wait(5); ack(i); }
 assert.equal(navs.length, 5, 'every call went out, none replaced');
+ack(4);
 const calls = navs.map(([u]) => parse(u));
 assert.deepEqual(calls.map((c) => c.cmd), ['mute', 'wake', 'setup', 'pause', 'pair'], 'in order');
 for (const c of calls) {
@@ -47,7 +57,21 @@ for (const c of calls) {
 assert.equal(new Set(calls.map((c) => c.id)).size, 5, 'ids are unique');
 assert.equal(calls[0].q.get('on'), '1');
 assert.equal(calls[4].q.get('code'), 'AB12-CD34');
-for (let i = 1; i < navs.length; i++) assert.ok(navs[i][1] - navs[i - 1][1] >= 60, `a gap between calls (${navs[i][1] - navs[i - 1][1]} ms)`);
+
+// No ack (the app missed it): the next goes after 500 ms anyway.
+{
+  const p = page();
+  p.bridge.wake(); p.bridge.sleep();
+  await wait(400);
+  assert.equal(p.navs.length, 1, 'still waiting for the ack at 400 ms');
+  const t = Date.now() + 1000;
+  while (p.navs.length < 2 && Date.now() < t) await wait(10);
+  assert.equal(p.navs.length, 2, 'sent after 500 ms without an ack');
+  assert.ok(p.navs[1][1] - p.navs[0][1] >= 490, `${p.navs[1][1] - p.navs[0][1]} ms`);
+  // A late ack for the first does nothing to the second's wait.
+  p.win.__hydraDesktopPush({ ack: Number(parse(p.navs[0][0]).id) });
+  assert.equal(p.navs.length, 2);
+}
 
 // Answers by id: each resolves its own call; an unknown id resolves nothing and isn't merged into the state.
 win.__hydraDesktopPush({ res: { id: Number(calls[4].id), result: { ok: true } } });

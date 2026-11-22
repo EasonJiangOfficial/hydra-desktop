@@ -62,7 +62,8 @@ window's navigation handler catches and cancels; it acts only while the window's
 
 Version 3: every call is still a top-level `location.href` navigation to `hydra-desktop://` (CSP doesn't govern
 those; Hydra's `frame-src` would block a frame, so never add the scheme to any CSP). The calls go through a queue,
-one at a time 80 ms apart, so calls made one after another never replace each other. Every call carries the
+one at a time: the next only once the navigation handler has caught the last (it pushes `{ ack: id }`), or after
+500 ms, so calls made one after another never replace each other. Every call carries the
 per-launch token and a request id (`id=<n>`, starting at a random point on each page load); the answer comes back as `__hydraDesktopPush({ res: { id, result } })`, which resolves
 that call and is not merged into the state. `setup` and `requestPermission` are answered by the shell (permissions)
 and the sidecar (pairing, Claude); `pair`, `signInClaude` and `unpair` by the sidecar. The pairing code is letters,
