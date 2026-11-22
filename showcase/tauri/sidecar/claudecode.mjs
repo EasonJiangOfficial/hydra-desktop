@@ -70,7 +70,8 @@ export function toSdkUserContent(content) {
     return { type: 'text', text: `[${p.type} attachment omitted: not supported here]` };
   });
 }
-const toSdkUserMessage = (content) => ({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+// Each with its own uuid: Claude Code's result names the user messages its turn took (user_message_uuids).
+const toSdkUserMessage = (content) => ({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, uuid: crypto.randomUUID() });
 
 // A tool call copied into a reply as text by an earlier session: not part of what was said.
 const ECHOED = /^[ \t]*(?:\[called [\w.-]+(?: [^\n]*)?\]|Tool (?:use|result): [^\n]*)[ \t]*$/gm;
@@ -323,7 +324,6 @@ class Channel {
     }
   }
 }
-const isAbortLike = (err) => /abort/i.test(err instanceof Error ? err.message : String(err)) || err?.name === 'AbortError';
 
 // ---------- warm spare ----------
 // Starting Claude Code costs ~0.7 s before the model is even asked (process, config, MCP handshake). A spare is
@@ -456,9 +456,10 @@ async function* claudeCodeLoop(messages, o) {
   // After begin(): the first message is on the input already, so an addition always comes after it.
   o.takeInput?.((text) => {
     if (aborted || !input || !String(text ?? '').trim()) return false;
-    input.push(toSdkUserMessage([{ type: 'text', text: String(text) }]));
+    const m = toSdkUserMessage([{ type: 'text', text: String(text) }]);
+    input.push(m);
     addedAt = ++step;
-    added.push({ at: addedAt, text: String(text) });
+    added.push({ at: addedAt, text: String(text), uuid: m.uuid });
     return true;
   });
 
@@ -479,7 +480,8 @@ async function* claudeCodeLoop(messages, o) {
       if (item.kind === 'event') { if (!aborted) yield item.event; continue; }
       if (item.kind === 'end') break;
       if (item.kind === 'error') {
-        if (aborted || isAbortLike(item.error)) break;
+        // Only a Stop ends quietly: an error that merely says "abort" is an error (R11c-B2), so what was added is named.
+        if (aborted) break;
         throw item.error instanceof Error ? item.error : new Error(String(item.error));
       }
       const message = item.message;
@@ -500,12 +502,17 @@ async function* claudeCodeLoop(messages, o) {
         throw new Error(detail || `Claude Code stopped: ${message.subtype}`);
       }
       if (message.is_error) throw new Error(message.result || mapper.syntheticError || 'Claude Code request failed.');
-      if (addedAt > answeredAt) continue; // an addition came after the last answer: its own answer follows
+      // Claude Code names the user messages a turn took (R11c-B1): one it didn't take is still queued, and its own turn
+      // follows, even when it came before this turn's answer started (sent while the last request was out). An older
+      // Claude Code doesn't say: an addition after the last answer started waits for its own answer, as before.
+      const took = Array.isArray(message.user_message_uuids) ? message.user_message_uuids : typeof message.user_message_uuid === 'string' ? [message.user_message_uuid] : null;
+      if (took) { for (const a of added) if (took.includes(a.uuid)) a.done = true; if (added.some((a) => !a.done)) continue; }
+      else if (addedAt > answeredAt) continue;
       break;
     }
   } catch (e) { cut = true; throw e; } finally {
     o.takeInput?.(null);
-    o.onLeft?.(added.filter((a) => a.at > (cut ? finalAt : answeredAt)).map((a) => a.text));
+    o.onLeft?.(added.filter((a) => !a.done && a.at > (cut ? finalAt : answeredAt)).map((a) => a.text));
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);

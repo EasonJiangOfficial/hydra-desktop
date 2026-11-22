@@ -67,14 +67,16 @@ const SUBTURN_ENDED = new Set(['done', 'error', 'expired']);
  * sent again in this turn; the model is told the Mac may already be doing it (R11-3).
  */
 export const MAC_UNSURE_TEXT = "Hydra did not answer, so your Mac may already be doing this. Do not call ask_mac again in this turn: tell the owner it may be under way on his Mac and to check there.";
-export function askMacTool({ api, turn, alive = async () => true, signal, sleep = delay, pollMs = 1000, beatMs = 15_000, waitMs = 240_000, deadline = null, marginMs = 30_000, now = Date.now, log = () => {} }) {
+export function askMacTool({ api, turn, alive = async () => true, signal: turnSignal, sleep = delay, pollMs = 1000, beatMs = 15_000, waitMs = 240_000, deadline = null, marginMs = 30_000, now = Date.now, log = () => {} }) {
   let unsure = false;
   return {
     name: 'ask_mac',
     description: "Ask the owner's Mac to do or look at something on it: open or control an app, find or read a file, list or read a window, take and describe a screenshot. One clear, complete instruction in plain words. Returns what his Mac did or found. Never for Hydra's own data.",
     parameters: z.object({ instruction: z.string().trim().min(1).max(LIMITS.instruction) }),
-    execute: async ({ instruction }) => {
+    execute: async ({ instruction }, ctx) => {
       if (unsure) return MAC_UNSURE_TEXT;
+      // The call's own signal too (Claude Code cancelling it, the bridge closing, the tool timeout, R11c-B3).
+      const signal = ctx?.signal && turnSignal ? AbortSignal.any([turnSignal, ctx.signal]) : ctx?.signal ?? turnSignal;
       // One absolute end, taken before the POST (R11b-C): every call's timeout fits inside it.
       const end = Math.min(now() + waitMs, Number.isFinite(deadline) ? deadline - marginMs : Infinity);
       const left = () => end - now();
@@ -112,7 +114,8 @@ export function askMacTool({ api, turn, alive = async () => true, signal, sleep 
           return res.data.text.trim() || (res.data.status === 'done' ? 'Your Mac finished and said nothing.' : 'Your Mac could not finish this.');
         }
         if (res?.success && res.data.text.trim()) sofar = res.data.text.trim();
-        if (signal?.aborted) throw new Error('Stopped.');
+        // Stopped after the sub-turn was made: it may still be running on the Mac.
+        if (signal?.aborted) { unsure = true; throw new Error('Stopped.'); }
         if (left() <= 0) return tooLong();
         if (now() - beat >= beatMs) {
           beat = now();

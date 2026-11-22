@@ -48,7 +48,8 @@ const drain = async (agent) => { try { for await (const e of agentEvents(agent.p
   assert.equal(checkWindow(w('Finder', { document: doc }), HOME, { viewers: false }).level, 'ask', 'Finder too');
   assert.equal(checkWindow(w('Safari', { url: `file://${doc}/a.html` }), HOME, { viewers: false }).level, 'ask', 'a browser too');
   assert.equal(checkWindow(w('TextEdit', { document: doc }), HOME, { viewers: false }).level, 'safe', 'a viewer showing it is free');
-  assert.equal(checkWindow(w('Visual Studio Code', { document: doc }), HOME, { viewers: false }).level, 'safe', 'an editor too');
+  // R11c-6: a code editor's window shows a terminal panel, other tabs and an AI chat beside its file: it asks.
+  assert.equal(checkWindow(w('Visual Studio Code', { document: doc }), HOME, { viewers: false }).level, 'ask', 'a code editor asks');
   assert.equal(checkWindow(w('Terminal', { document: doc }), HOME).level, 'safe', 'on this Mac: unchanged');
 }
 

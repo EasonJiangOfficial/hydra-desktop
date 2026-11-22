@@ -273,7 +273,9 @@ const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime playe
  *  any other (Terminal, a password manager, Messages) asks, naming the app (tenth review R10-11). { level, reason }.
  *  viewers: false (a relay turn: the owner is not at this Mac, R11-1): a window with no file asks in every app, a browser
  *  or Hydra too, since only plain reads in the three folders run unasked. */
-const DOC_APPS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint)|xcode|visual studio code|code|cursor|zed|windsurf|vscodium|antigravity|sublime text|nova|bbedit|textmate|macvim)$/i;
+// Single-document apps only: a code editor's window shows its terminal panel, other tabs and an AI chat beside the
+// file it reports (R11c-6), so it asks.
+const DOC_APPS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint))$/i;
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));

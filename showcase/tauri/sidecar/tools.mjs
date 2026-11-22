@@ -406,18 +406,24 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   /** What windows show (each one's document, a browser's file:// page, or the app when there's no file) is checked
    *  before any of their text or picture reaches the model (checkWindow): a key file is refused, anything that isn't
    *  a plain read of the three folders or a viewer's page asks, once for all of them. */
-  // okApp: the app the owner just said yes to acting in; its window after the steps needs no second yes (its files do).
+  // okApp: the app the owner just said yes to acting in; on this Mac its window after the steps needs no second yes
+  // (its files do). Not in a relay turn: that yes was to the steps, never to reading the window back (R11c-5).
   // whole: a question asked whatever the windows say (a relay turn's whole screen: banners, pop-ups and small windows
-  // the helper doesn't list are in it too, R11b-B), with their own asks after it.
-  async function windowShows(wins, ctx, { okApp = null, whole = null } = {}) {
-    const asks = whole ? [whole] : [];
-    for (const w of [wins].flat()) {
+  // the helper doesn't list are in it too, R11b-B). It names every window already, so theirs aren't added: a long
+  // list ran past the relay's 500 characters and the whole screen could never be asked (R11c-7). A key file still blocks.
+  // ok: windows said yes to already (as they showed then), skipped; the ones said yes to now are added.
+  async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null } = {}) {
+    const asks = whole ? [whole] : [], key = (w) => JSON.stringify([w?.id, w?.app, w?.title, w?.document, w?.url]);
+    const list = [wins].flat();
+    for (const w of list) {
       const v = checkWindow(w, HOME, { viewers: !remote() });
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
-      if (v.level === ASK && v.app && okApp && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
+      if (whole || ok?.has(key(w))) continue;
+      if (v.level === ASK && v.app && okApp && !remote() && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
     if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
+    if (ok) for (const w of list) ok.add(key(w));
   }
 
   /** The windows draw searches (spec: 'screen', 'front' or 'app:<name>'), checked like read_window's: the whole screen
@@ -425,13 +431,15 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
    *  windows the helper doesn't list. */
   // ponytail: an app's small windows the helper doesn't list (a popover beside a listed editor window) are not asked
   // about on their own; ask for the whole app every time if that matters.
-  async function searchedShows(spec, ctx) {
+  // 'window:<id>' (the window of a screenshot): only that window is read.
+  async function searchedShows(spec, ctx, ok = null) {
     const all = (await hands('windows').catch(() => null))?.windows ?? [];
     if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN });
     const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
     const app = String(front?.app ?? (spec.startsWith('app:') ? spec.slice(4) : '')).trim();
-    const wins = [...(front ? [front] : []), ...all.filter((w) => app && String(w.app ?? '').toLowerCase() === app.toLowerCase() && w.id !== front?.id)];
-    return windowShows(wins, ctx, { whole: wins.length ? null : `Look at ${app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
+    const one = spec.startsWith('window:');
+    const wins = [...(front ? [front] : []), ...(one ? [] : all.filter((w) => app && String(w.app ?? '').toLowerCase() === app.toLowerCase() && w.id !== front?.id))];
+    return windowShows(wins, ctx, { ok, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
   }
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
   async function handsShot(file, t, ctx) {
@@ -439,7 +447,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // Shot straight away, with nothing played on screen (the Roamie only shows a "looking" tag).
     // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
     // itself and says the final size; an older helper doesn't, so sips does it here.
-    const res = await hands('capture', file, spec, '1568');
+    // Windows: a whole screen the helper can't take falls back to PowerShell's (null). Only a failed capture does:
+    // a no or a block below never falls through to a picture taken without them (R11c-3).
+    const res = await hands('capture', file, spec, '1568').catch((e) => { if (process.platform === 'win32' && t === 'screen') return null; throw e; });
+    if (!res) return null;
     // The window in the picture is checked like read_file first; for the whole screen, every window on it (V8-5: an
     // editor showing a key beside the front app is in the picture too). A helper that doesn't list them (Windows'):
     // the front one.
@@ -467,8 +478,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // Windows without the helper (or when it fails on the whole screen): PowerShell's screenshot below.
     const viaHands = process.platform === 'darwin' || (process.platform === 'win32' && HANDS);
     const t = String(target || 'screen').trim();
-    const shot = viaHands ? await handsShot(file, t, ctx).catch((e) => { if (process.platform === 'win32' && t === 'screen') return null; throw e; }) : null;
+    const shot = viaHands ? await handsShot(file, t, ctx) : null;
     if (shot) return shot;
+    // PowerShell and Linux take the whole screen, with no window list to check: a relay turn asks for it first (R11c-3).
+    if (remote() && !(await confirm(WHOLE_SCREEN, ctx))) throw new Error(`${userName} said no, so I didn't look at the screen.`);
     if (process.platform === 'win32') {
       // DPI-aware (or scaled displays capture only the top-left part), shrunk to Claude's 1568 px cap, and the
       // file path passed by environment variable so odd characters in it can't break the script.
@@ -618,10 +631,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       // matters). Exact boxes; [] when it isn't there (or without the helper).
       async textAll(find) {
         if (!HANDS) return [];
-        await gate();
         // The window the latest screenshot showed, when there's one from this request: the front app can change
-        // between looking and drawing.
+        // between looking and drawing. That window is the one checked (R11c-1).
         const where = lastShot?.turn === turn && lastShot.win != null ? `window:${lastShot.win}` : spec;
+        await gate(where);
         return (await hands('ocr-find', where, String(find), 'all').catch(() => null))?.matches ?? [];
       },
       async findText(find) {
@@ -778,14 +791,24 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const busy = lastRead?.turn === turn ? lastRead.controls.filter((c) => !c.offscreen && c.bounds).slice(0, 300).map((c) => c.bounds) : [];
     ink.active++;
     // Lookups are shared until a click or hover (then the screen may have changed, and words are retried a moment).
-    let look = null, checked = null;
-    // A relay turn (R11b-A): the windows draw reads words or controls in are checked first, as read_window's are.
-    const gate = () => (checked ??= remote() ? searchedShows(spec, ctx) : Promise.resolve());
+    let look = null, segNo = 0;
+    // A relay turn (R11b-A): the windows draw reads words or controls in are checked first, as read_window's are. Again
+    // for each beat, where the window each read goes to is resolved anew: the app in front can change between beats (an
+    // open or type mark, a click, an alert, R11c-2). A window said yes to, as it showed then, isn't asked about twice.
+    // The whole screen: once a drawing (its question names everything on it).
+    const okWins = new Set(), gated = new Map();
+    const gate = (where = spec) => {
+      if (!remote()) return Promise.resolve();
+      const k = where === 'screen' ? where : `${segNo}:${where}`;
+      if (!gated.has(k)) gated.set(k, searchedShows(where, ctx, okWins));
+      return gated.get(k);
+    };
     try {
       for (const [k, sg] of segs.entries()) {
         if (ctx?.signal?.aborted) return stopped();
         let seg;
         try {
+          segNo = k;
           if (!look || sg.after) look = lookups(spec, sg.after, gate);
           seg = await resolveTargets(beats.slice(sg.from, sg.to), look);
           // Typing needs the original place (its words or id) to act on; resolveTargets keeps it.
@@ -1079,7 +1102,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
               if (plan.app && /No matching window/.test(String(err?.message ?? err))) {
                 if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
-                if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); await windowShows(res.window, ctx, { okApp: plan.planApp }); return finish(res); }
+                if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); return seen(res); }
               }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
               if (!plan.window || !/No matching window/.test(String(err?.message ?? err))) throw err;
@@ -1091,8 +1114,16 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           } finally {
             if (lastShot && mapped.some((s) => s.do !== 'wait')) lastShot.used = true;
           }
-          await windowShows(res.window, ctx, { okApp: plan.planApp });
-          return finish(res);
+          return seen(res);
+          // The window after the steps is checked before its text reaches the model. A no (a relay turn asks, R11c-5)
+          // still says what ran.
+          async function seen(res) {
+            try { await windowShows(res.window, ctx, { okApp: plan.planApp }); } catch (e) {
+              if (!/said no/.test(e.message)) throw e;
+              return `In ${res.window.app}: ${res.done.join(', ')}. ${userName} said no to reading the window after, so I can't see what it shows now.`;
+            }
+            return finish(res);
+          }
           function finish(res) {
             if (!res.controls) return `In ${res.window.app}: ${res.done.join(', ')}.`;
             lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
@@ -1117,7 +1148,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         if (what === 'arrange' && !layout) throw new Error('arrange needs a layout: left, right, top, bottom, full or center.');
         const spec = { do: what === 'switch' ? 'activate' : what, ...(app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
         // Owner's rule (DESIGN.md "Mac actions"): every app action asks, naming the real app.
-        const name = app ?? (await hands('front').catch(() => null))?.app ?? 'the app in front';
+        // With a window, the helper acts on that window's own app, whatever app says (R11c-4): that app is named.
+        const owner = window != null ? (await hands('locate', `window:${window}`).catch(() => null))?.window?.app : null;
+        if (window != null && !owner) throw new Error(`There's no window ${window} now. Use list_windows for its id.`);
+        const name = owner ?? app ?? (await hands('front').catch(() => null))?.app ?? 'the app in front';
         const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
         if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
         agentChangesScreen();

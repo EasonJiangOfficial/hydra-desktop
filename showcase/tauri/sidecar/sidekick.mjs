@@ -3192,6 +3192,8 @@ const resultText = (r) => {
 // the brain, never into the thread.
 async function relayTurn(turn, h) {
   const { emit, signal, approve, alive = async () => true } = h;
+  // Its own request number (R11c-1): a screenshot, a read or a yes from the request before it is never this turn's.
+  nextTurn();
   await refreshAuth({ cached: true });
   let cc = null;
   try { cc = await claudeCodeRoute('anthropic'); } catch (e) { throw Object.assign(new Error(String(e?.message ?? e)), { code: 'mac_claude' }); }
