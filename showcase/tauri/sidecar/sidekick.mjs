@@ -8,7 +8,8 @@ import { CONFIG_PATH, DATA_DIR, OLDER_DATA, ROAMIES_DIR } from './datadir.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
 import { DANGER, HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
-import { askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, toolFilter, turnPrompt } from './relay.mjs';
+import { INPUT_PREFIX, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, toolFilter, turnPrompt } from './relay.mjs';
+import { brainFor, createSettingsWatch } from './agentsettings.mjs';
 import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
@@ -38,17 +39,17 @@ import { saveCardImage } from './cardimage.mjs';
 import { cleanWakeName, wakeName } from './wakename.mjs';
 import { cleanSleepWord, createPower, DEFAULT_SLEEP_WORD, heardSleepWord } from './power.mjs';
 import { cleanDeviceKey, cleanHydraUrl, createHydraLink, HYDRA_KEY_SECRET } from './hydralink.mjs';
-import { SystemVoice, systemStatus } from './sysvoice.mjs';
+import { SystemVoice, spokenText, systemStatus } from './sysvoice.mjs';
 import { HydraVoice } from './hydravoice.mjs';
 import { KEY_NAME as SYNC_KEY, MIN_PASSPHRASE, checkFolder, folderReady, merge as syncMerge, newDevice, prepareFolder, readRemotes, suggestFolders, tooMuchGone, writeOwn } from './sync.mjs';
-import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
+import { EMOTES, EchoFilter, FinalText, ReplyStream, stripEmotes } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
 import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, winOpen } from './tools.mjs';
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
-import { createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
+import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
 import { handoffNote } from './quote.mjs';
 import { DELEGATE_MODES, SUBAGENTS, activeCrew, crewText, delegateNote, findSubagent } from './subagents.mjs';
@@ -92,9 +93,13 @@ const ui = (msg) => {
   // Muted from the Hydra window (bridge setMuted): the voice plays silently until unmuted, whatever the volume says.
   if (msg.kind === 'volume' && voiceMuted) msg = { ...msg, v: 0 };
   trackReply(msg);
+  if (msg.kind === 'volume') nativeSpeech({ volume: msg.v });
   if (msg.kind === 'speech') {
-    if (msg.stop) { send({ type: 'onboard', msg }); return send({ type: 'ui', msg }); }
+    if (msg.stop) { send({ type: 'onboard', msg }); nativeSpeech(msg); return send({ type: 'ui', msg }); }
     if (guideVoices.has(msg.id)) { if (msg.end) guideVoices.delete(msg.id); return send({ type: 'onboard', msg }); }
+    // What of the reply has been handed to the voice to play (fillers left out): where a barge-in cut it off.
+    if (msg.pcm && !msg.filler && spokenNow?.id === msg.id) spokenNow.audio++;
+    nativeSpeech(msg);
   }
   if (intro && msg.kind === 'agent') return send({ type: 'onboard', msg: { kind: 'chat', e: msg.e } });
   send({ type: 'ui', msg });
@@ -108,7 +113,7 @@ let replySeq = 0, replyNow = null, replyAt = 0, replyTimer = null;
 function replyPush(final) {
   if (!replyNow) return;
   clearTimeout(replyTimer); replyTimer = null; replyAt = Date.now();
-  pushWeb({ reply: { id: replyNow.id, text: replyNow.text, final } });
+  pushWeb({ reply: { id: replyNow.id, text: stripEmotes(replyNow.text), final } });
 }
 function trackReply(msg) {
   if (msg.kind === 'say' && msg.text) { replyNow = { id: `r${++replySeq}`, text: String(msg.text) }; replyPush(true); replyNow = null; return; }
@@ -117,6 +122,8 @@ function trackReply(msg) {
   if (e.type === 'start') {
     replyNow = { id: `r${++replySeq}`, text: '' }; replyPush(false);
     if (voicePaused) setPaused(false); // a new reply plays
+  } else if (e.type === 'tool' && replyNow) {
+    replyNow.text = ''; // words before a tool are narration, not the answer (W5 contract 7)
   } else if (e.type === 'text' && replyNow) {
     replyNow.text += String(e.text ?? '');
     if (Date.now() - replyAt > 100) replyPush(false); else replyTimer ??= setTimeout(() => replyPush(false), 100);
@@ -125,7 +132,30 @@ function trackReply(msg) {
     replyPush(true); replyNow = null;
   }
 }
-function setPaused(on) { voicePaused = !!on; send({ type: 'ui', msg: { kind: 'voice_pause', on: voicePaused } }); pushWeb({ paused: voicePaused }); }
+function setPaused(on) { voicePaused = !!on; send({ type: 'ui', msg: { kind: 'voice_pause', on: voicePaused } }); nativeSpeech({ paused: voicePaused }); pushWeb({ paused: voicePaused }); }
+// Hydra's voice on the Mac plays in the voice helper (W5 contract 6): the same voice-processing engine as the mic, so
+// echo cancellation hears it as its own. The overlay still schedules every chunk (silently) for its timing and the
+// orb's level. Off (the overlay plays it) until the helper says it's up, and again if it couldn't play.
+let voiceHelperUp = false, nativeFailed = false, nativeSent = null;
+const nativeVoice = () => MAC && config.nativeVoice !== false && voiceHelperUp && !nativeFailed;
+function nativeSpeech(m) { if (nativeVoice()) send({ type: 'voice_play', msg: m }); }
+function nativeNow() {
+  const on = nativeVoice();
+  if (on === nativeSent) return;
+  nativeSent = on;
+  send({ type: 'ui', msg: { kind: 'voice_native', on } });
+  if (on) nativeSpeech({ volume: voiceMuted ? 0 : volumeNow() / 100 });
+}
+// The reply being spoken (W5 contract 3): its sentences, how many reached the voice, and whether it has all been said.
+let spokenNow = null, interruptedAfter = '';
+const FILLER_MS = 1100;
+function noteInterrupted() {
+  const s = spokenNow;
+  if (!s || s.finished || !s.audio) return;
+  interruptedAfter = spokenText(s.said.slice(0, s.audio).join(' ')).slice(0, 1000);
+  spokenNow = null;
+  logLine('barge', { heard: interruptedAfter.length });
+}
 const say = (text, mood) => (onboarding ? ob({ kind: 'say', text, mood }) : ui({ kind: 'say', text, mood }));
 const sayOut = say;
 
@@ -148,7 +178,8 @@ const PROVIDER_LABELS = { ...Object.fromEntries(AUTH_PROVIDERS.map((p) => [p.val
 // What a sign-in is called (the product), where the provider's label is the company.
 const SIGNIN_NAMES = { anthropic: 'Claude', openai: 'ChatGPT' };
 const MENU_PROVIDERS = ['anthropic', 'openai', ...AUTH_PROVIDERS.map((p) => p.value), 'local'].filter((v, i, a) => a.indexOf(v) === i);
-const FAST = { anthropic: 'claude-haiku-5-5', openai: 'gpt-6-luna', gemini: 'gemini-3.8-flash' };
+// Claude's model is Hydra's own setting (agent_settings.model, agentsettings.mjs), never a model picked here.
+const FAST = { openai: 'gpt-6-luna', gemini: 'gemini-3.8-flash' };
 
 // ---------- config ----------
 // On Windows, Ctrl+Alt is AltGr on many keyboards (Ctrl+Alt+S types "ś" in Polish), so it uses Ctrl+Shift.
@@ -257,8 +288,9 @@ const power = createPower({
     voiceConfig();
     ui({ kind: 'power', asleep, sound: asleep && why === 'sleep_word' });
     menu();
-    // Woken by a double clap, the orb or the app: it says so in its voice, then listens.
-    if (!asleep && why !== 'talk') {
+    // Woken by a double clap, the orb or the app: it says so in its voice, then listens. Woken by the key phrase, the
+    // phrase's own take is already listening (the owner is mid-sentence): no greeting over him.
+    if (!asleep && why !== 'talk' && why !== 'phrase') {
       const v = speakLine('Hydra at your service, sir.');
       ui({ kind: 'listen_after', speech: v?.id ?? null });
     }
@@ -276,7 +308,9 @@ const TTS = {
   voicestudio: { id: 'voicestudio', name: "the Mac's voice", local: true },
 };
 // Fish Audio once its key is in the Keychain (owner: "for voice use fish audio"); the Mac's voice until then.
-const tts = () => (config.tts === 'gemini' && ttsKeys.gemini ? TTS.gemini : ttsKeys.fish ? TTS.fish : TTS.voicestudio);
+// Paired with Hydra (W5 contract 6): every sentence is Hydra's Fish voice from /api/voice/tts with the device key
+// (hydravoice.mjs), whatever key is on this Mac.
+const tts = () => (MAC && hydraKey && !hydraRevoked ? TTS.voicestudio : config.tts === 'gemini' && ttsKeys.gemini ? TTS.gemini : ttsKeys.fish ? TTS.fish : TTS.voicestudio);
 // Which have a key to speak with: 'own' (saved for the voice), 'shared' (Gemini only: the AI's Gemini key, from the
 // Model page, when no key was saved just for the voice) or false. For the one in use, speech.on says.
 const ttsKeys = { fish: false, gemini: false };
@@ -307,6 +341,9 @@ hydraLink.load().catch(() => {});
 let hydraKey = null, hydraKeyRead = false, hydraRevoked = false;
 const hydraHttp = hydraApi({ base: HYDRA_ORIGIN, getKey: async () => hydraKey });
 const hydraTools = createHydraTools({ api: hydraHttp, log: (k, d) => logLine(k, d) });
+// Hydra's shared agent settings (W5 contract 1): wake phrase, sleep word, model and effort, read at start, on a change
+// push from the Hydra window (refreshSettings) and every 60 s.
+const agentSettings = createSettingsWatch({ api: hydraHttp, log: (k, d) => logLine(k, d), onChange: (next, before) => applyHydraSettings(next, before) });
 const relay = createRelay({
   api: hydraHttp, runTurn: (t, h) => relayTurn(t, h), log: (k, d) => logLine(k, d),
   // The turns this Mac stopped, kept across restarts so a stopped turn is never run twice.
@@ -324,7 +361,7 @@ HydraVoice.server = { api: hydraHttp, paired: () => !!hydraKey };
 // and model's are only made once.
 const BEAT_DIR = path.join(DATA_DIR, 'beats');
 const speech = createSpeaker({
-  LocalVoiceImpl: HydraVoice, localStatus: systemStatus, keepWarmMs: 24 * 3600_000,
+  LocalVoiceImpl: HydraVoice, localStatus: systemStatus, keepWarmMs: 24 * 3600_000, fillers: FILLERS,
   beatStore: { read: (name) => readJson(path.join(BEAT_DIR, `${name}.json`)), write: (name, data) => writeJson(path.join(BEAT_DIR, `${name}.json`), data) },
   emit: (m) => ui(m),
   log: (kind, data) => logLine(kind, data),
@@ -582,13 +619,20 @@ const runnable = (p) => getModelsForProvider(p).filter((m) => canRun(p, m.id));
 const canRunText = (p, id) => !!signedIn.get(p) && getModelsForProvider(p).some((m) => m.id === id) && getAuthStorageKeys(p, id).some((k) => k === p || storedKeys.has(k));
 const textOnly = (p) => getModelsForProvider(p).filter((m) => !seesImages(p, m.id) && canRunText(p, m.id));
 function ensureModel() {
+  // Signed in with Claude: Hydra's model decides (agent_settings.model), not a pick made here. A heavy job's own
+  // model (routed) keeps its turn.
+  const want = agentSettings.current.model;
+  if (!routed && canRun('anthropic', want)) {
+    if (config.provider !== 'anthropic' || config.model !== want) { config.provider = 'anthropic'; config.model = want; agentStale = true; saveConfig(); }
+    return true;
+  }
   if (config.provider && getModel(config.model) && canRun(config.provider, config.model)) return true;
   // A local model stays picked while its server is closed; the request says to open it.
   if (config.provider === 'local' && parseLocalModelId(config.model ?? '') && signedIn.get('local')) return true;
   const p = ['anthropic', 'openai', 'gemini', ...MENU_PROVIDERS].find((x) => runnable(x).length);
   if (!p) return false;
   config.provider = p;
-  config.model = fallbackModel([config.lastModels?.[p], FAST[p], getDefaultModel(p).id], (id) => canRun(p, id), runnable(p));
+  config.model = fallbackModel([config.lastModels?.[p], p === 'anthropic' ? agentSettings.current.model : FAST[p], getDefaultModel(p).id], (id) => canRun(p, id), runnable(p));
   saveConfig();
   return true;
 }
@@ -859,8 +903,6 @@ function anim(name, args = {}) {
 // newest copy still in the history. Providers cache a prefix (tools → system → messages), so putting LIVE in the
 // system prompt would re-bill the whole conversation every time memory changed; at the end, only the new message
 // is fresh. The live block is never saved.
-// Tools that take long enough to need a spoken beat first.
-const SLOW_TOOLS = new Set(['web_search', 'web_fetch', 'see_photo', 'take_screenshot', 'read_window', 'act_in_app', 'search_files', 'list_windows']);
 // How replies are written: for bubbles (text only), or for the ear (spoken with Fish Audio or Gemini, details on screen).
 const VOICE_ON = () => config.replies === 'voice' && speech.on;
 // VoiceStudio's engines would read voice cues out, so its prompt has no cue paragraph (and any cue left is removed).
@@ -1030,7 +1072,9 @@ const levelsOf = (provider, model) => { try { return [...getSupportedThinkingLev
 function thinkingFor(slot, provider, model) {
   const m = getModel(model);
   if (!m?.supportsThinking) return undefined;
-  const setting = config.efforts?.[slot] ?? '', supported = levelsOf(provider, model);
+  // Hydra's own model thinks at Hydra's live effort (agent_settings.effort_live).
+  const hydra = slot === 'default' && provider === 'anthropic' && model === agentSettings.current.model;
+  const setting = hydra ? agentSettings.current.effortLive : config.efforts?.[slot] ?? '', supported = levelsOf(provider, model);
   // No list of levels (a local model): as before, the app's default unless they turned it off.
   if (!supported.length) return setting === 'off' ? undefined : (setting || CHAT_THINKING) ?? undefined;
   return resolveEffort(setting, supported, CHAT_THINKING) ?? undefined;
@@ -1549,7 +1593,11 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   const voice = VOICE_ON() ? speech.start() : (speech.stop(), null);
   turnVoice = voice;
   if (voice && intro) guideVoices.add(voice.id);
-  const spoken = voice && new SpeechText((t) => voice.say(t), speech.localOpts?.());
+  const said = voice ? (spokenNow = { id: voice.id, said: [], audio: 0, finished: false }) : null;
+  const spoken = voice && new SpeechText((t) => { said.said.push(t); voice.say(t); }, speech.localOpts?.());
+  // A filler ("Let me check.") when no answer has started within 1.1 s (W5 contract 3); never while muted.
+  let filler = voice && !intro ? setTimeout(() => { if (busy && turnVoice === voice && !voiceMuted) voice.beat(); }, FILLER_MS) : null;
+  const noFiller = () => { clearTimeout(filler); filler = null; };
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null;
   try {
     // Voice: a short first line before a tool ("On it, checking Paris.") is a beat: it's spoken, but not
@@ -1587,6 +1635,9 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // The first spoken request of the day carries the morning briefing (brief.mjs).
     const brief = intro ? null : briefNote({ on: !!config.morningBrief, lastDay: config.briefDay, byVoice, todoist: !!config.briefTodoist, canRead: HANDS_OK, name: userName });
     if (brief) { config.briefDay = brief.day; saveConfig(); logLine('brief', { todoist: !!config.briefTodoist && HANDS_OK }); }
+    // Cut off by the owner talking over the last reply: what he actually heard of it (W5 contract 3).
+    const cut = interruptedAfter; interruptedAfter = '';
+    const cutNote = cut && !news ? `\n(You were interrupted while speaking your last reply; the owner heard only: "${cut}")` : '';
     const onScreen = [takeQuizNote(), ink.listNote()].filter(Boolean).join(' '); // a quiz's score, lists changed on their cards
     // They spoke first: untold news rides along with their message, so it's never announced separately afterwards.
     const along = desk.along(text, { intro: !!intro, news: !!news, agentish });
@@ -1594,7 +1645,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     const nudge = !agentish && !intro && !news && !handoff ? delegateNote(text, crewNow(), config.delegate) : '';
     const toAgent = agentish ? `${stamped}\n(They asked for an agent: call send_agent.)` : nudge ? `${stamped}\n${nudge}` : stamped;
     const asked = handoff ? `${toAgent}\n${handoffNote({ userName, assistant: lookName(), reason: handoff.reason, from: handoff.from, kind: handoff.kind, words: turnWords, untilText: handoff.untilText, because: handoff.because, fix: handoff.fix })}` : toAgent;
-    const sent = brief ? `${asked}\n(${brief.note})` : asked;
+    const sent = `${brief ? `${asked}\n(${brief.note})` : asked}${cutNote}`;
     // An area snap rides along as an image in the same message.
     const content = image ? [{ type: 'text', text: `${sent}\n(Attached: the area of the screen I ${note ? 'marked' : 'selected'}.${note ? ` ${note}` : ''})` }, image] : sent;
     lastReply = ''; lastFailed = false; lastInput = null;
@@ -1616,6 +1667,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     for await (const e of agentEvents(agent.prompt(content))) {
       watch.event(e);
       if (e.type === 'text_delta') {
+        noFiller();
         const t = echo.push(e.text);
         if (launched) continue;
         if (hold != null) { hold += t; continue; }
@@ -1650,7 +1702,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
         doneWriting();
         spoken?.flush(); // a beat before a tool is said now, not after the tool
         releaseBeat(true);
-        if (SLOW_TOOLS.has(e.name)) voice?.beat(); // nothing said yet: "One sec." so it's never silent
+        if (!voiceMuted) voice?.beat(); // a tool starts and nothing was said yet: a filler, so it's never silent
         use.tools++;
         noteTool(e.name);
         logLine('tool', { turn, id: e.toolCallId, name: e.name, args: redactArgs(e.name, e.args ?? {}) });
@@ -1684,7 +1736,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     ink.endRequest();
     // Asked by voice and answered with a question: the overlay opens the mic once the reply has been typed and said.
     // A reminder nudge, with "Listen after reminders" on: the same hands-free listen, for "snooze 10 minutes".
-    const listen = !stalled && !controller.signal.aborted && ((byVoice && autoListenOn() && listensAfter(lastReply, config.listenEvery)) || (listenAfter && snoozeListenOn())) ? { turn, speech: voice?.id ?? null } : null;
+    // After every answer to something said, a follow-up window listens without the key phrase (W5 contract 4).
+    const listen = !stalled && !controller.signal.aborted && ((byVoice && autoListenOn() && listensAfter(lastReply, true)) || (listenAfter && snoozeListenOn())) ? { turn, speech: voice?.id ?? null } : null;
     autoTurn = listen ? turn : null;
     rated = !stalled && !controller.signal.aborted && !!turnWords && learn.ok + learn.bad > 0;
     const rate = rated && learningOn();
@@ -1719,7 +1772,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     }
   } finally {
     watch?.stop();
-    busy = false; turnVoice = null; turnImage = null;
+    noFiller();
+    busy = false; turnVoice = null; turnImage = null; addOnTake = false;
     stir(); saidCap = setTimeout(() => { saidPending = false; stir(); }, 90_000);
     // A tool cut off by Stop never reports back: end its tag too, or the Sidekick kept showing it ("looking at
     // CapCut") on every later request, with their own tags queued behind it.
@@ -1739,7 +1793,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // Their words and the reply (as shown: no voice cues) to the shared thread; never waited on.
     if (hydraKey && !hydraRevoked && turnWords && !retryNext && !(controller.signal.aborted && quiet)) {
       const c = new CueFilter();
-      localSync.record({ user: turnWords, assistant: `${c.push(lastReply)}${c.flush() ?? ''}` });
+      localSync.record({ user: turnWords, assistant: stripEmotes(`${c.push(lastReply)}${c.flush() ?? ''}`) });
     }
     if (stalled) agent = null; // the next request starts on a fresh connection, from the saved conversation
     // No usage reported: estimate what the last call sent.
@@ -2391,7 +2445,11 @@ let langInfo = null; // what the voice helper settled on for it: { id, engine, o
 const phraseListening = () => VOICE_OK && !!config.voice && voiceReady() && phraseOn() && !power.asleep;
 const voiceConfig = () => {
   ui({ kind: 'wake_phrase', on: phraseListening() });
-  send({ type: 'voice_config', enabled: VOICE_OK && config.voice && voiceReady(), mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn() && !power.asleep, wakeName: config.wakeName || '', lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
+  const enabled = VOICE_OK && config.voice && voiceReady();
+  if (!enabled) voiceHelperUp = false; // the helper stops; it says when it's up again
+  nativeNow();
+  // The key phrase listens asleep too (it wakes Hydra, W5 contract 4); it's Hydra's own (agent_settings.wake_phrase).
+  send({ type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: agentSettings.current.wakePhrase, lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
   // The native listening pill beside the cursor stays hidden while the notch capsule is where I appear.
   send({ type: 'pill', on: notchMode() === 'off' });
 };
@@ -2437,7 +2495,10 @@ let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
 function onVoice(m) {
   if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; stir(); }
-  if (m.type === 'voice_state' && m.state === 'listening') { interruptQuietly('listening'); speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); } // talking over it stops it
+  // The key phrase while Hydra thinks (W5 contract 2): a short take whose words go into the turn under way, never a
+  // cancel. Any other take (the talk keys, talking over Hydra) stops it, and the next turn knows what was heard.
+  if (m.type === 'voice_state' && m.state === 'listening' && busy && m.mode === 'wake') { addOnTake = true; logLine('add_on', { listening: true }); }
+  else if (m.type === 'voice_state' && m.state === 'listening') { addOnTake = false; interruptQuietly('listening'); speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); } // talking over it stops it
   else if (m.type === 'voice_state' && m.state === 'processing') frontSoon = { at: Date.now(), p: whereNow() };
   else if (m.type === 'voice' && m.text?.trim()) {
     // Key release to the words arriving (mic tail and the recogniser finishing), to see what that step costs.
@@ -2445,7 +2506,8 @@ function onVoice(m) {
     onSpoken(m.text.trim(), m.area);
   }
   else if (m.type === 'voice_state' && m.state === 'idle' && snap?.waitingVoice) snap.waitingVoice = false;
-  else if (m.type === 'voice_ready') micPick();
+  else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; nativeNow(); }
+  else if (m.type === 'voice_play_failed') { nativeFailed = true; logLine('voice_native', { failed: String(m.why ?? '') }); nativeNow(); }
   else if (m.type === 'voice_mics') { mics = cleanMics(m); panel(); }
   else if (m.type === 'voice_lang') { langInfo = { id: String(m.id ?? ''), engine: String(m.engine ?? ''), online: !!m.online }; logLine('speech_lang', langInfo); panel(); }
   else if (m.type === 'voice_error') {
@@ -2825,6 +2887,7 @@ async function onSpoken(text, area) {
   // The sleep word in a take: Hydra sleeps at once, and the words never reach the model.
   if (heardSleepWord(text, config.sleepWord || DEFAULT_SLEEP_WORD)) { power.sleep('sleep_word'); return; }
   power.talked();
+  if (addOnTake) { addOnTake = false; if (addOn(text)) return; }
   if (!area?.file) return enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
   try {
     await fitImage(area.file);
@@ -2835,6 +2898,17 @@ async function onSpoken(text, area) {
     fs.unlink(area.file).catch(() => {});
     enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
   }
+}
+// Words added while Hydra thinks: into the running Claude Code session as one more user message; another agent
+// answers them right after this turn. False when nothing runs any more (they are a new request then).
+let addOnTake = false;
+function addOn(text) {
+  if (!busy) return false;
+  turnWords = turnWords ? `${turnWords}\n${text}` : text;
+  if (agent?.addInput?.(`${INPUT_PREFIX}${text}`)) { logLine('add_on', { chars: text.length, into: 'turn' }); return true; }
+  logLine('add_on', { chars: text.length, into: 'next' });
+  enqueue(text, { byVoice: true });
+  return true;
 }
 // A pending snap goes with the next spoken question, if it comes within two minutes.
 function takeSnap() {
@@ -2999,30 +3073,25 @@ async function onGuide(m) {
 }
 
 // ---------- Hydra: pairing, the relay brain, connectors ----------
-const RELAY_MODEL = 'claude-opus-5-5'; // relay turns' model (config.relayModel); the local voice keeps the owner's pick
 function hydraOnline() {
   if (!hydraKey) return;
   if (!config.hydraUrl) { config.hydraUrl = HYDRA_ORIGIN; saveConfig(); }
   hydraLink.setKey(hydraKey);
   relay.start();
   hydraTools.refresh().then(() => { agentStale = true; if (panelOpen) panel(); }).catch((e) => logLine('hydra_tools', { error: String(e?.message ?? e).slice(0, 160) }));
-  readHydraSettings();
+  agentSettings.start();
+  useTts(tts().id).catch(() => {}); // Hydra's own voice from now on
 }
-// Hydra's own settings for this Mac, now and every few minutes: the sleep word is set in Hydra (agent_settings.sleep_word).
-let hydraSettingsTimer = null;
-async function readHydraSettings() {
-  clearTimeout(hydraSettingsTimer);
-  if (!hydraKey) return;
-  hydraSettingsTimer = setTimeout(readHydraSettings, 5 * 60_000); hydraSettingsTimer.unref?.();
-  try {
-    const r = await hydraHttp.req('/api/agent/state', { timeout: 20_000 });
-    if (!r.ok) return;
-    const j = await r.json();
-    const w = j?.settings?.sleepWord ?? j?.settings?.sleep_word;
-    if (typeof w !== 'string') return;
-    const c = cleanSleepWord(w);
-    if (c.ok && c.phrase !== (config.sleepWord || '')) { config.sleepWord = c.phrase; saveConfig(); voiceConfig(); logLine('sleep_word', { from: 'hydra' }); if (panelOpen) panel(); }
-  } catch (e) { logLine('hydra_state', { error: String(e?.message ?? e).slice(0, 120) }); }
+// Hydra's settings changed (agentsettings.mjs): the sleep word and wake phrase go to the voice helper; a new model or
+// effort rebuilds the agent before the next request (the same conversation).
+function applyHydraSettings(next, before) {
+  if (typeof next.sleepWord === 'string') {
+    const c = cleanSleepWord(next.sleepWord);
+    if (c.ok && c.phrase !== (config.sleepWord || '')) { config.sleepWord = c.phrase; saveConfig(); logLine('sleep_word', { from: 'hydra' }); }
+  }
+  if (next.model !== before.model || next.effortLive !== before.effortLive) { agentStale = true; logLine('agent_model', { model: next.model, effort: next.effortLive }); }
+  voiceConfig();
+  if (panelOpen) panel();
 }
 // Hydra's tools for the local voice agent: a gated one waits for the owner's yes in Hydra; the UI tool moves the window.
 function localHydraTools() {
@@ -3072,7 +3141,7 @@ const resultText = (r) => {
 // answer on any surface; a Mac-side ask (a Mac tool, a risky click, a connector send) becomes a server approval the
 // same way. Never a local Allow bubble, never an auto-yes. A routine gets only its tool groups (hydra, mac, gmail,
 // calendar: routine.tools on the server).
-async function relayTurn(turn, { emit, signal, approve, alive = async () => true }) {
+async function relayTurn(turn, { emit, signal, approve, alive = async () => true, onInput = () => {} }) {
   await refreshAuth({ cached: true });
   let cc = null;
   try { cc = await claudeCodeRoute('anthropic'); } catch (e) { throw Object.assign(new Error(String(e?.message ?? e)), { code: 'mac_claude' }); }
@@ -3091,23 +3160,32 @@ async function relayTurn(turn, { emit, signal, approve, alive = async () => true
     showTool({ onUi: (action) => emit({ type: 'ui', action }) }),
   ];
   const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
+  // Hydra's model and effort (agent_settings): effort_routine for a routine, effort_live for the rest.
+  const { model, thinking } = brainFor(agentSettings.current, turn.surface);
   const agentRun = new ClaudeCodeAgent({
-    model: config.relayModel || RELAY_MODEL, system: system(), tools: list, maxTurns: 24, thinking: turn.surface === 'routine' ? 'medium' : 'low',
+    model, system: system(), tools: list, maxTurns: 24, thinking,
     executable: cc.executable, env: cc.env, cwd: WORKDIR, signal, connectors: true,
     gate: (name, input, s) => inRelay(() => connectorGate(name, input, s, may)),
   });
   const names = new Map();
   let usage;
-  logLine('relay_request', { surface: turn.surface, chars: said.said.length, history: said.history, model: config.relayModel || RELAY_MODEL });
+  logLine('relay_request', { surface: turn.surface, chars: said.said.length, history: said.history, model, thinking });
+  // Only the final answer is the reply, without emote tags (W5 contract 7).
+  const reply = new FinalText((t) => emit({ type: 'text', delta: t }));
   try {
-    for await (const e of agentEvents(agentRun.prompt(said.text))) {
-      if (e.type === 'text_delta') emit({ type: 'text', delta: e.text });
-      else if (e.type === 'tool_call_start') { names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
+    const stream = agentRun.prompt(said.text);
+    // What the owner adds on the web or the phone while this runs goes into the same session (W5 contract 2).
+    onInput((text) => agentRun.addInput(`${INPUT_PREFIX}${text}`));
+    for await (const e of agentEvents(stream)) {
+      if (e.type === 'text_delta') reply.push(e.text);
+      else if (e.type === 'turn_end') reply.turnEnd(e.stopReason);
+      else if (e.type === 'tool_call_start') { reply.tool(); names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
       else if (e.type === 'tool_call_end') { const n = names.get(e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? resultText(e.result).slice(0, 160) : words(n) }); }
       else if (e.type === 'agent_done') usage = e.totalUsage;
     }
   } finally { asking.live = false; }
   if (signal.aborted) throw new Error('Stopped.');
+  reply.flush();
   // relay.mjs sends the usage the way the server takes it (snake_case).
   emit({ type: 'done', ...(usage ? { usage } : {}) });
 }
@@ -3152,7 +3230,8 @@ async function pairHere(code) {
 // Forgets this Mac's key (the web revokes it on the server, after asking the owner).
 async function unpairHere() {
   await relay.stop();
-  hydraKey = null; hydraTools.clear(); hydraLink.setKey(null); clearTimeout(hydraSettingsTimer);
+  hydraKey = null; hydraTools.clear(); hydraLink.setKey(null); agentSettings.stop();
+  useTts(tts().id).catch(() => {});
   await secrets.delete(HYDRA_KEY_SECRET).catch((e) => console.error('unpair', e.message));
   logLine('unpair', {}); agentStale = true; if (panelOpen) panel();
 }
@@ -3211,8 +3290,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'bridge_req') onBridge(m).catch((e) => console.error('bridge', e.message));
   else if (m.type === 'voice_barge_available') { bargeUnavailable = false; if (panelOpen) panel(); }
   else if (m.type === 'voice_barge_unavailable') { bargeUnavailable = true; logLine('barge', { unavailable: true }); if (panelOpen) panel(); }
-  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); power.talked(); }
-  else if (m.type === 'reply_said') { power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
+  // Talking over Hydra (barge-in): the helper already cut its voice off; the next turn knows what was heard.
+  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); if (m.via === 'barge') noteInterrupted(); power.talked(); }
+  else if (m.type === 'hydra_settings_changed') agentSettings.refresh();
+  else if (m.type === 'reply_said') { if (spokenNow) spokenNow.finished = true; power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on
   // A link clicked on the research card: web and mail links only.
   else if (m.type === 'open_link') { const v = checkLink(m.url); if (v.level === SAFE) openUrl(String(m.url)); else console.error('open_link blocked:', v.reason); }

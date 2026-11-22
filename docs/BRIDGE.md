@@ -22,6 +22,8 @@ interface HydraDesktopState {
   reply: { id: string; text: string; final: boolean } | null; // version 3: the reply being written and spoken (null once the owner talks again)
   heard: { text: string; final: boolean } | null;              // version 3: the owner's words as recognised
   ui: (UiAction & { at: number }) | null;                       // version 3: the Mac agent moves the window (check isSafePath)
+  bands?: number[];    // version 3, added (W5): 24 values 0..1, Hydra's voice while it speaks, the mic while a take
+                       // listens, at most 30 a second; all 0 when it stops. Absent from an older app.
 }
 interface HydraDesktop {
   version: 3;
@@ -38,6 +40,8 @@ interface HydraDesktop {
   signInClaude(): Promise<{ ok: true } | { ok: false; error: string }>;
   requestPermission(kind: 'mic' | 'accessibility' | 'screen'): Promise<Perm>; // the prompt or Settings; the new state (2 min max)
   unpair(): Promise<void>; // forgets the device key here (the web revokes it on the server, after asking)
+  refreshSettings?(): void; // version 3, added (W5): the agent settings changed (PATCH /api/agent/state); the Mac reads
+                            // them again now instead of at its next 60 s read
 }
 declare global { interface Window { hydraDesktop?: HydraDesktop } }
 ```
@@ -71,6 +75,20 @@ per-launch token and a request id (`id=<n>`, starting at a random point on each 
 that call and is not merged into the state. `setup` and `requestPermission` are answered by the shell (permissions)
 and the sidecar (pairing, Claude); `pair`, `signInClaude` and `unpair` by the sidecar. The pairing code is letters,
 digits and dashes (6 to 20); the device key it is traded for goes to the Keychain only and never to the page.
+
+## Voice (W5 voice contract)
+
+- Settings: the Mac reads `GET /api/agent/state` (device key) at start, when `refreshSettings()` is called and every
+  60 s: the wake phrase and sleep word go to the voice helper; the model and effort run its local voice turns and the
+  turns relayed from the web, the phone and routines (effort_routine for a routine, effort_live otherwise).
+- Wake: the phrase wakes it from sleep too, and its take goes on at once; after every spoken answer a follow-up window
+  (about 8 s) listens without the phrase. The pill beside the cursor shows only for a take from the talk keys.
+- While Hydra thinks, the phrase opens a short take whose words join the running turn; the sleep word cancels it and
+  sleeps. Talking over Hydra while it speaks stops the voice at once; the next turn knows what was heard.
+- Hydra's voice on the Mac is Fish through `/api/voice/tts` (device key), played by the voice helper in the same
+  voice-processing engine as the mic (the echo canceller's reference), with other audio never ducked and never muted
+  by mute-while-listening.
+- `reply.text` is only the final answer (words before a tool are left out), without emote tags like `[wave]`.
 
 `wake` is additive: `state` keeps its four values, so a page that reads only `state` works as before. A page that
 knows `wake` shows the idle Mac as waiting for the key phrase (Say "Hey Hydra") instead of listening.

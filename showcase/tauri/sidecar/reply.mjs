@@ -121,3 +121,31 @@ export class ReplyStream {
     if (this.pending) { const p = this.pending; this.pending = ''; this.visible(p); }
   }
 }
+
+/** Reply text without the body's emote tags ([wave] and the rest), and without the spaces they leave behind. */
+const TAGS_ALL = new RegExp(`[ \\t]*\\[(?:${EMOTES.join('|')})\\][ \\t]*`, 'gi');
+export const stripEmotes = (text) => String(text ?? '').replace(TAGS_ALL, (m, at, s) => (at === 0 || at + m.length === s.length ? '' : ' ')).trim();
+
+/**
+ * Only the final answer is reply text (W5 contract 7): each model turn's words are held until that turn ends; a turn
+ * that ends in a tool call (narration before the tool: "Let me check your calendar.") is dropped, and the answer goes
+ * out with its emote tags removed. emit(text) once per answering turn.
+ */
+export class FinalText {
+  constructor(emit) { this.emit = emit; this.buf = ''; this.sent = ''; }
+  push(text) { this.buf += String(text ?? ''); }
+  /** A tool started: what this turn said so far was narration. */
+  tool() { this.buf = ''; }
+  turnEnd(stopReason) {
+    const b = this.buf; this.buf = '';
+    if (stopReason === 'tool_use') return;
+    const t = stripEmotes(b);
+    if (!t) return;
+    const out = this.sent ? ` ${t}` : t;
+    this.sent += out;
+    this.emit(out);
+  }
+  /** The run ended: anything still held is the answer. */
+  flush() { this.turnEnd('end_turn'); }
+  get text() { return this.sent; }
+}

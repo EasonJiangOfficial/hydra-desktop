@@ -1,6 +1,7 @@
 // Hands-free triggers for Hydra (macOS), all on this Mac: nothing is recognised or sent until a take starts.
 // - Awake: a double clap starts a take (like the talk keys), and so does the key phrase ("Hey Hydra").
-// - Asleep: only a double clap (or a tap on the orb) wakes it; the key phrase does nothing (owner's sleep rule).
+// - Asleep: a double clap, a tap on the orb or the key phrase wakes it (W5 contract 4: "Yes, phrase wakes it"); the
+//   phrase's take goes on at once.
 // - While Hydra speaks: the owner talking over it (barge-in) or a double clap stops the speech and starts a take.
 //   The mic then runs with macOS voice processing (echo cancellation), so Hydra's own voice from the speakers is
 //   taken out, and a talk needs a sustained rise over the room for 200 ms, not one loud frame.
@@ -12,7 +13,7 @@ enum Trigger {
     enum Act: Equatable { case wake, take, none }
     /// What a heard trigger does. clapTalk, phrase, barge: the panel's switches.
     static func decide(_ e: Event, asleep: Bool, speaking: Bool, clapTalk: Bool, phrase: Bool, barge: Bool) -> Act {
-        if asleep { return e == .clap ? .wake : .none }
+        if asleep { return e == .clap ? .wake : e == .phrase && phrase ? .take : .none }
         switch e {
         case .clap: return clapTalk || (speaking && barge) ? .take : .none
         case .phrase: return phrase ? .take : .none
@@ -72,6 +73,8 @@ final class BargeListener {
     private var engine: AVAudioEngine?
     var running: Bool { engine?.isRunning == true }
     var clapSensitivity = 0.5
+    /// Hydra's voice plays in this engine while it runs (hydraout.swift): the echo canceller's reference.
+    var out: HydraOut?
     private let onTalk: () -> Void, onClap: () -> Void
     init(onTalk: @escaping () -> Void, onClap: @escaping () -> Void) { self.onTalk = onTalk; self.onClap = onClap }
 
@@ -98,7 +101,7 @@ final class BargeListener {
         do { try input.setVoiceProcessingEnabled(true) } catch { log("barge-in: no echo cancellation (\(error))"); return .noEchoCancel }
         guard input.isVoiceProcessingEnabled else { return .noEchoCancel }
         // Voice processing turns other sound down by default: that would duck Hydra's own voice.
-        input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        input.voiceProcessingOtherAudioDuckingConfiguration = Ducking.configuration
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { return .failed }
         let talk = SpeechOnset(rate: format.sampleRate), clap = ClapDetector(rate: format.sampleRate, sensitivity: clapSensitivity)
@@ -109,7 +112,8 @@ final class BargeListener {
             if talk.feed(ch, count: n) { DispatchQueue.main.async { onTalk() } }
             if clap.feed(ch, count: n) { DispatchQueue.main.async { onClap() } }
         }
-        do { eng.prepare(); try eng.start() } catch { input.removeTap(onBus: 0); try? input.setVoiceProcessingEnabled(false); log("barge-in listening couldn't start: \(error)"); return .failed }
+        out?.attach(eng)
+        do { eng.prepare(); try eng.start() } catch { out?.detach(); input.removeTap(onBus: 0); try? input.setVoiceProcessingEnabled(false); log("barge-in listening couldn't start: \(error)"); return .failed }
         engine = eng
         log("barge-in listening on (echo cancellation)")
         return .started
@@ -117,6 +121,7 @@ final class BargeListener {
 
     func stop() {
         guard let eng = engine else { return }
+        out?.detach()
         eng.inputNode.removeTap(onBus: 0)
         eng.stop()
         try? eng.inputNode.setVoiceProcessingEnabled(false)
@@ -134,7 +139,12 @@ enum TriggerTest {
         let d = { (e: Trigger.Event, asleep: Bool, speaking: Bool) in Trigger.decide(e, asleep: asleep, speaking: speaking, clapTalk: true, phrase: true, barge: true) }
         check("clap while awake starts a take", d(.clap, false, false) == .take)
         check("phrase while awake starts a take", d(.phrase, false, false) == .take)
-        check("phrase while asleep does nothing", d(.phrase, true, false) == .none)
+        check("phrase while asleep wakes it and opens a take", d(.phrase, true, false) == .take)
+        check("phrase off: the phrase while asleep does nothing", Trigger.decide(.phrase, asleep: true, speaking: false, clapTalk: true, phrase: false, barge: true) == .none)
+        // W5 contract 4: the cursor visualizer only for a keyboard-shortcut take.
+        check("the cursor shows a take from the talk keys", Voice.cursorShows(via: "keys"))
+        for via in ["phrase", "clap", "tap", "barge", "listen", "pointer", "idle"] { check("the cursor never shows a \(via) take", !Voice.cursorShows(via: via)) }
+        check("wake listening is held only while Hydra speaks (thinking: the phrase adds on)", Voice.wakeHeld(hold: true, speaking: true) && !Voice.wakeHeld(hold: true, speaking: false) && !Voice.wakeHeld(hold: false, speaking: true))
         check("clap while asleep wakes", d(.clap, true, false) == .wake)
         check("talking over Hydra starts a take (and the take stops the speech)", d(.voice, false, true) == .take)
         check("a clap while Hydra speaks starts a take", d(.clap, false, true) == .take)

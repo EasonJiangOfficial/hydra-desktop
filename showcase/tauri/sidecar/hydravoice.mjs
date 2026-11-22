@@ -5,10 +5,14 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { SystemVoice, wavPcm } from './sysvoice.mjs';
+import { FILLERS } from './speaker.mjs';
 
 export const SERVER_RATE = 44100;
 const OFF_MS = 10 * 60_000;
 let offUntil = 0;
+// The fillers' audio is kept for the session (the same nine lines repeat), so one starts at once.
+const kept = new Map();
+const FILLER_SET = new Set(FILLERS);
 
 const afconvert = (from, to) => new Promise((resolve, reject) => {
   execFile('/usr/bin/afconvert', ['-f', 'WAVE', '-d', `LEI16@${SERVER_RATE}`, '-c', '1', from, to], { timeout: 20_000 }, (e) => (e ? reject(e) : resolve()));
@@ -17,10 +21,18 @@ const afconvert = (from, to) => new Promise((resolve, reject) => {
 export class HydraVoice extends SystemVoice {
   /** { api: { req }, paired(): boolean } from the sidecar; null: always the Mac's voice. */
   static server = null;
-  static resetForTests() { offUntil = 0; }
+  static resetForTests() { offUntil = 0; kept.clear(); }
 
   async render(text, file) {
     const s = HydraVoice.server;
+    const keep = FILLER_SET.has(text) && !this.voice;
+    if (keep && kept.has(text)) return kept.get(text);
+    const out = await this.renderNow(text, file, s);
+    if (keep && out?.pcm?.length) kept.set(text, out);
+    return out;
+  }
+
+  async renderNow(text, file, s) {
     // A Mac voice the owner picked stays his pick; Hydra's server voice only stands in for the default one.
     if (!this.voice && s?.paired() && Date.now() >= offUntil) {
       try {

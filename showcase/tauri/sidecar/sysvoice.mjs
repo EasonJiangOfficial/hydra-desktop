@@ -19,6 +19,31 @@ export function wavPcm(buf) {
   return null;
 }
 
+/**
+ * 16-bit mono PCM brought to one loudness (W5 contract 6): the RMS of its sounding part (10 ms frames above -50 dBFS)
+ * to `target` (about -18 dBFS), at most `maxGain` louder, and never past `peak`. Silence stays silent.
+ */
+export function levelPcm(pcm, { target = 0.125, maxGain = 8, peak = 0.89 } = {}) {
+  const n = pcm.length >> 1;
+  if (!n) return pcm;
+  const x = new Float32Array(n);
+  for (let i = 0; i < n; i++) x[i] = pcm.readInt16LE(2 * i) / 32768;
+  const hop = 220;
+  let sum = 0, count = 0, top = 0;
+  for (let i = 0; i < n; i += hop) {
+    let e = 0;
+    const end = Math.min(n, i + hop);
+    for (let j = i; j < end; j++) { e += x[j] * x[j]; top = Math.max(top, Math.abs(x[j])); }
+    if (e / (end - i) > 1e-5) { sum += e; count += end - i; }
+  }
+  if (!count || !top) return pcm;
+  const gain = Math.min(maxGain, target / Math.sqrt(sum / count), peak / top);
+  if (Math.abs(gain - 1) < 0.02) return pcm;
+  const out = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(x[i] * gain * 32768))), 2 * i);
+  return out;
+}
+
 /** What's spoken of a line: voice cues ([warm]) and Markdown marks dropped. */
 export const spokenText = (s) => String(s ?? '').replace(/\[[^\]]*\]\s*/g, '').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim();
 
@@ -40,7 +65,8 @@ export class SystemVoice {
     try {
       const out = await this.render(text, file);
       if (this.done) return;
-      if (out?.pcm?.length) this.onAudio?.(out.pcm, out.rate);
+      // One steady loudness for every sentence (W5 contract 6), whichever voice made it.
+      if (out?.pcm?.length) this.onAudio?.(levelPcm(out.pcm), out.rate);
     } catch (e) {
       if (!this.done) { this.done = true; this.onError?.({ reason: 'error', message: `The Mac's voice failed: ${e.message}` }); }
       return;

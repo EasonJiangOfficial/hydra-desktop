@@ -47,6 +47,15 @@ export const BEATS = [
   'Moment.', 'Okay, checking.', 'Sure, checking.', 'Okie-dokie.',
 ];
 const RECENT = 8; // a beat isn't picked again until this many others have played
+// Hydra's fillers (W5 contract 3), the same lines as the web (src/components/agent/words.ts FILLERS): said in Hydra's
+// own voice when no answer has started within about 1.1 s or a tool starts; never the same twice in a row, never part
+// of the answer (not stored, not shown), not when muted or once the answer is streaming.
+export const FILLERS = ['Let me check.', 'One sec.', 'Let me see.', 'Checking that now.', 'Give me a second.', 'Let me look.', 'Hang on.', 'Just a moment.', 'Let me pull that up.'];
+/** A filler, never the one said last. */
+export function pickFiller(last, list = FILLERS, random = Math.random) {
+  const pool = list.filter((f) => f !== last);
+  return pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))] ?? list[0];
+}
 const PREWARM_MS = 20_000; // a socket opened ahead of a reply that nothing takes is closed after this
 // VoiceStudio: how much of a reply is spoken, in characters (its text is always all shown). 0: no cap.
 export const STUDIO_CAPS = { short: 160, medium: 320, full: 0 };
@@ -82,7 +91,7 @@ export function voiceProblemText(what, name) {
 }
 
 // beatStore: { read(name), write(name, data) }, where beats made here are kept between runs (none: made again each run).
-export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, FishVoiceImpl = FishVoice, account = fishAccount, providers = {}, beatPhrases = BEATS, bundled = bundledBeats(), beatStore = null, LocalVoiceImpl = StudioVoice, localStatus = studioStatus, prewarmMs = PREWARM_MS,
+export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, FishVoiceImpl = FishVoice, account = fishAccount, providers = {}, beatPhrases = BEATS, bundled = bundledBeats(), beatStore = null, fillers = null, LocalVoiceImpl = StudioVoice, localStatus = studioStatus, prewarmMs = PREWARM_MS,
   keepWarmMs = KEEP_WARM_MS, keepWarmIdleMs = KEEP_WARM_IDLE_MS, studioQuietMs = STUDIO_QUIET_MS, now = () => Date.now(), setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (h) => clearTimeout(h) }) {
   const all = { ...PROVIDERS, fish: { ...PROVIDERS.fish, Voice: FishVoiceImpl, account }, ...providers };
   let P = all.fish; // the service in use
@@ -207,11 +216,12 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     warmTimer = null;
   }
   // A reply in VoiceStudio: its socket opens now, one request per sentence, played as each streams in.
+  let lastFiller = null;
   function startLocal() {
     stopAll();
     lastReq = now(); keepWarm();
-    const id = `s${++seq}`, said = [], t0 = Date.now();
-    let heard = false, done = false, v = null;
+    const id = `s${++seq}`, said = [], kinds = [], t0 = Date.now();
+    let heard = false, done = false, v = null, filled = false;
     const finish = (whole = false) => {
       if (done) return;
       done = true;
@@ -221,8 +231,17 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     };
     const me = {
       id,
-      say(s) { if (done) return; said.push(s); v.say(s); },
-      beat() { return false; },
+      say(s) { if (done) return; said.push(s); if (String(s).replace(/\[[^\]]*\]/g, '').trim()) kinds.push(false); v.say(s); },
+      // A filler (fillers given: Hydra's server voice), once, before anything of the answer.
+      beat() {
+        if (done || filled || said.length || heard || !fillers?.length) return false;
+        filled = true;
+        lastFiller = pickFiller(lastFiller, fillers);
+        kinds.push(true);
+        log('speech_beat', { id, ms: Date.now() - t0, filler: true });
+        v.say(lastFiller);
+        return true;
+      },
       end() { if (!done) v.end(); },
       abort() { if (done) return; done = true; v?.abort(); if (current === me) current = null; },
     };
@@ -231,7 +250,8 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
       onAudio: (pcm, rate) => {
         if (done) return;
         if (!heard) { heard = true; log('speech_first_audio', { id, provider: 'voicestudio', ms: Date.now() - t0 }); if (local && !local.ok) checkLocal(); } // working again: refresh the panel's status
-        emit({ kind: 'speech', id, rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64') });
+        const filler = kinds.shift() === true;
+        emit({ kind: 'speech', id, rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'), ...(filler ? { filler: true } : {}) });
       },
       onEnd: () => finish(true),
       onError: (err) => {

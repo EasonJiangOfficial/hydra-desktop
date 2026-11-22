@@ -3,9 +3,10 @@
 // manually activate it in the interface").
 // - Awake: it listens for "Hey Hydra" (on-device) and answers. Five minutes without the owner talking or typing to it
 //   puts it to sleep.
-// - Asleep: speech recognition is off and nothing is sent to the cloud; the voice helper keeps only the on-device
-//   double-clap detector running (voice/clap.swift). A double clap, a click on the orb, the panel's Wake button, the
-//   web app's wake(), or talking with the talk keys wakes it.
+// - Asleep: nothing is sent to the cloud; the voice helper keeps the on-device double-clap detector and the on-device
+//   key phrase listening running (voice/clap.swift, W5 contract 4: "Yes, phrase wakes it"). A double clap, the key
+//   phrase (its take goes on at once), a click on the orb, the panel's Wake button, the web app's wake(), or talking
+//   with the talk keys wakes it.
 // - The sleep word (default "Hydra, sleep"; a setting) puts it to sleep at once, from the wake listening or a take.
 
 export const SLEEP_AFTER_MS = 5 * 60_000;

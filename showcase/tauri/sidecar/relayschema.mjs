@@ -87,8 +87,15 @@ export const relayEventSchema = z.discriminatedUnion("type", [
  * an empty list is the heartbeat that renews the 60 s lease.
  */
 export const relayBatchSchema = z
-  .object({ turnId: z.uuid(), claimId: z.uuid(), seq: z.number().int().min(1).optional(), events: z.array(relayEventSchema).max(LIMITS.batch) })
+  .object({ turnId: z.uuid(), claimId: z.uuid(), seq: z.number().int().min(1).optional(), events: z.array(relayEventSchema).max(LIMITS.batch), inputsSeen: z.number().int().min(0).optional() })
   .refine((b) => b.events.every((e, i) => (e.type !== "done" && e.type !== "error") || i === b.events.length - 1), { message: "done or error must be the last event" });
+
+/**
+ * The POST /api/agent/relay/events answer (W5 contract 2, additive): inputs the owner added while the turn runs
+ * (POST /api/agent/turn/append), the ones the device has not acknowledged yet (inputsSeen in its next post).
+ */
+export const relayInputSchema = z.object({ seq: z.number().int().min(1), text: z.string().min(1).max(8000) });
+export const relayEventsAnswerSchema = z.object({ inputs: z.array(relayInputSchema).optional() });
 
 /** POST /api/agent/relay/approval body: an ask the Mac would show locally becomes the owner's approval. */
 export const relayApprovalSchema = z

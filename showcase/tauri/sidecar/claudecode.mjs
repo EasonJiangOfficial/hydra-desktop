@@ -445,7 +445,18 @@ async function* claudeCodeLoop(messages, o) {
     }
   };
   const mapper = new SdkMessageMapper({ messages, takeResult: (id) => run.bridge.takeResult(id), onSessionId: o.onSessionId, onRateLimit: o.onRateLimit });
+  // Words the owner adds while this runs (W5 contract 2): one more user message on the same streaming input. Claude Code
+  // takes it into the turn under way, or answers it right after; a result that comes before any assistant message
+  // after the last addition is not the end yet (the addition is still to be answered).
+  let step = 0, addedAt = 0, answeredAt = 0, streamed = false;
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
+  // After begin(): the first message is on the input already, so an addition always comes after it.
+  o.takeInput?.((text) => {
+    if (aborted || !input || !String(text ?? '').trim()) return false;
+    input.push(toSdkUserMessage([{ type: 'text', text: String(text) }]));
+    addedAt = ++step;
+    return true;
+  });
 
   let killTimer;
   const onAbort = () => {
@@ -470,16 +481,25 @@ async function* claudeCodeLoop(messages, o) {
       const message = item.message;
       // After Stop, keep the transcript in step until Claude Code reports the interrupted result, but stop emitting.
       if (aborted) { if (message.type === 'result') break; mapper.handle(message); continue; }
-      if (message.type !== 'result') { yield* mapper.handle(message); continue; }
+      if (message.type !== 'result') {
+        // An assistant message that starts after an addition is its answer (or takes it in).
+        if (!message.parent_tool_use_id) {
+          if (message.type === 'stream_event' && message.event?.type === 'message_start') { streamed = true; answeredAt = ++step; }
+          else if (message.type === 'assistant' && !streamed) answeredAt = ++step;
+        }
+        yield* mapper.handle(message); continue;
+      }
       if (message.subtype === 'error_max_turns') { hitMaxTurns = true; break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
         throw new Error(detail || `Claude Code stopped: ${message.subtype}`);
       }
       if (message.is_error) throw new Error(message.result || mapper.syntheticError || 'Claude Code request failed.');
+      if (addedAt > answeredAt) continue; // an addition came after the last answer: its own answer follows
       break;
     }
   } finally {
+    o.takeInput?.(null);
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
@@ -514,6 +534,7 @@ export function resumeId(state, messages) {
  */
 export class ClaudeCodeAgent {
   #running = false;
+  #add = null; #early = [];
   constructor(options) {
     this.options = options;
     this.resume = options.resume ?? null;
@@ -526,10 +547,15 @@ export class ClaudeCodeAgent {
     warmSpare(this.options, resumeId(this.resume, [...this.messages, { role: 'user', content: '' }]));
   }
   setSignal(signal) { this.options = { ...this.options, signal }; }
+  /** While a prompt runs: the owner's added words go into it as one more user message. False when nothing runs. */
+  addInput(text) { return this.#add ? this.#add(text) : false; }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
     this.messages.push({ role: 'user', content });
+    // Additions before Claude Code has started wait for it (the stream starts when it is first read).
+    this.#early = [];
+    this.#add = (t) => { this.#early.push(t); return true; };
     return new AgentStream(this.#run(), () => { this.#running = false; });
   }
   async *#run() {
@@ -542,6 +568,7 @@ export class ClaudeCodeAgent {
     try {
       return yield* claudeCodeLoop(loopMsgs, {
         ...o, resume,
+        takeInput: (fn) => { this.#add = fn; if (fn) for (const t of this.#early.splice(0)) fn(t); },
         onSessionId: (id) => { sessionId = id; },
         onRateLimit: o.onRateLimit ?? ((info) => void recordClaudeCodeRateLimit(info).catch(() => {})),
       });
