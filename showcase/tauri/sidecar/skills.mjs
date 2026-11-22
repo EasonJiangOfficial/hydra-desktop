@@ -132,7 +132,7 @@ export async function httpGet(url, { json = false, limit = MAX_SKILL_MD * 4, tim
   for (let hop = 0; hop < 4; hop++) {
     const v = await checkFetch(at);
     if (v.level === BLOCK) throw new Error(v.reason);
-    const res = await fetch(at, { redirect: 'manual', signal: AbortSignal.timeout(timeout), headers: { 'user-agent': 'Roamies', accept: json ? 'application/vnd.github+json' : 'text/plain, text/markdown, */*' } });
+    const res = await fetch(at, { redirect: 'manual', signal: AbortSignal.timeout(timeout), headers: { 'user-agent': 'Hydra-Desktop', accept: json ? 'application/vnd.github+json' : 'text/plain, text/markdown, */*' } });
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) { at = new URL(res.headers.get('location'), at).href; continue; }
     if (res.status === 404) throw new Error(`Nothing at ${at} (404).`);
     if (res.status === 403 || res.status === 429) throw new Error('GitHub is limiting requests right now; try again in a few minutes.');

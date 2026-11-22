@@ -8,11 +8,18 @@
 // the passphrase itself is never stored. Only the random device ids in the file names are readable.
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, renameSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const SUBDIR = 'Roamies Sync';
+export const SUBDIR = 'Hydra Sync', OLD_SUBDIR = 'Roamies Sync';
+// The sync folder's own folder, renamed from "Roamies Sync" once (a rename in place: nothing copied, nothing lost). If
+// the rename can't happen, the old one keeps being used.
+export function syncSub(dir) {
+  const sub = path.join(dir, SUBDIR), old = path.join(dir, OLD_SUBDIR);
+  if (!existsSync(sub) && existsSync(old)) { try { renameSync(old, sub); } catch { return old; } }
+  return sub;
+}
 export const HEADER = 'sync.json';
 export const KEY_NAME = 'sync-key'; // the secret store's name for this computer's copy of the key
 export const MIN_PASSPHRASE = 8;
@@ -45,7 +52,7 @@ export function unseal(key, box, aad) {
  */
 export async function prepareFolder(dir, passphrase) {
   if (String(passphrase ?? '').length < MIN_PASSPHRASE) return { error: `The passphrase needs at least ${MIN_PASSPHRASE} characters.` };
-  const sub = path.join(dir, SUBDIR), file = path.join(sub, HEADER);
+  const sub = syncSub(dir), file = path.join(sub, HEADER);
   await fs.mkdir(sub, { recursive: true });
   const read = async () => { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return null; } };
   let head = await read();
@@ -184,7 +191,7 @@ export function checkFolder(raw, home = os.homedir()) {
 /** The other computers' files in the folder, decrypted and cleaned. Half-synced ones are skipped this time; ones that
  *  don't open with this key (another passphrase, or changed) are counted in out.unreadable. */
 export async function readRemotes(dir, device, key, now = Date.now()) {
-  const sub = path.join(dir, SUBDIR), out = [];
+  const sub = syncSub(dir), out = [];
   out.unreadable = 0;
   let names = [];
   try { names = await fs.readdir(sub); } catch { return out; }
@@ -208,7 +215,7 @@ export async function readRemotes(dir, device, key, now = Date.now()) {
 
 /** Writes this computer's file, encrypted: a temp file, then a rename, so another computer never reads half of it. */
 export async function writeOwn(dir, device, data, key) {
-  const sub = path.join(dir, SUBDIR);
+  const sub = syncSub(dir);
   await fs.mkdir(sub, { recursive: true });
   const file = path.join(sub, `${device}.json`), tmp = path.join(sub, `.${device}.${randomBytes(3).toString('hex')}.tmp`);
   await fs.writeFile(tmp, JSON.stringify({ version: 1, device, enc: seal(key, data, device) }), { mode: 0o600 });

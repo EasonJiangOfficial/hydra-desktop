@@ -1,5 +1,8 @@
-// Where Roamies keeps everything: one visible folder, ~/Roamies, with Agents/, Skills/ and Data/ (settings, memory,
-// chats, logs, usage, jobs, MCP servers, sync state, catalogs). Sign-in stays in ~/.gg/auth.json (shared with GG Coder).
+// Where Hydra keeps everything: one visible folder, ~/HydraAgent, with Agents/, Skills/ and Data/ (settings, memory,
+// chats, logs, usage, jobs, MCP servers, sync state, catalogs). Not ~/Hydra: that name is often taken (the owner's
+// Hydra web app checkout lives there). It used to be ~/Roamies: the first run after the rename copies all of it across
+// the same careful way (copy, check, switch), keeps ~/Roamies untouched with a MOVED.txt, and uses ~/Roamies for now
+// if anything fails. Sign-in stays in ~/.gg/auth.json (shared with GG Coder).
 // Data used to live in ~/.gg/sidekick and ~/.gg/sidekick.json. The first run after the update copies it across,
 // checks the copy and only then switches; the old copy is never deleted, and if anything fails this run keeps using it.
 // ROAMIES_DATA_DIR (tests and benchmarks) stands in for the home folder, so they exercise the same migration.
@@ -11,14 +14,17 @@ const SKIP = (name) => name === '.DS_Store' || name.endsWith('.tmp') || name ===
 const TMP = /^\.Data-(\d+)\.tmp$/;
 
 export const baseDir = (env = process.env) => env.ROAMIES_DATA_DIR || os.homedir();
-export const roamiesDir = (env = process.env) => path.join(baseDir(env), 'Roamies');
+export const ROOT_NAME = 'HydraAgent', OLD_ROOT_NAME = 'Roamies';
+const ROOT_TMP = /^\.HydraAgent-(\d+)\.tmp$/;
+/** The folder in use: ~/HydraAgent, or ~/Roamies while it hasn't been moved (an agent process, or a failed move). */
+export const roamiesDir = (env = process.env) => dataPaths(env).root;
 
 // The old layout: ~/.gg/sidekick and ~/.gg/sidekick.json, or <ROAMIES_DATA_DIR>/sidekick(.json) in tests.
 export const oldBase = (env = process.env) => env.ROAMIES_DATA_DIR || path.join(os.homedir(), '.gg');
 
-/** Every path, new and old: `base` holds Roamies/, `old` holds the old sidekick/ and sidekick.json. */
-export function layout(base, old) {
-  const root = path.join(base, 'Roamies');
+/** Every path, new and old: `base` holds HydraAgent/ (or `rootName`), `old` holds the old sidekick/ and sidekick.json. */
+export function layout(base, old, rootName = ROOT_NAME) {
+  const root = path.join(base, rootName);
   return { root, dir: path.join(root, 'Data'), config: path.join(root, 'Data', 'settings.json'), oldDir: path.join(old, 'sidekick'), oldConfig: path.join(old, 'sidekick.json') };
 }
 
@@ -61,14 +67,75 @@ function verify(files, tmp) {
   }
 }
 
+// The whole ~/Roamies tree, as [from, relative, isDir]; Data/models is renamed across afterwards instead. Symlinks
+// and other odd entries are left out (they stay in ~/Roamies, which is never deleted).
+function treePlan(from) {
+  const out = [];
+  const walk = (dir, rel) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === '.DS_Store' || ROOT_TMP.test(e.name) || TMP.test(e.name) || (rel === 'Data' && e.name === 'models')) continue;
+      const src = path.join(dir, e.name), r = rel ? path.join(rel, e.name) : e.name;
+      if (e.isDirectory()) { out.push([src, r, true]); walk(src, r); } else if (e.isFile()) out.push([src, r, false]);
+    }
+  };
+  walk(from, '');
+  return out;
+}
+
+/** Moves ~/Roamies to ~/HydraAgent once: copy into a temporary folder beside it (files keep their permissions), check
+ *  every file, then rename into place in one step. True when ~/HydraAgent is the one to use. */
+export function moveRoot({ base = baseDir(), log = (m) => console.error(`[datadir] ${m}`), afterCopy } = {}) {
+  const from = path.join(base, OLD_ROOT_NAME), to = path.join(base, ROOT_NAME);
+  if (existsSync(to) || !isDir(from)) return true;
+  let tmp = null;
+  try {
+    for (const n of readdirSync(base)) {
+      const m = ROOT_TMP.exec(n);
+      if (m && (Number(m[1]) === process.pid || !alive(Number(m[1])))) rmSync(path.join(base, n), { recursive: true, force: true });
+    }
+    tmp = path.join(base, `.${ROOT_NAME}-${process.pid}.tmp`);
+    mkdirSync(tmp, { mode: 0o700 });
+    const files = treePlan(from);
+    for (const [src, rel, dir] of files) {
+      const dst = path.join(tmp, rel);
+      if (dir) { mkdirSync(dst, { recursive: true, mode: statSync(src).mode & 0o777 }); continue; }
+      copyFileSync(src, dst);
+      const st = statSync(src);
+      chmodSync(dst, st.mode & 0o777);
+      const fd = openSync(dst, 'r+');
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+      utimesSync(dst, st.atime, st.mtime);
+    }
+    afterCopy?.(tmp);
+    verify(files, tmp);
+    renameSync(tmp, to);
+    tmp = null;
+  } catch (e) {
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    log(`couldn't move ${from} to ${to}, using ${from} for now: ${e.message}`);
+    return false;
+  }
+  const models = path.join(from, 'Data', 'models');
+  if (isDir(models)) {
+    try { renameSync(models, path.join(to, 'Data', 'models')); } catch (e) { log(`left the speech model in ${models} (it downloads again if needed): ${e.message}`); }
+  }
+  try {
+    writeFileSync(path.join(from, 'MOVED.txt'), `Hydra now keeps everything in ${to}.\n\nThis folder is the copy from before the move, kept in case you go back to an older version.\nYou can delete it.\n`);
+  } catch (e) { log(`couldn't write MOVED.txt: ${e.message}`); }
+  log(`moved ${from} to ${to}`);
+  return true;
+}
+
 /**
- * Moves old data into Roamies/Data once: copy to a temporary folder, check it, rename it into place in one step.
+ * Moves old data into HydraAgent/Data once: copy to a temporary folder, check it, rename it into place in one step.
  * Returns the paths to use this run; `legacy` means the copy failed and the old location is still in use.
  * `agent` (a background agent's process) never migrates, it follows whatever the main process left.
  * `afterCopy(tmp)` is for tests.
  */
 export function migrateData({ base = baseDir(), old = oldBase(), agent = false, log = (m) => console.error(`[datadir] ${m}`), afterCopy } = {}) {
-  const L = layout(base, old);
+  // An agent never moves anything: it uses ~/HydraAgent if the main process made it, else ~/Roamies if that's there.
+  const rootOk = agent ? existsSync(path.join(base, ROOT_NAME)) || !isDir(path.join(base, OLD_ROOT_NAME)) : moveRoot({ base, log });
+  const L = layout(base, old, rootOk ? ROOT_NAME : OLD_ROOT_NAME);
   const paths = { root: L.root, dir: L.dir, config: L.config, legacy: false, migrated: false };
   const hasOld = isDir(L.oldDir) || existsSync(L.oldConfig);
   if (existsSync(L.dir) || !hasOld) return paths;

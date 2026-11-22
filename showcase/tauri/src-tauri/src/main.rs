@@ -1691,10 +1691,12 @@ fn log_stdio(name: &str) -> Stdio {
         .unwrap_or_else(Stdio::null)
 }
 
-/// Where the app's own logs go: ~/Roamies/Data/logs. Until the sidecar has moved old data out of ~/.gg (datadir.mjs),
-/// they stay in ~/.gg, so creating the new folder here never makes that move think it's already done.
+/// Where the app's own logs go: ~/HydraAgent/Data/logs. Until the sidecar has moved old data out of ~/.gg or
+/// ~/Roamies (datadir.mjs), they stay in the old place, so creating the new folder here never makes a move think it's
+/// already done.
 fn log_path(home: &std::path::Path, name: &str) -> Option<PathBuf> {
-    let data = home.join("Roamies").join("Data");
+    let root = if home.join("Roamies").is_dir() && !home.join("HydraAgent").exists() { "Roamies" } else { "HydraAgent" };
+    let data = home.join(root).join("Data");
     let old = home.join(".gg");
     if !data.exists() && (old.join("sidekick").exists() || old.join("sidekick.json").exists()) {
         return Some(old.join(name));
@@ -2118,19 +2120,24 @@ mod tests {
     }
 
     #[test]
-    fn app_logs_go_in_the_roamies_data_folder_once_old_data_has_moved() {
-        let home = std::env::temp_dir().join(format!("roamies-logpath-{}", std::process::id()));
+    fn app_logs_go_in_the_hydra_data_folder_once_old_data_has_moved() {
+        let home = std::env::temp_dir().join(format!("hydra-logpath-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".gg").join("sidekick")).unwrap();
         assert_eq!(log_path(&home, "sidekick.log"), Some(home.join(".gg").join("sidekick.log")), "old data not moved yet");
-        assert!(!home.join("Roamies").exists(), "and Data/ isn't created early");
-        std::fs::create_dir_all(home.join("Roamies").join("Data")).unwrap();
-        let logs = home.join("Roamies").join("Data").join("logs");
+        assert!(!home.join("HydraAgent").exists(), "and Data/ isn't created early");
+        std::fs::create_dir_all(home.join("HydraAgent").join("Data")).unwrap();
+        let logs = home.join("HydraAgent").join("Data").join("logs");
         assert_eq!(log_path(&home, "sidekick.log"), Some(logs.join("sidekick.log")), "after the move");
         assert!(logs.is_dir(), "the logs folder is made");
         let fresh = home.join("fresh");
         std::fs::create_dir_all(&fresh).unwrap();
-        assert_eq!(log_path(&fresh, "sidekick-voice.log"), Some(fresh.join("Roamies").join("Data").join("logs").join("sidekick-voice.log")), "a fresh install");
+        assert_eq!(log_path(&fresh, "sidekick-voice.log"), Some(fresh.join("HydraAgent").join("Data").join("logs").join("sidekick-voice.log")), "a fresh install");
+        // ~/Roamies not moved yet: logs stay there, and ~/HydraAgent isn't made early (the move would think it's done).
+        let before = home.join("before");
+        std::fs::create_dir_all(before.join("Roamies").join("Data")).unwrap();
+        assert_eq!(log_path(&before, "a.log"), Some(before.join("Roamies").join("Data").join("logs").join("a.log")));
+        assert!(!before.join("HydraAgent").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 }

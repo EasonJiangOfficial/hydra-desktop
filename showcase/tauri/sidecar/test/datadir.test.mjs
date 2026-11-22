@@ -1,4 +1,4 @@
-// Moving data from ~/.gg/sidekick into ~/Roamies/Data: a fresh install, a full move, running twice, a failed copy
+// Moving data from ~/.gg/sidekick into ~/HydraAgent/Data: a fresh install, a full move, running twice, a failed copy
 // falling back to the old place, leftover temporary folders, the speech model, MOVED.txt and settings.json.
 // Every case uses its own temp folders. Run: npm test
 import assert from 'node:assert/strict';
@@ -11,8 +11,8 @@ process.env.ROAMIES_DATA_DIR = path.join(TMP, 'import');
 process.on('exit', () => fs.rmSync(TMP, { recursive: true, force: true }));
 const { migrateData, dataPaths, DATA_DIR, CONFIG_PATH, ROAMIES_DIR } = await import('../datadir.mjs');
 
-assert.equal(ROAMIES_DIR, path.join(TMP, 'import', 'Roamies'), 'ROAMIES_DATA_DIR stands in for the home folder');
-assert.equal(DATA_DIR, path.join(TMP, 'import', 'Roamies', 'Data'));
+assert.equal(ROAMIES_DIR, path.join(TMP, 'import', 'HydraAgent'), 'ROAMIES_DATA_DIR stands in for the home folder');
+assert.equal(DATA_DIR, path.join(TMP, 'import', 'HydraAgent', 'Data'));
 assert.equal(CONFIG_PATH, path.join(DATA_DIR, 'settings.json'));
 
 let n = 0;
@@ -40,8 +40,8 @@ const full = {
 {
   const t = setup();
   const p = t.run();
-  assert.deepEqual([p.dir, p.legacy, p.migrated], [path.join(t.home, 'Roamies', 'Data'), false, false]);
-  assert.ok(!fs.existsSync(path.join(t.home, 'Roamies')), 'nothing is created until something is saved');
+  assert.deepEqual([p.dir, p.legacy, p.migrated], [path.join(t.home, 'HydraAgent', 'Data'), false, false]);
+  assert.ok(!fs.existsSync(path.join(t.home, 'HydraAgent')), 'nothing is created until something is saved');
 }
 
 // A full move: everything copied, settings renamed, junk skipped, the model renamed across, originals kept.
@@ -64,7 +64,7 @@ const full = {
   assert.equal(fs.readFileSync(path.join(t.old, 'sidekick.json'), 'utf8'), settings);
   const moved = fs.readFileSync(path.join(t.old, 'sidekick', 'MOVED.txt'), 'utf8');
   assert.match(moved, /Hydra now keeps its data in/); assert.ok(moved.includes(D)); assert.match(moved, /You can delete them/);
-  assert.deepEqual(fs.readdirSync(path.join(t.home, 'Roamies')), ['Data'], 'no temporary folder left');
+  assert.deepEqual(fs.readdirSync(path.join(t.home, 'HydraAgent')), ['Data'], 'no temporary folder left');
   if (process.platform !== 'win32') assert.equal((fs.statSync(path.join(D, 'memory.json')).mode & 0o777).toString(8), '600', 'still private');
 
   // Running again changes nothing, even after the old copy changes.
@@ -90,7 +90,7 @@ const full = {
   const p = t.run({ afterCopy: (tmp) => fs.writeFileSync(path.join(tmp, 'memory.json'), '{"version":1') });
   assert.equal(p.legacy, true); assert.equal(p.migrated, false);
   assert.equal(p.dir, path.join(t.old, 'sidekick')); assert.equal(p.config, path.join(t.old, 'sidekick.json'));
-  assert.deepEqual(fs.readdirSync(path.join(t.home, 'Roamies')), [], 'the temporary folder is removed and Data/ never appears');
+  assert.deepEqual(fs.readdirSync(path.join(t.home, 'HydraAgent')), [], 'the temporary folder is removed and Data/ never appears');
   assert.ok(fs.existsSync(path.join(t.old, 'sidekick', 'models')) && !fs.existsSync(path.join(t.old, 'sidekick', 'MOVED.txt')), 'the old place is untouched');
   assert.match(t.logs.join('\n'), /couldn't move data .*didn't copy whole/);
   const missing = setup(full).run({ afterCopy: (tmp) => fs.rmSync(path.join(tmp, 'sessions'), { recursive: true }) });
@@ -109,7 +109,7 @@ const full = {
 // Temporary folders left by a crash are cleared first; a live process's is left alone.
 {
   const t = setup(full);
-  const dead = path.join(t.home, 'Roamies', '.Data-999999999.tmp'), live = path.join(t.home, 'Roamies', `.Data-${process.ppid}.tmp`);
+  const dead = path.join(t.home, 'HydraAgent', '.Data-999999999.tmp'), live = path.join(t.home, 'HydraAgent', `.Data-${process.ppid}.tmp`);
   fs.mkdirSync(path.join(dead, 'sessions'), { recursive: true }); fs.writeFileSync(path.join(dead, 'memory.json'), 'half');
   fs.mkdirSync(live, { recursive: true });
   assert.ok(t.run().migrated);
@@ -121,20 +121,58 @@ const full = {
 {
   const t = setup(full);
   const p = t.run({ agent: true });
-  assert.equal(p.legacy, true); assert.ok(!fs.existsSync(path.join(t.home, 'Roamies')));
+  assert.equal(p.legacy, true); assert.ok(!fs.existsSync(path.join(t.home, 'HydraAgent')));
   t.run();
   assert.equal(t.run({ agent: true }).legacy, false, 'and the new place once it exists');
 }
 
-// dataPaths resolves once per folder, migrating ROAMIES_DATA_DIR's old layout (sidekick/ beside Roamies/).
+// dataPaths resolves once per folder, migrating ROAMIES_DATA_DIR's old layout (sidekick/ beside HydraAgent/).
 {
   const base = path.join(TMP, 'env');
   fs.mkdirSync(path.join(base, 'sidekick'), { recursive: true });
   fs.writeFileSync(path.join(base, 'sidekick', 'memory.json'), memory);
   fs.writeFileSync(path.join(base, 'sidekick.json'), settings);
   const p = dataPaths({ ROAMIES_DATA_DIR: base });
-  assert.equal(p.dir, path.join(base, 'Roamies', 'Data')); assert.ok(p.migrated);
+  assert.equal(p.dir, path.join(base, 'HydraAgent', 'Data')); assert.ok(p.migrated);
   assert.equal(fs.readFileSync(path.join(p.dir, 'settings.json'), 'utf8'), settings);
   assert.equal(dataPaths({ ROAMIES_DATA_DIR: base }), p, 'resolved once');
 }
 console.log('datadir tests: passed');
+
+// The rename (review m5): ~/Roamies moves to ~/HydraAgent once, whole (Agents, Skills, Data), checked before the switch;
+// ~/Roamies stays with a MOVED.txt; the speech model is renamed across; a failed copy keeps using ~/Roamies.
+{
+  const home = path.join(TMP, `rename${n++}`), R = path.join(home, 'Roamies');
+  const put = (rel, text, mode) => { fs.mkdirSync(path.dirname(path.join(R, rel)), { recursive: true }); fs.writeFileSync(path.join(R, rel), text); if (mode) fs.chmodSync(path.join(R, rel), mode); };
+  put('Data/memory.json', memory); put('Data/settings.json', settings); put('Data/sessions/a.json', '{"messages":[]}');
+  put('Agents/a1/notes.md', 'work'); put('Agents/a1/run.sh', '#!/bin/sh\necho hi\n', 0o755); put('Skills/tea/SKILL.md', '# Tea');
+  put('Data/models/parakeet/vocab.txt', 'words');
+  const logs = [];
+  const p = migrateData({ base: home, old: path.join(home, '.gg'), log: (m) => logs.push(m) });
+  const H = path.join(home, 'HydraAgent');
+  assert.equal(p.root, H); assert.equal(p.dir, path.join(H, 'Data')); assert.equal(p.legacy, false);
+  for (const rel of ['Data/memory.json', 'Data/settings.json', 'Data/sessions/a.json', 'Agents/a1/notes.md', 'Skills/tea/SKILL.md'])
+    assert.equal(fs.readFileSync(path.join(H, rel), 'utf8'), fs.readFileSync(path.join(R, rel), 'utf8'), `${rel} copied whole`);
+  assert.equal(fs.statSync(path.join(H, 'Agents/a1/run.sh')).mode & 0o777, 0o755, 'a script keeps its permissions');
+  assert.equal(fs.readFileSync(path.join(H, 'Data/models/parakeet/vocab.txt'), 'utf8'), 'words', 'the model is renamed across');
+  assert.ok(fs.existsSync(path.join(R, 'Data/memory.json')), 'the old folder is kept');
+  assert.match(fs.readFileSync(path.join(R, 'MOVED.txt'), 'utf8'), /HydraAgent/);
+  assert.ok(!fs.readdirSync(home).some((x) => x.endsWith('.tmp')), 'no temporary folder left');
+  // Running again changes nothing.
+  assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).root, H);
+}
+{
+  const home = path.join(TMP, `rename${n++}`), R = path.join(home, 'Roamies');
+  fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
+  const { moveRoot } = await import('../datadir.mjs');
+  const logs = [];
+  const ok = moveRoot({ base: home, log: (m) => logs.push(m), afterCopy: (tmp) => fs.writeFileSync(path.join(tmp, 'Data', 'memory.json'), 'half') });
+  assert.equal(ok, false, 'a bad copy is never switched to');
+  assert.ok(!fs.existsSync(path.join(home, 'HydraAgent')), 'and ~/HydraAgent is not made');
+  assert.equal(fs.readFileSync(path.join(R, 'Data', 'memory.json'), 'utf8'), memory, 'the data is untouched');
+  assert.ok(!fs.readdirSync(home).some((x) => x.endsWith('.tmp')), 'the temporary copy is removed');
+  // migrateData then keeps using ~/Roamies, and a background agent follows it.
+  const p = migrateData({ base: home, old: path.join(home, '.gg'), agent: true, log: () => {} });
+  assert.equal(p.root, R, 'an agent uses ~/Roamies while it has not been moved');
+}
+console.log('folder rename tests: passed');
