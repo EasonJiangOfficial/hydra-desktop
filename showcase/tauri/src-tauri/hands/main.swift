@@ -5,11 +5,13 @@
 //   roamies-hands windows                      visible windows, front to back
 //   roamies-hands capture <out.jpg> front|app:<name>|window:<id>|screen
 //   roamies-hands locate front|app:<name>|window:<id>   which window that is, without capturing (for the animation)
+//   roamies-hands resolve app:<name>           its window on screen and the running app it would bring forward, doing neither
+//                                              (only the app named in ROAMIES_FORWARD is ever brought forward for app:<name>)
 //   roamies-hands select <out.png>             drag to choose an area (built-in macOS selection UI)
 //   roamies-hands ui front|app:<name>          the window's buttons, fields, etc. with ids
 //   roamies-hands act <json>                   {"app":"Brave","steps":[{"do":"focus","id":3},{"do":"type","text":"hi"}]}
 //   roamies-hands trusted [--prompt]           Accessibility permission status
-//   roamies-hands manage <json>                {"do":"quit|force_quit|hide|activate|close|minimize|arrange","app":"Notes","window":12,"layout":"left","confirmed":false}
+//   roamies-hands manage <json>                {"do":"quit|force_quit|hide|activate|close|minimize|arrange","app":"Notes","window":12,"layout":"left","confirmed":false,"exact":false}
 //   roamies-hands locate-control <target> <id>  where one control (from `ui`) is on screen, for pointing
 //   roamies-hands screencheck                  takes (and deletes) one test screenshot: {"seen": true|false}
 //   roamies-hands guide accessibility|screen [<Roamies.app>] [--preview]  drag-me-in panel under System Settings (until stdin closes)
@@ -63,12 +65,22 @@ func appMatches(_ app: String, _ want: String) -> Bool {
     let a = app.lowercased()
     return a == w || a.contains(w) || w.contains(a)
 }
-/// The running app 'app:X' brings forward when none of its windows is on screen: one named X itself first, then the
-/// fuzzy match (as manage picks it). "Photos" is Photos, not Adobe Photoshop 2025 running before it (R11i-1).
-func pickRunning(_ names: [String], _ want: String) -> Int? {
+/// The running app 'app:X' brings forward when none of its windows is on screen, and the one manage acts on: one named
+/// X itself first, then the fuzzy match. "Photos" is Photos, not Adobe Photoshop 2025 running before it (R11i-1).
+/// exact: only the app named exactly so (the name the owner said yes to).
+func pickRunning(_ names: [String], _ want: String, exact: Bool = false) -> Int? {
+    if exact { return names.firstIndex { $0 == want } }
     let w = want.lowercased().trimmingCharacters(in: .whitespaces)
     return names.firstIndex { $0.lowercased() == w } ?? names.firstIndex { appMatches($0, want) }
 }
+func runningPick(_ want: String, exact: Bool = false) -> NSRunningApplication? {
+    let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+    return pickRunning(apps.map { $0.localizedName ?? "" }, want, exact: exact).map { apps[$0] }
+}
+/// The app the sidecar may bring forward for this run (ROAMIES_FORWARD): set only after the owner's yes to a question
+/// naming that app, as resolve picked it. Nothing else is ever unhidden or activated to find 'app:X' (B4-1, B4-2).
+let FORWARD = ProcessInfo.processInfo.environment["ROAMIES_FORWARD"].flatMap { $0.isEmpty ? nil : $0 }
+func mayBringForward(_ picked: String?, _ forward: String?) -> Bool { picked != nil && picked == forward }
 
 /// Resolves a target to a window. "front" = the frontmost app that isn't Roamies.
 func resolve(_ target: String) -> Win? {
@@ -118,10 +130,8 @@ func resolveWin(_ target: String) -> Win? {
     if target.hasPrefix("app:") {
         let name = String(target.dropFirst(4))
         if let w = mainWindow(all.filter { appMatches($0.app, name) }) { return w }
-        // Running but no visible window (hidden or minimised): bring it forward and look again.
-        let running = NSWorkspace.shared.runningApplications
-        if let i = pickRunning(running.map { $0.localizedName ?? "" }, name) {
-            let app = running[i]
+        // Running but no visible window (hidden or minimised): brought forward only when it is the app said yes to.
+        if let app = runningPick(name), mayBringForward(app.localizedName, FORWARD) {
             app.unhide()
             app.activate(options: [.activateAllWindows])
             Thread.sleep(forTimeInterval: 0.6)
@@ -1788,10 +1798,8 @@ func manage(_ spec: [String: Any]) -> Never {
     if let id = spec["window"] as? Int { target = all.first { $0.id == id }; if target == nil { fail("No window with id \(id) (it may have closed). Call list_windows again.") } }
     let running: NSRunningApplication? = {
         if let t = target { return NSRunningApplication(processIdentifier: t.pid) }
-        if !appName.isEmpty {
-            let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
-            return apps.first { ($0.localizedName ?? "").lowercased() == appName.lowercased() } ?? apps.first { appMatches($0.localizedName ?? "", appName) }
-        }
+        // exact: the sidecar named this very app (resolve's pick) in its question, so no other app is acted on (B4-3).
+        if !appName.isEmpty { return runningPick(appName, exact: spec["exact"] as? Bool == true) }
         return NSWorkspace.shared.frontmostApplication
     }()
     guard let app = running else { fail(appName.isEmpty ? "No app is in front." : "\(appName) isn't open.") }
@@ -1861,6 +1869,13 @@ case "--self-test":
     check("an app with only a small window still has it", mainWindow([win(1, "", 183, 88)])?.id == 1)
     check("app:Photos brings Photos forward, not Adobe Photoshop running before it", pickRunning(["Adobe Photoshop 2025", "Photos"], "Photos") == 1)
     check("a part of the name still finds its app", pickRunning(["Finder", "Google Chrome"], "chrome") == 1 && pickRunning(["Finder"], "Notes") == nil)
+    // B4-1: names compare by grapheme cluster ("r" and a joiner are one), so "Finder\u{200D} Mail" is Mail, not Finder.
+    check("a joiner after a name's last letter keeps that name from matching", !appMatches("Finder", "Finder\u{200D} Mail") && appMatches("Mail", "Finder\u{200D} Mail"))
+    check("so the app brought forward for it is Mail", pickRunning(["Finder", "Mail"], "Finder\u{200D} Mail") == 1)
+    // B4-1..B4-3: nothing is brought forward without the yes naming that very app; exact picks only that app.
+    check("no app is brought forward without a yes", !mayBringForward("Mail", nil) && !mayBringForward(nil, "Mail"))
+    check("a yes to Photos never brings Photoshop forward", !mayBringForward("Adobe Photoshop 2025", "Photos") && mayBringForward("Photos", "Photos"))
+    check("manage with the name said yes to acts on that app or none", pickRunning(["Xcode"], "Code", exact: true) == nil && pickRunning(["Xcode", "Code"], "Code", exact: true) == 1 && pickRunning(["Xcode"], "Code") == 0)
     let main = Win(id: 2, pid: 1, app: "CapCut", title: "CapCut", x: 0, y: 39, w: 1800, h: 1066), badge = Win(id: 1, pid: 1, app: "CapCut", title: "", x: 1625, y: 1029, w: 183, h: 88)
     check("a capture that also shows a child window maps over both", shotArea(main, [badge, main], [1568, 935]) == CGRect(x: 0, y: 39, width: 1808, height: 1078))
     check("a capture of the window alone maps over the window", shotArea(main, [badge, main], [1568, 929]) == nil)
@@ -2047,6 +2062,16 @@ case "front":
         if let d = documentPath(win) { o["document"] = d }
     }
     if !title.isEmpty { o["title"] = title }
+    out(o)
+
+// Which window 'app:X' uses on screen, and the running app it would bring forward when none is (manage acts on that one
+// too), doing neither: the sidecar names that app when it asks, then passes it back in ROAMIES_FORWARD.
+case "resolve":
+    guard args.count >= 2, args[1].hasPrefix("app:") else { fail("usage: resolve app:<name>") }
+    let name = String(args[1].dropFirst(4))
+    var o: [String: Any] = ["ok": true]
+    if let w = mainWindow(windows().filter { appMatches($0.app, name) }) { o["window"] = winInfo(w) }
+    if let n = runningPick(name)?.localizedName { o["running"] = n }
     out(o)
 
 case "locate":

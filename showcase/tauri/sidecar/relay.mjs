@@ -194,16 +194,20 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
   const { emit, signal, onInput = () => {}, done } = h;
   const usage = {};
   let prompt = text, again = 0;
-  // carried: this run's prompt is the owner's additions (missed, or held at done), already counted seen: a run cut
-  // short (an error, max turns) leaves them unanswered too, and says so (R11i-6).
-  let carried = false, told = false;
-  const unsaid = () => { if (!told) emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' }); told = true; };
+  // carried: this run's prompt is the owner's additions (missed, or held at done), already counted seen. Each run whose
+  // own prompt didn't get its answer (an error, max turns, a stream that just ended) says so, once for that run's words;
+  // one that answered them never does (R11i-6, B4-4..B4-7). Words a run left (missed) are named by the run they're
+  // carried into, by TOO_MANY_ADDED, or by the error.
+  let carried = false;
+  const unsaid = () => emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' });
   // R11-2: words the session took (so Hydra counts them seen) but ended before answering (max turns, an error).
   const left = () => (typeof agent.unanswered === 'function' ? agent.unanswered() : []);
   for (;;) {
     const stream = agent.prompt(prompt);
     onInput((t) => agent.addInput(`${INPUT_PREFIX}${t}`));
     let cut = false;
+    // Whether this run's own prompt got its answer: Claude Code says (answered()); another agent knows only max turns.
+    const answered = () => (typeof agent.answered === 'function' ? agent.answered() : !cut);
     try {
       for await (const e of agentEvents(stream)) {
         if (e.type === 'agent_done') for (const [k, v] of Object.entries(e.totalUsage ?? {})) if (Number.isFinite(v)) usage[k] = (usage[k] ?? 0) + v;
@@ -211,17 +215,17 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
         onEvent(e);
       }
     } catch (e) {
-      if (signal?.aborted || (!carried && !left().length)) throw e;
+      cut = true;
+      if (signal?.aborted || ((!carried || answered()) && !left().length)) throw e;
       throw Object.assign(new Error(`${String(e?.message ?? e).slice(0, 400)} What you added while I worked was not answered. Say it again.`), e?.code ? { code: e.code } : {});
     }
     if (signal?.aborted) throw new Error('Stopped.');
     onRound();
-    if (carried && cut) unsaid();
+    if (carried && !answered()) unsaid();
     // Taken but not answered (it hit max turns): answered in the same session before the turn ends, capped.
     const missed = left();
     if (missed.length) {
       if (++again <= HOLD_MAX) { prompt = missed.join('\n\n'); carried = true; continue; }
-      unsaid();
       emit(TOO_MANY_ADDED);
       return;
     }

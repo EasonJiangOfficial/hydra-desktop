@@ -177,7 +177,6 @@ if (['darwin', 'win32'].includes(process.platform)) {
   // ---- H4: a relay turn never brings a hidden app forward before the owner says yes: draw, read_window,
   // take_screenshot and act_in_app on it ask first, naming the app (draw and the reads ask once for both steps), and a
   // no stops before any helper call that can unhide it. A yes brings it forward with no second question about looking.
-  // On this Mac nothing asks, as before.
   const preview = { id: 1, pid: 10, app: 'Preview', title: 'n.txt', doc, text: 'x' };
   const msgs = { id: 2, pid: 20, app: 'Messages', title: 'Alex', text: 'Meet at 6' };
   const hiddenMsgs = { frontPid: 10, hidden: ['Messages'], wins: [preview, msgs] };
@@ -207,9 +206,10 @@ if (['darwin', 'win32'].includes(process.platform)) {
   assert.ok(h4.startsWith('Drew '), h4);
   assert.deepEqual(asks, ['Bring Messages forward and look at its window? It has no window on screen now.'], 'one question');
   assert.ok(unhid());
+  // On this Mac too (B4: no app is brought forward without a yes naming it), the same one question.
   reset(hiddenMsgs, false);
   assert.ok((await ring('Messages', 'Meet at 6')).startsWith('Drew '));
-  assert.deepEqual(asks, [], 'on this Mac nothing asks');
+  assert.deepEqual(asks, ['Bring Messages forward and look at its window? It has no window on screen now.'], 'on this Mac it asks too');
 
   // ---- H6: the shared fake sends what the helpers send: 'windows' 30 at most (main.swift: all with 'all', and says
   // so), frontApp, hands-win's exe; find-text a match kind, 80 characters at most, 12 windows; ocr-find whole lines

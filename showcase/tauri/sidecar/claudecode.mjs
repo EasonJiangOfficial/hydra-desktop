@@ -427,13 +427,15 @@ async function* claudeCodeLoop(messages, o) {
 
   // A warm spare if one was started for exactly this; else (or if it turns out dead) a fresh process.
   const link = { signal: o.signal, onEvent: (event) => channel.push({ kind: 'event', event }), stderr: (d) => { stderrTail = (stderrTail + d).slice(-STDERR_TAIL_CHARS); } };
-  let run, input, q, warmUsed = false;
+  // head: this run's own prompt, always the first message (headDone: its turn got its answer, o.onAnswered).
+  const head = toSdkUserMessage(first);
+  let run, input, q, warmUsed = false, headDone = false;
   const begin = async (s) => {
     const fresh = {};
     run = s ?? { link: fresh, ...sdkOptions(o, o.resume, fresh) };
     Object.assign(run.link, link);
     input = new Channel();
-    input.push(toSdkUserMessage(first));
+    input.push(head);
     // A spare that died while parked: what was added into its input goes into the fresh one too (R11e-8).
     for (const a of added) if (!a.done) input.push(a.m);
     const w = s ? await s.warm : null;
@@ -546,6 +548,8 @@ async function* claudeCodeLoop(messages, o) {
       // follows, even when it came before this turn's answer started (sent while the last request was out). An older
       // Claude Code doesn't say: an addition after the last answer started waits for its own answer, as before.
       settle(took, true);
+      // The first turn to end well is the head's own: the head is always the first message it takes.
+      headDone = true;
       turnAt = step; turnTook = null;
       if (took) { if (added.some((a) => !a.done)) continue; }
       else if (addedAt > answeredAt) continue;
@@ -557,6 +561,9 @@ async function* claudeCodeLoop(messages, o) {
     // sent (one sent during the final answer's first token is before finalAt, R11c-B1 follow-up), on a cut or a stream
     // that simply ended (R11e-7). Else by step, as before.
     o.onLeft?.(added.filter((a) => !a.done && ((byUuid && !aborted) || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
+    // Answered: its turn ended well, or the run was cut (an error, max turns, a stream that just ended) after that turn's
+    // final answer, as settle counts it for additions. Else not: carried words in it are then unanswered (B4-5..B4-7).
+    o.onAnswered?.(headDone || (!aborted && finalAt > 0 && finalAt === answeredAt));
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
@@ -591,7 +598,7 @@ export function resumeId(state, messages) {
  */
 export class ClaudeCodeAgent {
   #running = false;
-  #add = null; #early = []; #left = [];
+  #add = null; #early = []; #left = []; #answered = false;
   constructor(options) {
     this.options = options;
     this.resume = options.resume ?? null;
@@ -608,12 +615,14 @@ export class ClaudeCodeAgent {
   addInput(text) { return this.#add ? this.#add(text) : false; }
   /** After a prompt's run: the added words it took but ended before answering (max turns, an error), as given. */
   unanswered() { return [...this.#early, ...this.#left]; }
+  /** After a prompt's run: whether that prompt's own turn got its answer (false when the run never got that far). */
+  answered() { return this.#answered; }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
     this.messages.push({ role: 'user', content });
     // Additions before Claude Code has started wait for it (the stream starts when it is first read).
-    this.#early = []; this.#left = [];
+    this.#early = []; this.#left = []; this.#answered = false;
     this.#add = (t) => { this.#early.push(t); return true; };
     return new AgentStream(this.#run(), () => { this.#running = false; });
   }
@@ -632,6 +641,7 @@ export class ClaudeCodeAgent {
         ...o, resume,
         takeInput: (fn) => { this.#add = fn; if (fn) for (const t of this.#early.splice(0)) fn(t); },
         onLeft: (l) => { this.#left = l; },
+        onAnswered: (v) => { this.#answered = v; },
         onSessionId: (id) => { sessionId = id; },
         onRateLimit: o.onRateLimit ?? ((info) => void recordClaudeCodeRateLimit(info).catch(() => {})),
       });

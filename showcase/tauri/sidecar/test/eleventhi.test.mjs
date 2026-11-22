@@ -87,7 +87,7 @@ if (['darwin', 'win32'].includes(process.platform)) {
   for (const c of ['open', 'osascript', 'screencapture', 'sips']) fs.writeFileSync(path.join(bin, c), `#!/bin/sh\necho ${c} "$@" >> '${launched}'\nexit 1\n`, { mode: 0o755 });
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   const fake = fakeHands(dir);
-  const { createTools, appMatches, helperFinds } = await import('../tools.mjs');
+  const { createTools, appMatches } = await import('../tools.mjs');
   const asks = [];
   let remote = true, answer = () => 'Allow';
   const t = createTools({ remote: () => remote, allowActions: () => true, ui: (msg) => { if (msg?.e?.type === 'draw') setTimeout(() => t.ink.started(msg.e.id, msg.e.seg), 5); }, ask: async (o) => { asks.push(o.placeholder); return answer(o.placeholder); }, openUrl: async () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME, skills: { changed: () => {} } });
@@ -99,10 +99,9 @@ if (['darwin', 'win32'].includes(process.platform)) {
   const read = (target) => said(T('read_window').execute({ target }, {}));
   const unhid = () => fake.calls().filter((c) => c[0] === 'UNHIDE').map((c) => c[1]);
 
-  // ---- I1: a yes to "Bring Photos forward and look at its window?" covers only a window of Photos itself. The helper
-  // brought Adobe Photoshop 2025 forward instead (its fuzzy match): its window is asked about by name before any of its
-  // text or picture reaches the model, and a no keeps it out. With Photos running too, Photos is the one brought forward
-  // (main.swift pickRunning), and its window needs no second question.
+  // ---- I1: with only Adobe Photoshop 2025 running hidden, 'Photos' would bring it forward (the helper's fuzzy match):
+  // the question names Photoshop itself (B4-2, resolve), and a no keeps it hidden and out. With Photos running too,
+  // Photos is the one brought forward (main.swift pickRunning), and its window needs no second question.
   const ph = { id: 5, pid: 50, app: 'Adobe Photoshop 2025', title: 'Acme contract mockup', text: 'CONFIDENTIAL Acme pricing 4.2M' };
   const photos = { id: 6, pid: 60, app: 'Photos', title: 'Library', text: 'Holiday' };
   const finder = { id: 7, pid: 70, app: 'Finder', title: 'Downloads', text: 'x' };
@@ -112,7 +111,8 @@ if (['darwin', 'win32'].includes(process.platform)) {
     reset({ frontPid: 70, hidden: ['Adobe Photoshop 2025'], wins: [ph, finder] }, true, onlyBring);
     const r = await run();
     assert.ok(!/Acme pricing|4\.2M|^Screenshot of|^Drew /.test(r), `${name}: ${r}`);
-    assert.deepEqual(asks.slice(0, 2), [BRING_PHOTOS, 'Look at the Adobe Photoshop 2025 window "Acme contract mockup"? It has no file I can check, so it could show anything (a password, a message, a terminal).'], name);
+    assert.deepEqual(asks, ['Bring Adobe Photoshop 2025 forward and look at its window? It has no window on screen now.'], name);
+    assert.deepEqual(unhid(), [], `${name}: Photoshop stays hidden`);
     reset({ frontPid: 70, hidden: ['Adobe Photoshop 2025', 'Photos'], wins: [ph, photos, finder] }, true, onlyBring);
     const r2 = await run();
     assert.deepEqual(unhid(), ['Photos'], name);
@@ -135,26 +135,23 @@ if (['darwin', 'win32'].includes(process.platform)) {
   }
 
   // ---- I3: a relay turn on 'browser' with a LibreWolf window on screen (main.swift's browsers don't include it) and
-  // Safari hidden: the helper would bring Safari forward, so it's asked first, and a no stops it. read_window,
-  // take_screenshot, draw and act_in_app alike.
+  // Safari hidden: the helper would bring Safari forward, so it's asked first, naming Safari (B4: the helper's own pick,
+  // not 'browser'), and a no stops it. read_window, take_screenshot, draw and act_in_app alike.
   const wolf = { id: 11, pid: 110, app: 'LibreWolf', title: 'Bank', text: 'Balance' };
   const safari = { id: 12, pid: 120, app: 'Safari', title: 'Mail', text: 'Balance' };
   for (const [name, run, q] of [
-    ['read_window', () => read('browser'), 'Bring browser forward and look at its window? It has no window on screen now.'],
-    ['take_screenshot', () => shot('browser'), 'Bring browser forward and look at its window? It has no window on screen now.'],
-    ['draw', () => ring('browser', 'Balance'), 'Bring browser forward and look at its window? It has no window on screen now.'],
-    ['act_in_app', () => said(T('act_in_app').execute({ target: 'browser', steps: [{ do: 'click_text', text: 'Balance' }] }, {})), 'Bring browser forward? It has no window on screen now.'],
+    ['read_window', () => read('browser'), 'Bring Safari forward and look at its window? It has no window on screen now.'],
+    ['take_screenshot', () => shot('browser'), 'Bring Safari forward and look at its window? It has no window on screen now.'],
+    ['draw', () => ring('browser', 'Balance'), 'Bring Safari forward and look at its window? It has no window on screen now.'],
+    ['act_in_app', () => said(T('act_in_app').execute({ target: 'browser', steps: [{ do: 'click_text', text: 'Balance' }] }, {})), 'Bring Safari forward? It has no window on screen now.'],
   ]) {
     reset({ frontPid: 110, hidden: ['Safari'], wins: [wolf, safari] }, true, () => "Don't allow");
     const r = await run();
     assert.equal(asks[0], q, `${name}: ${r}`);
     assert.deepEqual(unhid(), [], `${name}: nothing was brought forward`);
   }
-  // What each helper itself finds, no more (appMatches finds more, to check more).
-  assert.ok(!helperFinds({ app: 'LibreWolf' }, 'browser', false) && appMatches({ app: 'LibreWolf' }, 'browser'));
-  assert.ok(helperFinds({ app: 'Safari' }, 'browser', false) && helperFinds({ app: 'LibreWolf', exe: 'librewolf' }, 'browser', true));
-  assert.ok(!helperFinds({ app: 'Opera', exe: 'launcher' }, 'browser', true) && !helperFinds({ app: 'Photoshop' }, 'photo.exe', false));
-  assert.ok(helperFinds({ app: 'Notepad', exe: 'notepad' }, 'notepad.exe', true) && helperFinds({ app: 'Adobe Photoshop 2025' }, ' Photoshop ', false));
+  // appMatches finds more than the helper (LibreWolf for 'browser'), to check more windows.
+  assert.ok(appMatches({ app: 'LibreWolf' }, 'browser'));
 
   // ---- I4: the shared fake sends what hands-win sends: the program's file name without .exe, and 'browser' by it.
   const helper = (...a) => JSON.parse(execFileSync(process.execPath, [process.env.ROAMIES_HANDS, ...a], { encoding: 'utf8' }));

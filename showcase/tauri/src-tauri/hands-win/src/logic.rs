@@ -113,6 +113,12 @@ pub fn app_matches(app: &str, exe: &str, want: &str) -> bool {
     [app.to_lowercase(), exe.to_lowercase()].iter().any(|a| !a.is_empty() && (a == w || a.contains(w) || w.contains(a.as_str())))
 }
 
+/// Whether 'app:X' may bring back the minimised app it picked: only the app the sidecar names in ROAMIES_FORWARD, set
+/// after the owner's yes to a question naming it (the resolve command's pick). Nothing else is ever restored (B4-1, B4-2).
+pub fn may_bring_forward(picked: &str, forward: &str) -> bool {
+    !forward.is_empty() && picked == forward
+}
+
 /// Apps Sidekick may point at but never type or click in (by program file name): typing into a terminal would run
 /// commands past every check, and the others hold passwords or security settings.
 pub fn hands_off(exe: &str) -> Option<&'static str> {
@@ -783,6 +789,7 @@ pub fn self_test() -> Vec<(&'static str, bool)> {
         ("an app is found by its program name", app_matches("Microsoft Edge", "msedge", "msedge") && app_matches("Notepad", "notepad", "notepad.exe")),
         ("an app is found by its own name", app_matches("Microsoft Edge", "msedge", "edge") && !app_matches("Microsoft Edge", "msedge", "")),
         ("'browser' finds a browser, not other apps", app_matches("Google Chrome", "chrome", "browser") && !app_matches("Notepad", "notepad", "browser")),
+        ("no app is brought back without a yes naming it", !may_bring_forward("Notepad", "") && !may_bring_forward("Adobe Photoshop 2025", "Photos") && may_bring_forward("Photos", "Photos")),
         ("typing after a click in an app that hides its fields", may_type(false, Some(CT_WINDOW), true) && may_type(false, Some(CT_PANE), true)),
         ("a character types as one key down and up", unicode_strokes('ü') == vec![(0xFC, false), (0xFC, true)]),
         ("an emoji's two halves go down together, then up", unicode_strokes('\u{1F600}') == vec![(0xD83D, false), (0xDE00, false), (0xD83D, true), (0xDE00, true)]),

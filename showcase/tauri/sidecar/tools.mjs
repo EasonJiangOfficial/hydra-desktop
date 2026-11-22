@@ -187,7 +187,8 @@ async function launchApp(name, hands) {
   if (r.err) return false;
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 200));
-    if (await hands('locate', `app:${n}`).then((r) => r?.ok !== false && r?.window, () => false)) { await new Promise((r) => setTimeout(r, 300)); return true; }
+    // resolve: its window on screen, with nothing brought forward or asked while it starts.
+    if (await hands('resolve', `app:${n}`).then((r) => r?.ok !== false && r?.window, () => false)) { await new Promise((r) => setTimeout(r, 300)); return true; }
   }
   return false;
 }
@@ -312,19 +313,6 @@ export function appMatches(w, want) {
   if (['browser', 'web browser', 'my browser'].includes(x)) return names.some((n) => HELPER_BROWSERS.has(n));
   return names.some((a) => a === x || a.includes(x) || x.includes(a));
 }
-/** What this platform's helper itself finds on screen for 'app:X', never more (main.swift appMatches: its own browser
- *  names, no '.exe' taken off; hands-win app_matches: 'browser' by program file name): a window only appMatches takes
- *  (LibreWolf for 'browser' on a Mac) isn't one the helper finds, so it brings a hidden app forward instead (R11i-3). */
-const MAC_BROWSERS = ['Brave Browser', 'Google Chrome', 'Safari', 'Arc', 'Firefox', 'Microsoft Edge', 'Opera', 'Vivaldi', 'Chromium', 'Orion', 'Zen'];
-const WIN_BROWSER_EXES = ['chrome', 'msedge', 'brave', 'firefox', 'opera', 'vivaldi', 'chromium', 'arc', 'zen', 'librewolf', 'waterfox', 'floorp', 'thorium'];
-export function helperFinds(w, want, win = process.platform === 'win32') {
-  const low = (s) => String(s ?? '').toLowerCase().normalize('NFC');
-  const x = win ? low(want).trim().replace(/\.exe$/, '') : low(want).replace(/^[\p{Zs}\t]+|[\p{Zs}\t]+$/gu, '');
-  if (!x) return false;
-  if (['browser', 'web browser', 'my browser'].includes(x)) return win ? WIN_BROWSER_EXES.includes(low(w?.exe)) : MAC_BROWSERS.includes(String(w?.app ?? ''));
-  return [w?.app, ...(win ? [w?.exe] : [])].map(low).filter(Boolean).some((a) => a === x || a.includes(x) || x.includes(a));
-}
-
 export function stepsText(steps, { clipboard } = {}) {
   const q = (t) => JSON.stringify(String(t ?? ''));
   const one = (s) => {
@@ -387,11 +375,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const where = !inWhat || inWhat === 'front' ? 'the app in front' : inWhat;
     return `${/^Step \d+/.exec(t)?.[0] ?? 'A step'} didn't work in ${where}. What its window shows isn't passed on until ${userName} says yes to reading it.`;
   }
-  // A relay turn (R11h-4): to find 'app:X' the helpers bring a running app with no window on screen forward (main.swift
-  // resolveWin unhides and activates it; hands-win restores a minimised one), on a Mac the owner isn't at. That's a Mac
-  // action of its own: asked first, naming the app, before any helper call that can do it (hands() checks every one).
-  // forward: the apps said yes to in this request.
-  let forward = { turn: -1, apps: new Set() };
+  // To find 'app:X' with no window on screen the helpers can bring a running app forward (main.swift resolveWin unhides
+  // and activates it; hands-win restores a minimised one). That's a Mac action of its own (R11h-4): asked first, on this
+  // Mac and in a relay turn, naming the app the helper itself picks (resolve, never a guess here: B4-1, B4-2), before
+  // any helper call that can do it (hands() checks every one). The helper does it only for the app passed back in
+  // ROAMIES_FORWARD after that yes. forward: in this request, each name asked for -> the app said yes to.
+  let forward = { turn: -1, apps: new Map() };
   const TARGET_AT = { locate: 1, ui: 1, 'locate-control': 1, 'ocr-find': 1, capture: 2 };
   const appOf = (args) => {
     if (args[0] === 'act') { try { const p = JSON.parse(args[1]); return p.window == null && p.app ? String(p.app) : null; } catch { return null; } }
@@ -401,20 +390,23 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // look: the question asks to look at its window too (one question, not two). Returns the name said yes to then, for
   // that one read's windowShows only (looked), or null (R11i-1, R11i-5).
   async function bringForward(name, ctx, look = false) {
-    if (!remote() || !String(name ?? '').trim()) return null;
-    if (forward.turn !== turn) forward = { turn, apps: new Set() };
-    const k = String(name).trim().toLowerCase();
-    if (forward.apps.has(k)) return null;
-    // Listed (on screen) as the helper itself finds it: it uses that window as it is. The list couldn't be read: asked,
-    // as for a hidden app.
-    if ((await hands('windows', 'all').catch(() => null))?.windows?.some((w) => helperFinds(w, name))) return null;
-    if (!(await confirm(`Bring ${name} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx))) throw new Error(`${userName} said no, so I didn't bring ${name} forward.`);
-    forward.apps.add(k);
-    return look ? k : null;
+    if (!String(name ?? '').trim()) return null;
+    if (forward.turn !== turn) forward = { turn, apps: new Map() };
+    if (forward.apps.has(name)) return null;
+    // On screen as the helper finds it (it uses that window as it is), or nothing running to bring forward (the call
+    // then fails and asks to open it). Couldn't be read: nothing is brought forward.
+    const r = await hands('resolve', `app:${name}`).catch(() => null);
+    const real = r && !r.window && r.running ? String(r.running) : null;
+    if (!real) return null;
+    if (!(await confirm(`Bring ${real} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx))) throw new Error(`${userName} said no, so I didn't bring ${real} forward.`);
+    forward.apps.set(name, real);
+    return look ? real.trim().toLowerCase() : null;
   }
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Hydra app.');
-    if (remote()) await bringForward(appOf(args));
+    const app = appOf(args);
+    if (app != null) await bringForward(app);
+    const fwd = app != null && forward.turn === turn ? forward.apps.get(app) : undefined;
     // Acting in an app may take the real cursor: meanwhile clicks go through the overlay, even where the Sidekick or
     // its bubble sits on the spot being clicked.
     const acting = args[0] === 'act';
@@ -429,7 +421,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       else if (ev.ev === 'step' && Array.isArray(ev.bounds) && ev.bounds.length === 4 && ev.bounds.every(Number.isFinite)) ui({ kind: 'hands', step: { bounds: ev.bounds, ...(ev.do === 'hover' ? { hover: true } : {}) } });
     } : undefined;
     let r;
-    try { r = await runHands(args, { timeout: 120_000, onLine }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
+    try { r = await runHands(args, { timeout: 120_000, onLine, env: { ...process.env, ROAMIES_FORWARD: fwd ?? '' } }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
     // Every act error goes through actWords (every caller of act: act_in_app, draw's typing).
     const told = (m) => (acting ? actWords(m, (() => { try { return JSON.parse(args[1]).planApp; } catch { return ''; } })()) : m);
     let res;
@@ -508,7 +500,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
       if (whole || blockOnly || ok?.has(key(w))) continue;
       if (v.level === ASK && v.app && okApp && !remote() && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
-      if (v.level === ASK && v.app && looked && remote() && v.app.trim().toLowerCase().normalize('NFC') === looked.normalize('NFC')) continue;
+      if (v.level === ASK && v.app && looked && v.app.trim().toLowerCase().normalize('NFC') === looked.normalize('NFC')) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
     if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
@@ -594,7 +586,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     return { content: [{ type: 'text', text: `Screenshot of ${what}${dims}.` }, await imageBlock(file, 'image/jpeg')] };
   }
   // target: "screen", "front" (the window you're working in), an app name ("browser", "Safari", "Figma"),
-  // or "window:<id>" from list_windows. Apps that are open but hidden or minimised are brought forward.
+  // or "window:<id>" from list_windows. Apps that are open but hidden or minimised are brought forward after a yes.
   async function screenshot({ target = 'screen' } = {}, ctx) {
     const file = path.join(os.tmpdir(), `sidekick-${Date.now()}.jpg`);
     // Windows without the helper (or when it fails on the whole screen): PowerShell's screenshot below.
@@ -1288,12 +1280,16 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       execute: async ({ do: what, app, window, layout }, ctx) => {
         if (what !== 'switch' && !allowActions()) throw new Error(actionsOff);
         if (what === 'arrange' && !layout) throw new Error('arrange needs a layout: left, right, top, bottom, full or center.');
-        const spec = { do: what === 'switch' ? 'activate' : what, ...(app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
         // Owner's rule (DESIGN.md "Mac actions"): every app action asks, naming the real app.
         // With a window, the helper acts on that window's own app, whatever app says (R11c-4): that app is named.
         const owner = window != null ? (await hands('locate', `window:${window}`).catch(() => null))?.window?.app : null;
         if (window != null && !owner) throw new Error(`There's no window ${window} now. Use list_windows for its id.`);
-        const name = owner ?? app ?? (await hands('front').catch(() => null))?.app ?? 'the app in front';
+        // With an app, the helper picks a running app by its name first, else by a part of it ("Code" is Xcode): that
+        // app is named, and the helper acts on exactly it or on nothing (exact, B4-3).
+        const real = window == null && app ? (await hands('resolve', `app:${app}`).catch(() => null))?.running : null;
+        if (window == null && app && !real) throw new Error(`${app} isn't open.`);
+        const spec = { do: what === 'switch' ? 'activate' : what, ...(real ? { app: String(real), exact: true } : app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
+        const name = owner ?? real ?? (await hands('front').catch(() => null))?.app ?? 'the app in front';
         const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
         if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
         agentChangesScreen();

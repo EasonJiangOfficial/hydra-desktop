@@ -386,15 +386,23 @@ pub fn resolve(target: &str) -> Option<Win> {
     if let Some(w) = main_window(&mine) {
         return Some(w.clone());
     }
-    // Running but minimised: bring it back and look again.
-    let h = top_level().into_iter().find(|&h| unsafe { IsIconic(h).as_bool() } && win_of(h, true).is_some_and(|w| app_matches(&w.app, &w.exe, name)))?;
-    let pid = win_of(h, true)?.pid;
+    // Running but minimised: brought back only when it is the app said yes to (ROAMIES_FORWARD), then looked at again.
+    let (h, w) = minimised(name)?;
+    if !crate::logic::may_bring_forward(&w.app, &std::env::var("ROAMIES_FORWARD").unwrap_or_default()) {
+        return None;
+    }
+    let pid = w.pid;
     unsafe {
         let _ = ShowWindow(h, SW_RESTORE);
     }
     force_front(h);
     sleep(Duration::from_millis(600));
     windows().into_iter().find(|w| w.pid == pid)
+}
+
+/// The first minimised window 'app:X' would bring back, and its app as resolve names it.
+pub fn minimised(name: &str) -> Option<(HWND, Win)> {
+    top_level().into_iter().filter(|&h| unsafe { IsIconic(h).as_bool() }).find_map(|h| win_of(h, true).filter(|w| app_matches(&w.app, &w.exe, name)).map(|w| (h, w)))
 }
 
 fn alt_tap() {
