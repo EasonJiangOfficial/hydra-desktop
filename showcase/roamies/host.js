@@ -496,7 +496,8 @@
     if (m.type === 'state' && m.state === 'listening') {
       hearing = true;
       dropAutoListen();
-      if (ask) finishAsk(null);
+      // A yes/no stays open: the take may be its spoken answer (the sidecar closes it when it is). Anything else closes.
+      if (ask && !ask.choices) finishAsk(null);
       endTalk();
       heard = null;
       panel()?.close();
@@ -506,7 +507,7 @@
         waveTurn = false;
         thought?.end(); thought = null;
         if (a.visible) a.hide();
-        N().listen(); // the listen chime plays in the voice helper (cue.swift), never muted by mute-while-listening
+        if (!ask?.choices) N().listen(); // a yes/no waiting keeps its question in the capsule // the listen chime plays in the voice helper (cue.swift), never muted by mute-while-listening
         return;
       }
       // macOS: the listening shows as voice bars beside the cursor, so the sidekick steps away until it answers.

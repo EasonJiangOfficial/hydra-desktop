@@ -97,7 +97,7 @@ function fakeClock() {
   assert.ok(PROGRESS.every((l) => !FILLERS.includes(l)), 'progress lines are not openers');
   assert.match(side, /progress\.touch\(\);/, 'model text touches it');
   assert.match(side, /if \(msg\.id === turnVoice\?\.id\) turnProgress\?\.touch\(pcmSecs\(msg\)\);/, 'and the turn\'s audio, by its length');
-  assert.match(side, /if \(e\.stopReason !== 'tool_use'\) progress\.stop\(\);/, 'the answer stops it');
+  assert.match(side, /if \(e\.stopReason !== 'tool_use'\) progress\.pause\(\);/, 'the answer pauses it (the lane E fix round resumes it on later work)');
 }
 
 // ---- C2: the voice takes a progress line after it began the answer (both engines), and logs progress:true.
@@ -153,7 +153,7 @@ function fakeClock() {
   for (const t of ['open Safari', 'yes no', 'no, open the other one', 'I said yes to the email', '', 'what is the weather like today in Paris']) assert.equal(spokenAnswer(t), null, t);
   assert.equal(spokenQuestion('Open https://ui.elevenlabs.io/?'), 'Can I open ui.elevenlabs.io? Say yes or no.', 'the owner\'s case, as he hears it');
   assert.equal(spokenQuestion('Search the web for "orbs"?'), 'Can I search the web for "orbs"? Say yes or no.');
-  assert.match(spokenQuestion('In Notes, every step I\'d take:\n1. Click New'), /details are on the screen\. Say yes or no\.$/, 'a long one points at the screen');
+  assert.match(spokenQuestion('In Notes, every step I\'d take:\n1. Click New'), /^Can I act in Notes\? The steps are on the screen\. Say yes or no\.$/, 'a plan names its app and points at the screen');
   assert.equal(skippedLine('Open https://ui.elevenlabs.io/?'), "I didn't hear a yes, so I skipped opening it.");
   assert.equal(skippedLine('Weird question?'), "I didn't hear a yes, so I skipped that.");
   assert.equal(ASK_DEADLINE_MS, 60_000);
@@ -210,7 +210,7 @@ function fakeClock() {
   // Wiring: every local ask goes through trackAsk; a spoken yes or no reaches the ask Hydra said, not the turn.
   assert.match(side, /const a = trackAsk\(\{ id, route, question: opts\.prompt \|\| opts\.placeholder, choices: !!opts\.choices, voice, log: logLine,/);
   assert.match(side, /const voice = opts\.choices && !onboarding && busy && turnVoice && !voiceMuted \? turnVoice : null;/, 'said only in a voice turn');
-  assert.match(side, /const asked = \[\.\.\.yesNoOpen\]\.find\(\(\[, w\]\) => w\.a\.voiced && w\.a\.open\), said = asked && spokenAnswer\(text\);\n  if \(said\) \{[^\n]*w\.a\.answer\(said === 'yes' \? 'yes' : null, 'voice'\); return; \}\n  if \(addOnTake\)/, 'a yes or no answers the ask before the add-on');
+  assert.match(side, /const asked = askForTake\(yesNoOpen, \{ text, takeAt \}\);\n  if \(asked\) \{[^\n]*w\.a\.answer\(said === 'yes' \? 'yes' : null, 'voice'\); return; \}\n  if \(addOnTake\)/, 'a yes or no answers the ask before the add-on');
   assert.match(side, /waiting: \(\) => yesNoOpen\.size > 0/, 'no progress line over an ask');
   assert.match(panel, /if \(askNow\) \{ askHeld = askNow\.m; closeAsk\(askNow\.id, false\); \}/, 'the panel losing focus never answers no');
 }

@@ -118,7 +118,7 @@ assert.ok(est > 34_000 && est < 38_000, `about 36K estimated tokens (${est})`);
   assert.match(side, /if \(!lastInput && session\) \{ const chat = approxTokens\(session\.messages\); lastInput = \{ session: session\.id, chat, fixed: null,/, 'no count: our estimate, unmeasured');
   assert.ok(!/lastInput = \{ session: session\?\.id, tokens: seen/.test(side), 'a call\'s whole prompt is never the chat');
   assert.match(side, /if \(!floorLogged\) \{ floorLogged = true; logLine\('context_floor'/, 'the fixed floor is logged once per process');
-  assert.match(side, /if \(retrying\) retryInfo = null;\n  await foldFirst\(\);[^\n]*\n  const notReady = await readyAgent\(\);/, 'a chat past the whole budget waits for the fold under way, before the agent is built');
+  assert.match(side, /if \(retrying\) retryInfo = null;\n[\s\S]{0,300}const fold = foldFirst\(\);\n  if \(fold\) \{[\s\S]{0,900}\n  \}\n  const notReady = await readyAgent\(\);/, 'a chat past the whole budget waits for the fold under way, before the agent is built');
   assert.match(side, /const foldFirst = \(\) => \(compacting && lastInput\?\.session === session\?\.id && \(lastInput\?\.chat \?\? 0\) >= BUDGET_CAP \? compacting : null\);/);
   assert.match(mc, /if \(compacting \|\| intro \|\| busy \|\| queued/, 'never mid-run');
 }

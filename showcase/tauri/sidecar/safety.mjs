@@ -172,6 +172,9 @@ export function parseKey(combo) {
   const k = keys[0];
   return { mods, key: k === 'enter' ? 'return' : k === 'backspace' ? 'delete' : k };
 }
+/** A key step that deletes (delete or forward delete, with any modifiers): what's selected in Mail, Notes, Reminders,
+ *  Finder… goes. Tags the plan's ask as a deletion, so Approve all never runs it unasked. */
+export const deletesKey = (combo) => ['delete', 'forwarddelete'].includes(parseKey(combo)?.key);
 export function riskyKey(combo) {
   const p = parseKey(combo);
   if (!p || !p.mods.has('cmd')) return null;
@@ -233,7 +236,8 @@ function readCheck(p, home, { recursive = false } = {}) {
   // A denylist always has gaps, so hidden files and folders (settings and sign-ins of every tool) and app data in the
   // home folder are read only with a yes, every time, naming the real path.
   const hidden = (a) => homes.some((h) => { const r = rel(a, h); return r !== a && r.split('/').some((x) => x.startsWith('.')); });
-  if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true };
+  // secret: it can hold sign-ins, so Approve all never answers it (tools.mjs readable).
+  if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true, secret: true };
   return { ...verdict(SAFE), path: real };
 }
 
@@ -291,6 +295,7 @@ const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) 
   const first = name.split(/\s+/)[0];
   return [name, first, dir, ...(dir && name ? [`${dir}/${name}`, `${dir}/${first}`] : [])].filter(Boolean);
 });
+const PASSWORD_APPS = /^(1password( \d+)?|bitwarden|lastpass|dashlane|keeper( password manager)?|keepassxc|keepassium|strongbox|enpass|proton pass|nordpass|roboform|passwords|keychain access|secrets)$/i;
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -306,7 +311,7 @@ export function checkWindow(win, home, { viewers = true } = {}) {
   for (const f of files) {
     const v = checkRead(f, home);
     if (v.level === BLOCK) return verdict(BLOCK, `${app || 'That window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
-    if (v.level === ASK) worst = verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`);
+    if (v.level === ASK) worst = { ...verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`), ...(v.secret ? { secret: true } : {}) };
   }
   // A relay turn (viewers off, R11b-B): a file frees a window only in an app that just shows or edits it, never
   // Terminal, Finder, a browser or a chat app (their window shows more than the file).
@@ -318,6 +323,8 @@ export function checkWindow(win, home, { viewers = true } = {}) {
     const none = BROWSER_APPS.test(app) && !win?.url ? "I couldn't read which page or file it shows" : 'It has no file I can check';
     worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a password, a message, a terminal).`), app };
   }
+  // A password manager's window shows sign-ins: Approve all never answers it (secret), and no earlier yes covers it.
+  if (worst.level === ASK && PASSWORD_APPS.test(app)) worst = { ...worst, secret: true };
   return worst;
 }
 
@@ -618,10 +625,15 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
 
 // Verbs that act on the world: a tool named like this always asks, whatever the server says about it.
 const MCP_RISKY = /(?:^|_)(send|delete|remove|trash|destroy|erase|wipe|drop|purge|truncate|pay|payment|payments|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate|execute|exec|sql|migration|migrate|reset|merge|archive)(?:_|$)/;
+// Verbs that overwrite or take away what is there (a file written over, a draft or event changed, labels removed).
+const MCP_OVERWRITE = /(?:^|_)(write|edit|update|overwrite|replace|clear|discard|modify|unlabel|patch|set|move|rename|batch)(?:_|$)/;
 /** E2 approve-all: a connected server's call (an MCP tool or a claude.ai connector) that is deletion-class, so it asks
- *  even with Approve all on: destructive by the server's hint, or named to delete, trash, send, pay... (MCP_RISKY). A
- *  tag from the call itself, never from the question's words. */
-export const deletesCall = ({ name, annotations } = {}) => annotations?.destructiveHint === true || MCP_RISKY.test(snake(name));
+ *  even with Approve all on. A call the Mac can't classify is one (the contract: unknown is a deletion): only a server
+ *  that says the tool only reads (readOnlyHint) or doesn't destroy (destructiveHint false) frees it, and never one named
+ *  to delete, trash, send, pay (MCP_RISKY) or to overwrite (MCP_OVERWRITE). claude.ai's connectors send no hints, so
+ *  every one of their asks is a deletion. A tag from the call itself, never from the question's words. */
+export const deletesCall = ({ name, annotations } = {}) => annotations?.destructiveHint === true || MCP_RISKY.test(snake(name)) || MCP_OVERWRITE.test(snake(name))
+  || !(annotations?.readOnlyHint === true || annotations?.destructiveHint === false);
 /** E2: the owner's Approve all says yes for this ask: a yes/no (choices) whose deletion tag is exactly false. A deletion,
  *  an ask with no tag and a typed prompt still ask. Off: every ask asks. */
 export const approveAllSays = (approveAll, opts) => approveAll === true && Array.isArray(opts?.choices) && opts.deletion === false;

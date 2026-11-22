@@ -22,7 +22,7 @@ const { APPROVE_CAPS, askAsApproval, createRelay } = await import('../relay.mjs'
 const { approveAllSays, checkMcpCall, deletesCall, isYes, checkOpen, checkRead, checkWrite } = await import('../safety.mjs');
 const { createMcpTools } = await import('../mcp.mjs');
 const { brainGate } = await import('../brain-server.mjs');
-const { relayApprovalSchema } = await import('../relayschema.mjs');
+const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await import('../relayschema.mjs');
 
 // ---- The setting: approveAll (camelCase or snake_case), a boolean, default off; anything else keeps the last value.
 {
@@ -61,24 +61,27 @@ const { relayApprovalSchema } = await import('../relayschema.mjs');
   assert.equal(approveAllSays(true, { placeholder: 'The orb', choices: ['Attach to Hydra', 'Keep it here'] }), false);
 }
 
-// ---- What is a deletion for a connected server's call: its destructive hint or its name, never the question.
+// ---- What is a deletion for a connected server's call: its destructive hint or its name, never the question. With no
+// hint the Mac can't classify it, so it is one (the lane E fix round: unknown is a deletion).
 {
   for (const n of ['trash_message', 'delete_event', 'remove_label', 'send_message', 'drop_table', 'gmail_delete_draft', 'deleteEvent']) assert.equal(deletesCall({ name: n }), true, n);
-  for (const n of ['create_event', 'update_event', 'list_messages', 'quit_app', 'open_page']) assert.equal(deletesCall({ name: n }), false, n);
+  for (const n of ['create_event', 'list_messages', 'quit_app', 'open_page']) assert.equal(deletesCall({ name: n }), true, `${n} with no hint`);
+  for (const n of ['create_event', 'list_messages', 'quit_app', 'open_page']) assert.equal(deletesCall({ name: n, annotations: { destructiveHint: false } }), false, `${n}, said not destructive`);
   assert.equal(deletesCall({ name: 'tidy', annotations: { destructiveHint: true } }), true, 'the server says it destroys');
 }
 
-// ---- MCP connections: remove_connection and a destructive call are deletions; adding or a plain write is not.
+// ---- MCP connections: remove_connection, a destructive call and one the server says nothing about (unknown is a
+// deletion, lane E fix round) are deletions; adding, or a write the server says doesn't destroy, is not.
 {
   const asked = [];
   const ask = async (o) => { asked.push(o); return 'yes'; };
-  const tools = { notes_update: { annotations: {}, execute: async () => 'ok' }, notes_delete: { annotations: {}, execute: async () => 'ok' }, tidy: { annotations: { destructiveHint: true }, execute: async () => 'ok' } };
+  const tools = { notes_add: { annotations: { destructiveHint: false }, execute: async () => 'ok' }, notes_update: { annotations: {}, execute: async () => 'ok' }, notes_delete: { annotations: {}, execute: async () => 'ok' }, tidy: { annotations: { destructiveHint: true }, execute: async () => 'ok' } };
   const m = { has: (n) => n === 'notes', remove: async () => {}, tool: async (s, t) => tools[t], importable: () => ({}), probe: async () => ({ ok: true }), add: async () => ({ ok: true, tools: [] }) };
   const T = Object.fromEntries(createMcpTools({ mcp: m, ask, isYes, userName: 'Ken', checkCall: checkMcpCall }).map((t) => [t.name, t]));
   await T.remove_connection.execute({ name: 'notes', reason: 'not used' }, {});
-  for (const t of ['notes_update', 'notes_delete', 'tidy']) await T.use_connection.execute({ server: 'notes', tool: t, args: '{}' }, {});
+  for (const t of ['notes_add', 'notes_update', 'notes_delete', 'tidy']) await T.use_connection.execute({ server: 'notes', tool: t, args: '{}' }, {});
   await T.add_connection.execute({ name: 'linear', url: 'https://mcp.linear.app/sse' }, {});
-  assert.deepEqual(asked.map((o) => o.deletion), [true, false, true, true, false], asked.map((o) => o.placeholder).join(' | '));
+  assert.deepEqual(asked.map((o) => o.deletion), [true, false, true, true, true, false], asked.map((o) => o.placeholder).join(' | '));
 }
 
 // ---- A relay turn's ask: deletion from the tag (untagged: true), a deletion is dangerous, typed prompts answer null.
@@ -128,16 +131,19 @@ const { relayApprovalSchema } = await import('../relayschema.mjs');
   const api = hydraApi({ base: 'https://hydra.invalid', getKey: async () => 'k'.repeat(20), fetchImpl: async (url, o) => { seen.push(o.headers); return { ok: true }; } });
   await api.req('/api/agent/relay/next?wait=1&slot=live');
   await api.req('/api/agent/relay/approval', { method: 'POST', body: {} });
-  assert.deepEqual(seen.map((h) => h['X-Hydra-Caps']), ['approveAllDeletionTags=1', 'approveAllDeletionTags=1']);
+  // The web contract (relay-schema.ts CAPABILITIES_HEADER): this exact header and these exact bytes.
+  assert.deepEqual(seen.map((h) => h['x-hydra-capabilities']), ['{"approveAllDeletionTags":1}', '{"approveAllDeletionTags":1}']);
+  assert.deepEqual(seen.map((h) => capabilitiesSchema.parse(h[CAPABILITIES_HEADER])), [{ approveAllDeletionTags: 1 }, { approveAllDeletionTags: 1 }], 'the server reads it as declared');
 }
 
-// ---- The server brain's connector gate tags its approvals the same way.
+// ---- The server brain's connector gate tags its approvals the same way: claude.ai's connectors send no hints, so a
+// write the Mac can't classify (create_event) is a deletion too (unknown is a deletion, the lane E fix round).
 {
   const got = [];
   const gate = brainGate({ approve: async (a) => { got.push(a); return 'approved'; } });
   await gate('mcp__claude_ai_Gmail__trash_message', { id: '1' });
   await gate('mcp__claude_ai_Google_Calendar__create_event', { title: 'x' });
-  assert.deepEqual(got.map((a) => a.deletion), [true, false], JSON.stringify(got));
+  assert.deepEqual(got.map((a) => a.deletion), [true, true], JSON.stringify(got));
 }
 
 // ---- A background agent's own asks (its process, the real worker): Approve all answers the non-deletions there and

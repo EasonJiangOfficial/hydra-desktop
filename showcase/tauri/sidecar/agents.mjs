@@ -93,9 +93,10 @@ export function newsText(items, userName = 'the user', { along = false } = {}) {
   if (along) return `(Meanwhile, from your agents (${NOT_ORDERS.toLowerCase().replace(/\.$/, '')}):\n${newsBlock(items, userName)}\nMention it briefly after answering.)`;
   return `(System, not ${userName}: news from your background agents. Tell ${userName} in one or two short sentences, in character: what each one found or did, and ask for any yes that's waiting (answer_agent). Don't repeat the reports word for word. ${NOT_ORDERS})\n${newsBlock(items, userName)}`;
 }
-/** The chat may speak up by itself only when nothing is going on and it has been quiet for 1.5 s. */
+/** The chat may speak up by itself only when nothing is going on and it has been quiet for 1.5 s, never while Hydra
+ *  sleeps (the news waits for him to wake it). */
 export function canNudge(s = {}) {
-  return !s.busy && !s.queued && !s.barOpen && !s.voice && !s.saidPending && !s.autoListen && !s.asking && !s.onboarding && !s.intro && !s.loggingIn
+  return !s.asleep && !s.busy && !s.queued && !s.barOpen && !s.voice && !s.saidPending && !s.autoListen && !s.asking && !s.onboarding && !s.intro && !s.loggingIn
     && Number.isFinite(s.quietMs) && s.quietMs >= 1500;
 }
 const fallbackLine = (items) => items.map((i) => (i.kind === 'ask' ? `${i.title} is waiting for your yes: ${i.question}` : i.kind === 'failed' ? `${i.title} couldn't finish: ${i.reason}` : `Done: ${i.outcome}`)).join(' ');

@@ -25,21 +25,26 @@ function edits(a, b) {
   return d[a.length][b.length];
 }
 
+// Words around a strict sleep word that still leave it the whole take ("okay Hydra sleep now").
+const AROUND = new Set(['ok', 'okay', 'hey', 'now', 'please', 'thanks', 'thank', 'you', 'so', 'um', 'uh', 'alright', 'right', 'then', 'go', 'to']);
 /** The sleep word's words, in order, anywhere in what was said (as SleepWord in voice/main.swift, without its sound
  * keys): words of 5 letters or more may be one letter off, and a word may be heard as two ("good night"). strict (while a
- * turn runs): its exact words only, no letter off, so a near miss never ends the work. */
+ * turn runs): its exact words only, no letter off, and they are the whole take but for a few fillers ("okay", "now",
+ * "please"), so a near miss or a sentence that merely has them in it ("I told hydra sleep is important") never ends the
+ * work. */
 export function heardSleepWord(text, phrase = DEFAULT_SLEEP_WORD, { strict = false } = {}) {
   const want = words(phrase).length ? words(phrase) : words(DEFAULT_SLEEP_WORD), got = words(text);
   const same = (h, w) => h === w || (!strict && w.length >= 5 && edits(h, w) <= 1);
   const at = (i) => {
     let j = i, k = 0;
     while (k < want.length) {
-      if (j >= got.length) return false;
-      if (same(got[j], want[k])) { j++; k++; } else if (j + 1 < got.length && same(got[j] + got[j + 1], want[k])) { j += 2; k++; } else if (k + 1 < want.length && same(got[j], want[k] + want[k + 1])) { j++; k += 2; } else return false;
+      if (j >= got.length) return -1;
+      if (same(got[j], want[k])) { j++; k++; } else if (j + 1 < got.length && same(got[j] + got[j + 1], want[k])) { j += 2; k++; } else if (k + 1 < want.length && same(got[j], want[k] + want[k + 1])) { j++; k += 2; } else return -1;
     }
-    return true;
+    return j;
   };
-  for (let i = 0; i < got.length; i++) if (at(i)) return true;
+  const alone = (i, j) => [...got.slice(0, i), ...got.slice(j)].every((x) => AROUND.has(x));
+  for (let i = 0; i < got.length; i++) { const j = at(i); if (j >= 0 && (!strict || alone(i, j))) return true; }
   return false;
 }
 

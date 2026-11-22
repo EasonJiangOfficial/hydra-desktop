@@ -1176,8 +1176,41 @@ final class Voice {
     }
 
     func externalCancel() {
+        afterVoiceGen += 1 // a take still waiting for Hydra's voice (listenAfterVoice) never opens
         if phase == .armed || phase == .holding || phase == .handsFree { cancel() }
         blocked = true
+    }
+
+    /// An orb tap during a take (the sidecar's listen_finish): it sends what was heard, as a second tap on the talk keys
+    /// does. Esc still cancels (externalCancel).
+    func externalFinish() {
+        guard phase == .armed || phase == .holding || phase == .handsFree else { return }
+        end("orb tap")
+        finish()
+    }
+
+    /// A take once Hydra's voice has said what it is saying (an ask's question: "Say yes or no."), so a bare "yes" is
+    /// heard: it waits for the voice to start (at most 4 s), then for 0.4 s of quiet after it; still speaking after 30 s,
+    /// no take. A take opened meanwhile wins (listenNow opens only from idle).
+    private var afterVoiceGen = 0
+    func listenAfterVoice(wait: Double?, via: String) {
+        afterVoiceGen += 1
+        let gen = afterVoiceGen, t0 = uptime()
+        var started = false, quietAt = t0
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
+            guard let self, gen == self.afterVoiceGen else { timer.invalidate(); return }
+            let now = uptime()
+            if self.speaking { started = true; quietAt = now }
+            guard let go = Self.afterVoiceDue(started: started, quietFor: now - quietAt, waited: now - t0) else { return }
+            timer.invalidate()
+            if go { self.listenNow(wait: wait, via: via) }
+        }
+        RunLoop.main.add(t, forMode: .common)
+    }
+    /// listenAfterVoice's decision: true listen now, false give up, nil keep waiting.
+    static func afterVoiceDue(started: Bool, quietFor: Double, waited: Double) -> Bool? {
+        if started { return quietFor >= 0.4 ? true : waited > 30 ? false : nil }
+        return waited >= 4 ? true : nil
     }
 
     // ---------- wake word ----------
@@ -1836,7 +1869,9 @@ Thread.detachNewThread {
         case "cancel": DispatchQueue.main.async { voice.externalCancel() }
         case "listen":
             let wait = msg["wait"] as? Double, via = (msg["via"] as? String).flatMap { ["orb", "wake"].contains($0) ? $0 : nil } ?? "listen"
-            DispatchQueue.main.async { voice.listenNow(wait: wait, via: via) }
+            let after = msg["afterVoice"] as? Bool == true
+            DispatchQueue.main.async { if after { voice.listenAfterVoice(wait: wait, via: via) } else { voice.listenNow(wait: wait, via: via) } }
+        case "finish": DispatchQueue.main.async { voice.externalFinish() }
         // Hydra's cues (cue.swift): the wake chime, and the soft loop while it works.
         case "cue": if let n = msg["name"] as? String, ["wake", "listen"].contains(n) { DispatchQueue.main.async { Cue.play(n) } }
         case "pending": if let on = msg["on"] as? Bool { DispatchQueue.main.async { Cue.pending(on) } }

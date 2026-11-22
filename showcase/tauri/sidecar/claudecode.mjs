@@ -389,7 +389,9 @@ function sdkOptions(o, resume, link) {
     // No telemetry from Claude Code. With connectors the environment is the claude.ai login's alone (claudeAiEnv);
     // without them, no non-essential traffic either: only the model requests leave this Mac.
     env: o.connectors
-      ? { ...claudeAiEnv(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' }
+      // ENABLE_TOOL_SEARCH true: Claude Code keeps tool search off for a resumed conversation that ran without it ("stays
+      // so until it is compacted or cleared"), so the owner's session from before build 4 still carried every schema.
+      ? { ...claudeAiEnv(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', ENABLE_TOOL_SEARCH: 'true' }
       : { ...(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1' },
     abortController,
     stderr: (d) => link.stderr?.(d),
@@ -565,7 +567,7 @@ async function* claudeCodeLoop(messages, o) {
       // Read before an error throws or max turns breaks: an error result names what its turn took too (R11f-1).
       const own = tookOf(message), took = own ?? turnTook;
       if (message.subtype !== 'success' || message.is_error) settle(took, false, !own);
-      if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; usage = await contextUsage(q); break; }
+      if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; o.takeInput?.(null); usage = await contextUsage(q); break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
         throw new Error(detail || `Claude Code stopped: ${message.subtype}`);
@@ -580,6 +582,9 @@ async function* claudeCodeLoop(messages, o) {
       turnAt = step; turnTook = null; results.push(step);
       if (took) { if (added.some((a) => !a.done)) continue; }
       else if (addedAt > answeredAt) continue;
+      // The run is over: no more additions into it (one sent during the count's round trip went to a run that would
+      // never answer it), so the next is refused and becomes the next request (addOnTo).
+      o.takeInput?.(null);
       usage = await contextUsage(q); // before close: what the session now holds
       break;
     }

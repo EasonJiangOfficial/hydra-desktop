@@ -1936,7 +1936,8 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         // Listen right away, hands-free (after an area snap: snap, then just talk).
         // wait: seconds the mic waits for words (auto-listen's setting, #44).
         // via: what opened it ('orb' chimes, 'wake' opens silently after the wake chime; voice/cue.swift).
-        Some("listen") => to_voice(app, &json!({ "cmd": "listen", "wait": msg.get("wait").cloned().unwrap_or(Value::Null), "via": msg.get("via").cloned().unwrap_or(Value::Null) })),
+        // afterVoice: the take opens once Hydra's voice has said its line (an ask's "Say yes or no.").
+        Some("listen") => to_voice(app, &json!({ "cmd": "listen", "wait": msg.get("wait").cloned().unwrap_or(Value::Null), "via": msg.get("via").cloned().unwrap_or(Value::Null), "afterVoice": msg.get("afterVoice").and_then(Value::as_bool) == Some(true) })),
         // Hydra's cues, played by the voice helper so mute-while-listening never silences them: the wake chime, and the
         // soft loop while a spoken turn works.
         Some("cue") => to_voice(app, &json!({ "cmd": "cue", "name": msg.get("name").and_then(Value::as_str).unwrap_or("") })),
@@ -1966,6 +1967,8 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         Some("wake_hold") => to_voice(app, &json!({ "cmd": "wake_hold", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
         // Esc while it's listening: drop the take.
         Some("listen_cancel") => to_voice(app, &json!({ "cmd": "cancel" })),
+        // An orb tap during a take: send what was heard (Esc cancels it, above).
+        Some("listen_finish") => to_voice(app, &json!({ "cmd": "finish" })),
         // Notch mode: the capsule at the notch shows the listening, so the pill by the cursor stays off.
         Some("pill") => to_voice(app, &json!({ "cmd": "pill", "on": msg.get("on").and_then(Value::as_bool) != Some(false) })),
         // Whether any screen has a camera notch: the notch capsule is only offered then.

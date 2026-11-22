@@ -343,7 +343,7 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.match(side, /await relaySession\(\{\n\s+agent: agentRun, text: said\.text, h,/, 'relay additions into the session (relaySession: behavior in relayup.test.mjs)');
   assert.match(side, /if \(m\.via === 'barge'\) noteInterrupted\(\);/, 'barge-in notes what was heard');
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');
-  assert.match(side, /const progress = turnProgress = startProgress\(\{ voice: !intro && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \|\| voiceBusy,/, 'a filler after 1.1 s and progress lines, never muted (startProgress: behavior in voiceturn.test.mjs, build4e1.test.mjs)');
+  assert.match(side, /const progress = turnProgress = startProgress\(\{ voice: own && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \|\| voiceBusy,/, 'a filler after 1.1 s and progress lines, never muted (startProgress: behavior in voiceturn.test.mjs, build4e1.test.mjs)');
   assert.match(side, /if \(!voiceMuted\) voice\?\.beat\(\); \/\/ a tool starts/, 'or when a tool starts');
   assert.match(side, /listensAfter\(lastReply, true\)/, 'a follow-up window after every answer');
   assert.match(side, /const tts = \(\) => \(MAC && hydraKey && !hydraRevoked \? TTS\.voicestudio :/, 'paired: every sentence from /api/voice/tts');

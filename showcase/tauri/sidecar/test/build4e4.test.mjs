@@ -74,7 +74,7 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
     return JSON.parse(JSON.stringify({ sent, woke }));
   };
   assert.deepEqual(run({ from: 'web' }, false, false).sent, [{ type: 'listen', via: 'orb' }], 'awake: a take, with the listen chime');
-  assert.deepEqual(run({ from: 'web' }, false, true).sent, [{ type: 'listen_cancel' }], 'mid-take: the take ends');
+  assert.deepEqual(run({ from: 'web' }, false, true).sent, [{ type: 'listen_finish' }], 'mid-take: the take is sent (lane E fix round)');
   assert.deepEqual(run({ from: 'web' }, true, false), { sent: [], woke: ['web'] }, 'asleep: it wakes (and so listens)');
   assert.deepEqual(run({ from: 'orb' }, true, false).woke, ['orb']);
   assert.deepEqual(run({ from: 'evil' }, true, false).woke, ['web'], 'only web or orb');
@@ -144,12 +144,12 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
   for (const [k, v] of [['voice', false], ['busy', false], ['answerSaid', true], ['listening', true], ['asking', true]]) assert.equal(pendingWanted({ ...base, [k]: v }), false, `${k}: ${v}`);
   // Wiring: on at the turn's start, off at the first answer sentence, on again at a tool after it, off with the turn,
   // the owner's take and any yes/no; sent to the helper and the overlay on change only.
-  assert.match(side, /pendingVoice = !intro \? voice : null; answerSaid = false; pendingNow\(\);/);
+  assert.match(side, /pendingVoice = own \? voice : null; answerSaid = false; pendingNow\(\);/);
   assert.match(side, /voice\.say\(t\); if \(!answerSaid\) \{ answerSaid = true; pendingNow\(\); \}/);
   assert.match(side, /msg\.e\?\.type === 'tool' && answerSaid\) \{ answerSaid = false; pendingNow\(\); \}/);
   assert.match(side, /power\.busy\(\); \/\/ the 5 minutes[^\n]*\n    pendingVoice = null; pendingNow\(\);/);
-  assert.match(side, /voiceBusy = m\.state === 'listening' \|\| m\.state === 'processing'; stir\(\); pendingNow\(\);/);
-  assert.match(side, /yesNoOpen\.set\(id, \{ a, to \}\); pendingNow\(\);/);
+  assert.match(side, /voiceBusy = m\.state === 'listening' \|\| m\.state === 'processing'; if \(m\.state === 'listening'\) takeAt = Date\.now\(\); stir\(\); pendingNow\(\);/);
+  assert.match(side, /yesNoOpen\.set\(id, \{ a, to, voice \}\); pendingNow\(\);/);
   assert.match(side, /yesNoOpen\.delete\(id\); pendingNow\(\);/);
   assert.match(side, /if \(on === pendingSent\) return;\n  pendingSent = on;\n  send\(\{ type: 'pending', on \}\);\n  ui\(\{ kind: 'pending', on \}\);/);
   // The helper: 0.6 s in, 150 ms out, ducked under Hydra's voice, never while listening.

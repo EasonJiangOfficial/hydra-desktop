@@ -114,9 +114,38 @@ export const relayEventsAnswerSchema = z.object({ ok: z.literal(true), status: z
 /** POST /api/agent/turn/append body (owner session): words added to the turn in flight. */
 export const appendInputSchema = z.object({ turnId: z.uuid(), text: z.string().trim().min(1).max(LIMITS.inputText) });
 
-/** POST /api/agent/relay/approval body: an ask the Mac would show locally becomes the owner's approval. */
-export const relayApprovalSchema = z
-  .object({ turnId: z.uuid(), claimId: z.uuid(), summary: z.string().trim().min(1).max(LIMITS.confirmSummary), danger: z.boolean() });
+/**
+ * POST /api/agent/relay/approval body: an ask the Mac would show locally becomes the owner's approval.
+ * deletion (0200, optional; Hydra Desktop build 4 always sends it): the Mac's own per-action tag, true when the
+ * action can delete or lose anything. Approve all runs an ask without the owner only when the Mac declared
+ * approveAllDeletionTags and sent deletion false (and danger false); a missing deletion asks.
+ */
+export const relayApprovalSchema = z.object({
+  turnId: z.uuid(),
+  claimId: z.uuid(),
+  summary: z.string().trim().min(1).max(LIMITS.confirmSummary),
+  danger: z.boolean(),
+  deletion: z.boolean().optional(),
+});
+
+/**
+ * 0200: what a Mac can do, declared on every relay request (GET /relay/next records it for the device; an older Mac
+ * sends none, which clears it) and on GET /api/agent/jobs (a risky step approve all let through goes only to a pull
+ * that declares it) as JSON in the CAPABILITIES_HEADER header, like {"approveAllDeletionTags":1}.
+ * approveAllDeletionTags 1: every approval POST carries `deletion` from its own per-action tag, and for a queued Mac
+ * step it asks locally before any deletion-class action. Unknown keys are dropped; anything unreadable is {}.
+ */
+export const CAPABILITIES_HEADER = "x-hydra-capabilities";
+export const capabilitiesSchema = z.preprocess(
+  (v) => {
+    try {
+      return JSON.parse(String(v));
+    } catch {
+      return {};
+    }
+  },
+  z.object({ approveAllDeletionTags: z.literal(1).optional().catch(undefined) }).catch({}),
+);
 
 /** GET /api/agent/relay/next?slot=: the Mac serves one live turn and one routine turn at a time. */
 export const slotSchema = z.enum(["live", "routine"]);

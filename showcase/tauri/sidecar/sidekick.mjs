@@ -29,7 +29,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
-  addFact, supersedeFact, learnFactsAsked, liveFacts, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, foldWhy, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
+  addFact, supersedeFact, learnFactsAsked, liveFacts, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, newestImages, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, foldWhy, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
   touchFacts, forDisk, forProvider, binKind, getBin, listBin, restoreFromBin, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
@@ -48,7 +48,7 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { ASK_DEADLINE_MS, addOnTo, createSpokenTrack, endNote, pcmSecs, pendingWanted, spokenAnswer, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
+import { ASK_DEADLINE_MS, addOnTo, askForTake, createSpokenTrack, endNote, ownTurn, pcmSecs, pendingWanted, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -91,6 +91,8 @@ const guideVoices = new Set();
 // 0 to 100: my voice and sounds (#136). A missing or broken value is full volume, never silence.
 const volumeNow = () => (Number.isFinite(Number(config.volume)) ? Math.max(0, Math.min(100, Math.round(Number(config.volume)))) : 100);
 let pendingVoice = null, answerSaid = false, pendingSent = false; // pendingNow() below
+// A request waiting for the fold under way (prompt, before busy): Stop and the sleep word end the wait and the request.
+let foldWait = null;
 const ui = (msg) => {
   // Muted from the Hydra window (bridge setMuted): the voice plays silently until unmuted, whatever the volume says.
   if (msg.kind === 'volume' && voiceMuted) msg = { ...msg, v: 0 };
@@ -157,7 +159,8 @@ let turnProgress = null;
 // from its start until its answer is said; off while the owner talks or a yes/no waits. Sent on change only (the
 // flags are declared above ui(), which reads them).
 function pendingNow() {
-  const on = pendingWanted({ voice: pendingVoice && turnVoice === pendingVoice, busy, answerSaid, listening: voiceBusy, asking: yesNoOpen.size > 0 });
+  // Waiting for a fold before the owner's request starts (foldFirst): working too, so never silent.
+  const on = (!!foldWait && !voiceBusy && VOICE_ON()) || pendingWanted({ voice: pendingVoice && turnVoice === pendingVoice, busy, answerSaid, listening: voiceBusy, asking: yesNoOpen.size > 0 });
   if (on === pendingSent) return;
   pendingSent = on;
   send({ type: 'pending', on });
@@ -1273,7 +1276,10 @@ async function onListCard(part, m) {
 }
 // Every way a request is cancelled is logged with what did it, so a reply that never came can be traced. Only sleep
 // (the sleep word, idle sleep) cancels quietly; the turn still says why on screen (endNote).
-function interruptQuietly(by) { if (busy) { quiet = true; logLine('stopped', { by }); controller?.abort(); } }
+function interruptQuietly(by) {
+  if (busy) { quiet = true; logLine('stopped', { by }); controller?.abort(); }
+  else if (foldWait) { quiet = true; logLine('stopped', { by, waiting: 'fold' }); foldWait.abort(); } // before its turn began
+}
 
 // The live block is per-call state, not conversation: never save it.
 const withoutLive = (msgs) => msgs.map((m) => {
@@ -1298,6 +1304,9 @@ let compacting = null, pendingFold = null;
 let foldFails = 0, failedAt = 0; // failed folds in a row, and the chat size at the last one
 const FOLD_CAP = 40_000; // estimated tokens one fold summarises; the oldest slice goes first
 let floorLogged = false; // the fixed floor, once per process
+// The newest screenshots (store.mjs KEEP_SHOTS) of the session a fold just re-seeded: they go with its next message, as
+// a resumed session kept them (the saved history has none).
+let foldImages = null;
 // The chat is past the whole budget and a fold is under way: the next request waits for it (bounded by oneShot's timeout).
 const foldFirst = () => (compacting && lastInput?.session === session?.id && (lastInput?.chat ?? 0) >= BUDGET_CAP ? compacting : null);
 function maybeCompact() {
@@ -1337,6 +1346,7 @@ function applyPendingFold() {
   archiveFolded(s.id, s.messages.slice(f.plan.start, f.plan.end)).catch((e) => console.error('[store] archive failed', e.message));
   s.messages = next;
   saveSession(s);
+  foldImages = agent ? newestImages(agent.getMessages()) : null; // before the agent goes: its messages still hold them
   agent = null; lastInput = null; // rebuilt from the folded history; Claude Code is re-seeded (its resume no longer matches)
   logLine('compacted', { session: s.id, model: f.model, ms: f.ms, folded: f.plan.end - f.plan.start, foldTokens: f.plan.tokens, keptMessages: next.length - 1, facts: f.facts });
 }
@@ -1615,7 +1625,7 @@ const autoListenOn = () => VOICE_OK && !!config.voice && !!config.autoListen && 
 // typed out and said (reply_said, or 90 s), no field open, and none of that changing for 1.5 s.
 let voiceBusy = false, saidPending = false, saidCap = null;
 const desk = newsDesk({
-  gates: () => ({ busy, queued, barOpen: !!barAsk, voice: voiceBusy, saidPending, autoListen: !!autoTurn, asking: pending.size > 0, onboarding, intro: !!intro, loggingIn: !!loggingIn }),
+  gates: () => ({ asleep: power.asleep, busy, queued, barOpen: !!barAsk, voice: voiceBusy, saidPending, autoListen: !!autoTurn, asking: pending.size > 0, onboarding, intro: !!intro, loggingIn: !!loggingIn }),
   news: () => agents.news(), markTold: (ids) => agents.markTold(ids), userName,
   enqueue: (text, ids) => enqueue(text, { news: ids }), say: (text, mood) => say(text, mood),
   signedIn: () => signedIn.size > 0 && [...signedIn.values()].some(Boolean),
@@ -1633,7 +1643,22 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   if (retrying) { retryInfo = retrying; if (session?.messages?.at(-1)?.role === 'user') session.messages.pop(); agent = null; }
   const handoff = routeForTurn(turnWords || '(system)');
   if (retrying) retryInfo = null;
-  await foldFirst(); // before busy: the fold under way lands now, and the agent is built from the folded history
+  // Before busy: the fold under way lands now, and the agent is built from the folded history. The wait is part of the
+  // request: Stop or the sleep word end it (foldWait), and the pending sound plays meanwhile.
+  const fold = foldFirst();
+  if (fold) {
+    const wait = foldWait = new AbortController();
+    pendingNow(); logLine('fold_wait', {});
+    await Promise.race([fold, new Promise((r) => wait.signal.addEventListener('abort', r, { once: true }))]);
+    foldWait = null; pendingNow();
+    if (wait.signal.aborted) {
+      const line = endNote({ how: quiet ? 'sleep' : 'stop' }).line;
+      quiet = false;
+      logLine('turn_note', { how: 'fold_wait_stopped' });
+      ui({ kind: 'agent', e: { type: 'error', message: line } });
+      return;
+    }
+  }
   const notReady = await readyAgent();
   // Told once its turn starts, however it goes: the corner and the live state still have the result, so no retries.
   desk.started(news);
@@ -1659,9 +1684,12 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   const spoken = voice && new SpeechText((t) => { heardTrack.line(t); voice.say(t); if (!answerSaid) { answerSaid = true; pendingNow(); } }, speech.localOpts?.());
   // A filler ("Let me check.") when no answer has started within 1.1 s (W5 contract 3), then a progress line ("Checking
   // it now.") each 5.5 s with nothing new (C2, E4); never while muted, while the owner talks or while a yes/no waits.
-  const progress = turnProgress = startProgress({ voice: !intro && voice, live: () => busy && turnVoice === voice, muted: () => voiceMuted || voiceBusy,
+  // Only the owner's own turns (ownTurn): a reminder, the agents' news or a focus nudge plays no pending sound and says
+  // no progress line.
+  const own = ownTurn({ text, news, intro: !!intro });
+  const progress = turnProgress = startProgress({ voice: own && voice, live: () => busy && turnVoice === voice, muted: () => voiceMuted || voiceBusy,
     waiting: () => yesNoOpen.size > 0, onLine: (line) => ui({ kind: 'agent', e: { type: 'thinking', text: `${line} ` } }) });
-  pendingVoice = !intro ? voice : null; answerSaid = false; pendingNow();
+  pendingVoice = own ? voice : null; answerSaid = false; pendingNow();
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null, hitMax = false, endLine = '';
   let lastSeen = 0; // the newest call's whole prompt (cache log): tools, system prompt and chat
   try {
@@ -1712,7 +1740,10 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     const asked = handoff ? `${toAgent}\n${handoffNote({ userName, assistant: lookName(), reason: handoff.reason, from: handoff.from, kind: handoff.kind, words: turnWords, untilText: handoff.untilText, because: handoff.because, fix: handoff.fix })}` : toAgent;
     const sent = `${brief ? `${asked}\n(${brief.note})` : asked}${cutNote}`;
     // An area snap rides along as an image in the same message.
-    const content = image ? [{ type: 'text', text: `${sent}\n(Attached: the area of the screen I ${note ? 'marked' : 'selected'}.${note ? ` ${note}` : ''})` }, image] : sent;
+    const kept = foldImages?.length ? foldImages : null; foldImages = null;
+    const keptNote = kept ? [{ type: 'text', text: '(The newest screenshots from before the earlier turns were summarised, kept so you still see them.)' }, ...kept] : [];
+    const content = image ? [{ type: 'text', text: `${sent}\n(Attached: the area of the screen I ${note ? 'marked' : 'selected'}.${note ? ` ${note}` : ''})` }, image, ...keptNote]
+      : kept ? [{ type: 'text', text: sent }, ...keptNote] : sent;
     lastReply = ''; lastFailed = false; lastInput = null;
     let fresh = false; // the reply that matters is the last turn's text (after any tool calls)
     let writing = null; // the beat timer while a tool call is being written
@@ -1741,7 +1772,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       else if (e.type === 'turn_end') {
         doneWriting();
         if (hold != null) { hold += echo.flush(); if (e.stopReason !== 'tool_use') release(); }
-        if (e.stopReason !== 'tool_use') progress.stop(); // the answer: no progress line over it
+        if (e.stopReason !== 'tool_use') progress.pause(); // the answer: no progress line over it (resumed if the run works on)
         fresh = true;
         { const t = echo.flush(); if (!launched) { reply.push(t); lastReply += t; } }
         reply.endTurn();
@@ -1769,6 +1800,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
         writing ??= setTimeout(() => { if (busy && turnVoice === voice) voice?.beat(); }, 1000); // not after the request ended
       }
       else if (e.type === 'tool_call_start') {
+        progress.resume(); // the run works on after an answer (an addition's tools): progress lines again
         if (e.name !== 'send_agent') release();
         doneWriting();
         spoken?.flush(); // a beat before a tool is said now, not after the tool
@@ -1790,7 +1822,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
         if (process.env.ROAMIES_USAGE) console.error(`[tool_end] ${e.isError ? 'ERROR' : 'ok'} ${Date.now() - (toolT.get(e.toolCallId) ?? Date.now())}ms ${String(typeof e.result === 'string' ? e.result : JSON.stringify(e.result ?? '')).replace(/\s+/g, ' ').slice(0, 160)}`);
         ui({ kind: 'agent', e: { type: 'tool_end', id: e.toolCallId, isError: e.isError } });
       }
-      else if (e.type === 'server_tool_call' && (spoken?.flush(), releaseBeat(true), voice?.beat(), true)) { ui({ kind: 'agent', e: { type: 'tool', id: e.id, anim: anim('web_search', {}) } }); activity.start(e.id, 'web_search', {}); panel(); }
+      else if (e.type === 'server_tool_call' && (progress.resume(), spoken?.flush(), releaseBeat(true), voice?.beat(), true)) { ui({ kind: 'agent', e: { type: 'tool', id: e.id, anim: anim('web_search', {}) } }); activity.start(e.id, 'web_search', {}); panel(); }
       else if (e.type === 'server_tool_result') { ui({ kind: 'agent', e: { type: 'tool_end', id: e.toolUseId ?? e.id, isError: false } }); activity.end(e.toolUseId ?? e.id, false); panel(); }
       else if (e.type === 'max_turns') hitMax = true;
       else if (e.type === 'error') throw e.error;
@@ -1867,6 +1899,9 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     watch?.stop();
     progress.stop();
     if (turnProgress === progress) turnProgress = null;
+    // An ask still open after its turn (an agent's, a memory ask) was said in that turn's voice, which has ended: no
+    // spoken yes answers it now, and its expiry says nothing.
+    for (const [, w] of yesNoOpen) if (w.voice && w.voice === voice) w.a.unvoice();
     busy = false; turnVoice = null; turnImage = null; addOnTake = false;
     power.busy(); // the 5 minutes to idle sleep count from the end of the turn (C4)
     pendingVoice = null; pendingNow(); // the pending sound fades out with the turn
@@ -1925,6 +1960,8 @@ function ask(opts, signal) {
   // Approve all (agent_settings.approve_all, owner: "there should be a mode that approves all actions"): a yes/no
   // tagged deletion: false is a yes at once. A deletion, an untagged ask and a typed prompt still ask (E2). A relay
   // turn's asks stay server approvals (above): the server applies it there, keeping the approval row.
+  // A turn already stopped (Stop, the tool's timeout, Claude Code's cancel): no, before Approve all could say yes.
+  if (signal?.aborted) return Promise.resolve(null);
   if (autoYes(opts)) { logLine('ask_auto', { question: String(opts.placeholder ?? '').slice(0, 120) }); return Promise.resolve('yes'); }
   askQueued ??= oneYesNoAtATime(showAsk);
   return askQueued(opts, signal);
@@ -1951,7 +1988,9 @@ function showAsk(opts, signal) {
       close: () => to({ kind: 'cancel_ask', id }),
       resolve: (v) => { pending.delete(id); yesNoOpen.delete(id); pendingNow(); power.busy(); resolve(v); } });
     pending.set(id, (text) => a.answer(text));
-    if (opts.choices) { yesNoOpen.set(id, { a, to }); pendingNow(); }
+    if (opts.choices) { yesNoOpen.set(id, { a, to, voice }); pendingNow(); }
+    // Said aloud: a short take opens once Hydra's voice has said it (afterVoice), so a bare "yes" is heard.
+    if (a.voiced) send({ type: 'listen', via: 'ask', wait: 8, afterVoice: true });
     // Another route finished first (e.g. the OAuth callback server): close the input bubble.
     signal?.addEventListener('abort', () => { to({ kind: 'cancel_ask', id }); a.cancel(); }, { once: true });
   });
@@ -2624,7 +2663,7 @@ const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecog
 let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
 function onVoice(m) {
-  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; stir(); pendingNow(); }
+  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') takeAt = Date.now(); stir(); pendingNow(); }
   // Any take while Hydra works (the phrase, a clap, the talk keys, barge-in; C1): its words join the turn under way, never
   // a cancel. Hydra's voice holds while the owner talks and goes on after; a take that hears nothing leaves the turn as
   // it was. With nothing running, a take talks over the last reply: that stops its voice, and the next turn knows.
@@ -2667,6 +2706,8 @@ function onVoice(m) {
       if (m.reason === 'failed' && m.message) problem('hearing', `no_input failed: ${m.message}`);
       say(micTrouble(process.platform, m.reason), 'concerned');
     }
+    // While a turn runs a take that heard nothing (a clap, fan noise) just ends: nothing over the live turn.
+    else if (m.code === 'nothing_heard' && busy) logLine('nothing_heard', { busy: true });
     else if (m.code === 'nothing_heard') say(m.spoke ? "I heard you but couldn't make out the words. Try again a little closer to the mic?" : `I didn't hear anything. ${talkHowLong()}.`, 'concerned');
     else if (m.code === 'dictation_off') {
       say('This version of macOS needs Dictation on for me to hear you. Turn it on in the Keyboard settings I just opened.', 'concerned');
@@ -2727,7 +2768,7 @@ function onWriteTap() {
 async function onMenu(id, via) {
   if (id === 'show') ui({ kind: 'summon', show: true });
   else if (id === 'ask') await typeToAsk();
-  else if (id === 'stop') { if (voicePaused) setPaused(false); const cancelled = busy; if (busy) logLine('stopped', { by: via === 'esc' ? 'esc' : 'stop' }); endIntro(); controller?.abort(); speech.stop(); ink.stop(cancelled); }
+  else if (id === 'stop') { if (voicePaused) setPaused(false); const cancelled = busy; if (busy) logLine('stopped', { by: via === 'esc' ? 'esc' : 'stop' }); endIntro(); controller?.abort(); foldWait?.abort(); speech.stop(); ink.stop(cancelled); }
   else if (id === 'new') {
     endIntro();
     freshSession('new'); menu();
@@ -3039,8 +3080,9 @@ async function onSpoken(text, area) {
   power.talked();
   hush(false);
   // A yes/no Hydra said aloud: a clear yes or no answers it (C3); anything else is words for the turn.
-  const asked = [...yesNoOpen].find(([, w]) => w.a.voiced && w.a.open), said = asked && spokenAnswer(text);
-  if (said) { const [id, w] = asked; addOnTake = false; w.to({ kind: 'cancel_ask', id }); w.a.answer(said === 'yes' ? 'yes' : null, 'voice'); return; }
+  // Only from a take that started after the question was shown (askForTake).
+  const asked = askForTake(yesNoOpen, { text, takeAt });
+  if (asked) { const { id, w, said } = asked; addOnTake = false; w.to({ kind: 'cancel_ask', id }); w.a.answer(said === 'yes' ? 'yes' : null, 'voice'); return; }
   if (addOnTake) { addOnTake = false; if (addOn(text)) return; }
   if (!area?.file) return enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
   try {
@@ -3056,6 +3098,7 @@ async function onSpoken(text, area) {
 // Words added while Hydra thinks: into the running Claude Code session as one more user message; another agent
 // answers them right after this turn. False when nothing runs any more (they are a new request then).
 let addOnTake = false;
+let takeAt = null; // when the newest take started listening (its voice_state)
 // While the owner talks over a working turn its voice holds (paused, never cut), and goes on once the take ends; the
 // owner's own pause (voicePaused) is left as it is.
 let hushed = false;
@@ -3446,7 +3489,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'orb_listen') {
     const from = m.from === 'orb' ? 'orb' : 'web';
     logLine('orb_listen', { from, asleep: power.asleep, taking: voiceBusy });
-    if (power.asleep) power.wake(from); else if (voiceBusy) send({ type: 'listen_cancel' }); else send({ type: 'listen', via: 'orb' });
+    if (power.asleep) power.wake(from); else if (voiceBusy) send({ type: 'listen_finish' }); else send({ type: 'listen', via: 'orb' });
   }
   // The web app's bridge (window.hydraDesktop.attach / detach), passed on by the shell from Hydra's own page only.
   else if (m.type === 'orb_set') setOrbMode(!!m.detached, m.from ?? 'web', m.drag);

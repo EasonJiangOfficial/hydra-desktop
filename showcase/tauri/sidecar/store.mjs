@@ -136,6 +136,16 @@ const OLD_READ = "[The full list of this window's controls was shown for an earl
 const textOfResult = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((p) => p?.text ?? '').join('') : '');
 
 const KEEP_SHOTS = 3;
+/** The newest n screenshots (image blocks) in a history, oldest first: what a fold keeps for the re-seeded session. */
+export function newestImages(messages, n = KEEP_SHOTS) {
+  const out = [];
+  const take = (c) => { if (Array.isArray(c)) for (const p of c) if (p?.type === 'image') out.push(p); };
+  for (const m of messages ?? []) {
+    if (m?.role === 'tool') for (const r of m.content ?? []) take(r?.content);
+    else if (m?.role === 'user') take(m.content);
+  }
+  return out.slice(-n);
+}
 /**
  * Before each model call. Window reads from before the newest request collapse to a line, and only the
  * newest three image-bearing messages keep their images (older ones collapse to a line), so an older
@@ -210,7 +220,9 @@ export function foldPrint(messages) {
 }
 
 // An assistant message that ends on a question: the request after it is its answer, so no fold cuts between them.
-const asks = (m) => m?.role === 'assistant' && /\?\s*$/.test((typeof m.content === 'string' ? m.content : (m.content ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join('')).trim());
+// A question anywhere in its last paragraph counts ("Which one?\n1. Safari\n2. Chrome", "Open it? (Say yes or no.)",
+// "Want me to open it? 🙂"): a wrong guess only moves the cut one request.
+const asks = (m) => m?.role === 'assistant' && /\?/.test((typeof m.content === 'string' ? m.content : (m.content ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join('')).trim().split(/\n\s*\n/).at(-1) ?? '');
 /**
  * Which turns to fold: all but the newest ~20K tokens and at least the last two requests, cut at a request so
  * tool calls stay paired, never right after a question. Keep and minimum shrink with a low trigger (tests). An
@@ -230,7 +242,14 @@ export function planFold(messages, { trigger, scale = 1, foldCap = Infinity }) {
   let cut = -1;
   for (const r of cuts) if (est(messages.slice(r)) >= keep) cut = r;
   if (cut < 0) return { ok: false, reason: 'too little to fold yet' };
-  for (let i = cuts.indexOf(cut); i > 0 && approxTokens(messages.slice(start, cut)) > foldCap; i--) cut = cuts[i - 1];
+  // Over the cap: the newest cut whose slice fits under it and is still worth a fold. None both: the smallest slice
+  // over the cap folds (a fold too big beats a chat that never folds again: one tiny first request kept every later
+  // check at 'too little', while the chat grew without end).
+  const size = (c) => approxTokens(messages.slice(start, c));
+  if (size(cut) > foldCap) {
+    const upTo = cuts.filter((c) => c <= cut);
+    cut = upTo.filter((c) => size(c) <= foldCap && est(messages.slice(start, c)) >= min).at(-1) ?? upTo.find((c) => size(c) > foldCap);
+  }
   const folded = messages.slice(start, cut), tokens = Math.round(est(folded));
   if (tokens < min) return { ok: false, reason: 'too little to fold yet' };
   return { ok: true, start, end: cut, folded, tokens, summary: start ? messages[0].content.slice(SUMMARY_HEAD.length).trim() : '', print: foldPrint(messages.slice(0, cut)) };

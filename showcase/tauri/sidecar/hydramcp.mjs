@@ -8,8 +8,10 @@
 //   that id. Never an auto-yes.
 // - showTool: the agent's way to move the Hydra window (the server's UiAction shape).
 import { z } from 'zod';
-import { LIMITS, PANEL_PARAMS, SCOPES, scopeSchema, uiActionSchema } from './relayschema.mjs';
+import { CAPABILITIES_HEADER, LIMITS, PANEL_PARAMS, SCOPES, scopeSchema, uiActionSchema } from './relayschema.mjs';
 
+/** What this build declares on every request to Hydra (CAPABILITIES_HEADER, relayschema.mjs). */
+export const CAPABILITIES = JSON.stringify({ approveAllDeletionTags: 1 });
 export const HYDRA_ORIGIN = 'https://hydra-olive-one.vercel.app';
 export const PREFIX = 'hydra_';
 const MCP_PATH = '/api/mcp/agent';
@@ -19,8 +21,9 @@ export function hydraApi({ base = HYDRA_ORIGIN, getKey, fetchImpl = (...a) => fe
   async function req(path, { method = 'GET', body, signal, timeout = 30_000, accept } = {}) {
     const key = await getKey();
     if (!key) throw Object.assign(new Error('This Mac is not paired with Hydra.'), { code: 'unpaired' });
-    // E2: every request (relay ones too) declares that this build tags deletions (approveAllDeletionTags: 1).
-    const headers = { Authorization: `Bearer ${key}`, 'X-Hydra-Caps': 'approveAllDeletionTags=1' };
+    // E2: every request (relay ones too, GET /relay/next included: a poll without it clears it) declares that this build
+    // tags deletions, as the web contract reads it: x-hydra-capabilities: {"approveAllDeletionTags":1}.
+    const headers = { Authorization: `Bearer ${key}`, [CAPABILITIES_HEADER]: CAPABILITIES };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (accept) headers.Accept = accept;
     const t = AbortSignal.timeout(timeout);

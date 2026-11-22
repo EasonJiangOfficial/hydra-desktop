@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, deletesKey, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -484,7 +484,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   async function readable(p, ctx, opts) {
     const v = checkRead(p, HOME, { ...opts, own });
     const f = allowed(v);
-    if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
+    // A file that can hold sign-ins (secret) is never answered by Approve all.
+    if (v.level === ASK && !(await confirm(v.reason, ctx, { deletion: !!v.secret }))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
     return f;
   }
   /** What windows show (each one's document, a browser's file:// page, or the app when there's no file) is checked
@@ -503,15 +504,18 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null, blockOnly = false, looked = null } = {}) {
     const asks = whole && !blockOnly ? [whole] : [], key = (w) => JSON.stringify([w?.id, w?.app, w?.title, w?.document, w?.url]);
     const list = [wins].flat();
+    let secret = false; // a password manager or a sign-in file shows: Approve all never answers, no earlier yes covers it
     for (const w of list) {
       const v = checkWindow(w, HOME, { viewers: !remote() });
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
-      if (whole || blockOnly || ok?.has(key(w))) continue;
+      if (blockOnly) continue;
+      if (v.level === ASK && v.secret) { secret = true; if (!asks.includes(v.reason)) asks.push(v.reason); continue; }
+      if (whole || ok?.has(key(w))) continue;
       if (v.level === ASK && v.app && okApp && !remote() && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
       if (v.level === ASK && v.app && looked && v.app.trim().toLowerCase().normalize('NFC') === looked.normalize('NFC')) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
-    if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
+    if (asks.length && !(await confirm(asks.join('\n'), ctx, { deletion: secret }))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
     if (ok) for (const w of list) ok.add(key(w));
   }
 
@@ -1164,7 +1168,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const where = await hands('locate', spec).then((r) => r?.window?.app ?? null, () => null);
           const inWhat = where ?? (appName === 'front' ? 'the app in front' : appName);
           const question = `In ${inWhat}, every step I'd take:\n${stepsText(mapped, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`;
-          if (!(await confirm(question, ctx, { deletion: notes.length > 0 }))) throw new Error(`${userName} said no, so nothing ran.`);
+          // A plain Delete key deletes what's selected (a message in Mail, a note): a deletion, with or without cmd.
+          if (!(await confirm(question, ctx, { deletion: notes.length > 0 || mapped.some((s) => s.do === 'key' && deletesKey(s.key)) }))) throw new Error(`${userName} said no, so nothing ran.`);
           const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.

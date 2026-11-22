@@ -57,17 +57,18 @@ export function createSpokenTrack({ now = Date.now, cps = CHARS_PER_SEC } = {}) 
  * time `every` passes with no new model text and no audio still playing while live(), one PROGRESS line
  * (voice.progress), never the same twice in a row, shown too (onLine). Nothing while muted() (the owner talking, the
  * voice muted) or waiting() (an Allow ask: the ask speaks instead). touch(secs) on each text delta (0) and each chunk of
- * audio (its length); stop() when the answer starts or the turn ends.
+ * audio (its length); stop() when the turn ends. pause() at the end of a model turn (its answer: nothing over it);
+ * resume() when the run works on after it (a tool for an addition, a new turn of the same run), while live().
  */
 export function startProgress({ voice, live, muted = () => false, waiting = () => false, onLine = () => {}, ms = FILLER_MS, every = PROGRESS_MS, lines = PROGRESS,
   random = Math.random, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-  if (!voice) return { touch() {}, stop() {} };
-  let t = null, stopped = false, opened = false, quietFrom = now(), last = null;
-  const arm = (at) => { if (t) clearTimer(t); t = stopped ? null : setTimer(fire, Math.max(0, at - now())); t?.unref?.(); };
+  if (!voice) return { touch() {}, stop() {}, pause() {}, resume() {} };
+  let t = null, stopped = false, paused = false, opened = false, quietFrom = now(), last = null;
+  const arm = (at) => { if (t) clearTimer(t); t = stopped || paused ? null : setTimer(fire, Math.max(0, at - now())); t?.unref?.(); };
   const stop = () => { stopped = true; if (t) clearTimer(t); t = null; };
   function fire() {
     t = null;
-    if (stopped) return;
+    if (stopped || paused) return;
     if (!live()) return stop();
     const due = quietFrom + (opened ? every : ms);
     if (now() < due) return arm(due); // audio queued since: it is still playing
@@ -89,6 +90,13 @@ export function startProgress({ voice, live, muted = () => false, waiting = () =
       arm(quietFrom + every);
     },
     stop,
+    pause() { if (stopped) return; paused = true; if (t) clearTimer(t); t = null; },
+    resume() {
+      if (stopped || !paused || !live()) return;
+      paused = false; opened = true;
+      quietFrom = Math.max(quietFrom, now());
+      arm(quietFrom + every);
+    },
   };
 }
 
@@ -104,6 +112,10 @@ export function wakeActions(why) {
 
 /** The soft pending sound (the voice helper's loop) and the orb's pending look (E4): a spoken turn at work, from its
  *  start until its answer is said (a tool after it starts again), never while the owner talks or a yes/no waits. */
+/** A turn the owner started himself (typed, said, clicked): not a system turn (news from the agents, a reminder, a
+ *  focus nudge: their text starts with "(") nor the get-to-know-you chat. Only his own turns get the pending sound and
+ *  the progress lines: a sound with no trigger from him was "sounds play randomly". */
+export const ownTurn = ({ text, news = null, intro = false }) => !news && !intro && !String(text ?? '').startsWith('(');
 export const pendingWanted = ({ voice, busy, answerSaid, listening, asking }) => !!voice && !!busy && !answerSaid && !listening && !asking;
 
 /** Whether a take that starts while Hydra works adds on (owner: "speech added while Hydra thinks is added onto the
@@ -112,28 +124,42 @@ export const whileBusy = ({ busy }) => (busy ? 'add_on' : 'new');
 
 // ---- Allow asks in a voice turn (owner: "sometimes it cancels and doesnt warn me or do anything") ----
 export const ASK_DEADLINE_MS = 60_000;
-// A clear yes or no: every word from its side's words, one strong one among them, nothing from the other side.
+// A clear yes or no: every word from its side's words (fillers, the action's verb, the question's own words), one strong
+// one among them (or a whole yes phrase: "do it", "go for it", "please do"), nothing from the other side.
 const YES_STRONG = new Set(['yes', 'yeah', 'yea', 'yep', 'yup', 'sure', 'ok', 'okay', 'alright', 'allow', 'absolutely', 'definitely', 'course', 'ahead']);
-const YES_WORDS = new Set([...YES_STRONG, 'go', 'do', 'it', 'please', 'of', 'fine', 'thing', 'for', 'right', 'all', 'that', 'thanks', 'thank', 'you', 'hydra', 'um', 'uh', 'oh', 'well']);
+const YES_PHRASES = new Set(['do it', 'go for it', 'please do', 'go on', 'yes please']);
+const FILLER = ['it', 'please', 'hydra', 'um', 'uh', 'oh', 'well', 'that', 'thanks', 'thank', 'you', 'i', 'and', 'so', 'just', 'now', 'then', 'this', 'the', 'one'];
+const YES_WORDS = new Set([...YES_STRONG, ...FILLER, 'go', 'do', 'of', 'fine', 'thing', 'for', 'right', 'all', 'can', 'may', 'am', 'that\'s', 'is', 'good']);
 const NO_STRONG = new Set(['no', 'nope', 'nah', "don't", 'dont', 'not', 'skip', 'cancel', 'never', 'stop']);
-const NO_WORDS = new Set([...NO_STRONG, 'do', 'it', 'allow', 'now', 'thanks', 'thank', 'you', 'mind', 'leave', 'way', 'please', 'hydra', 'um', 'uh', 'oh', 'well', 'that']);
+const NO_WORDS = new Set([...NO_STRONG, ...FILLER, 'do', 'allow', 'mind', 'leave', 'way', 'need', 'want', 'to', 'need', 'actually']);
+const VERBS = /^(open|search|fetch|bring|put|save|drop|change|forget|snooze|schedule|remove|replace|delete|list|install|quit|close|hide|minimize|run|read|send|type|move|copy|write|restore|overwrite|connect|start|use|remember)\b/i;
+const VERB_WORDS = new Set(VERBS.source.slice(2, VERBS.source.indexOf(')')).split('|'));
+const wordsOf = (t) => String(t ?? '').toLowerCase().replace(/[’]/g, "'").split(/[^\p{L}\p{N}']+/u).filter(Boolean);
 /** A take's words as the answer to a waiting yes/no: 'yes', 'no', or null when they aren't a clear one (then they're
- *  words for the turn): "yeah, do it", "go ahead", "no thanks", "don't allow it". */
-export function spokenAnswer(text) {
-  const w = String(text ?? '').toLowerCase().replace(/[’]/g, "'").split(/[^\p{L}\p{N}']+/u).filter(Boolean);
-  if (!w.length || w.length > 6) return null;
-  const yes = (w.some((x) => YES_STRONG.has(x)) || w.join(' ') === 'do it') && w.every((x) => YES_WORDS.has(x)), no = w.some((x) => NO_STRONG.has(x)) && w.every((x) => NO_WORDS.has(x));
+ *  words for the turn): "yeah, do it", "go ahead", "yes open it", "yes you can", "go for it", "no thanks", "don't allow
+ *  it". question: the ask itself, whose words ("open", "ui.elevenlabs.io") may follow the yes or no. */
+export function spokenAnswer(text, question = '') {
+  const w = wordsOf(text);
+  if (!w.length || w.length > 8) return null;
+  const obj = new Set(wordsOf(question).filter((x) => !YES_STRONG.has(x) && !NO_STRONG.has(x)));
+  const fits = (set) => w.every((x) => set.has(x) || VERB_WORDS.has(x) || obj.has(x));
+  const said = w.join(' ');
+  const yes = (w.some((x) => YES_STRONG.has(x)) || [...YES_PHRASES].some((p) => said === p || said.startsWith(`${p} `))) && fits(YES_WORDS);
+  const no = w.some((x) => NO_STRONG.has(x)) && fits(NO_WORDS);
   return yes && !no ? 'yes' : no && !yes ? 'no' : null;
 }
-const VERBS = /^(open|search|fetch|bring|put|save|drop|change|forget|snooze|schedule|remove|replace|delete|list|install|quit|close|hide|minimize|run|read|send|type|move|copy|write|restore|overwrite|connect|start|use|remember)\b/i;
 const short = (q) => String(q ?? '').trim().replace(/\bhttps?:\/\//g, '').replace(/\/(?=[?\s]|$)/g, '');
-/** The question as Hydra says it: "Can I open ui.elevenlabs.io? Say yes or no." A long or many-line one points at the
- *  screen, where it's shown in full. */
+/** The question as Hydra says it: "Can I open ui.elevenlabs.io? Say yes or no." Its first line is always said (the
+ *  action and its target: "Can I forget "likes green tea"?"); what follows it (the reason, the steps) points at the
+ *  screen, where it's shown in full. Only a first line too long to say is the generic line. */
 export function spokenQuestion(q) {
-  const s = short(q);
-  if (!s || /\n/.test(s) || s.length > 140) return 'Can I go ahead? The details are on the screen. Say yes or no.';
-  const asked = VERBS.test(s) ? `Can I ${s[0].toLowerCase()}${s.slice(1)}` : s;
-  return `${asked}${/\?$/.test(asked) ? '' : '?'} Say yes or no.`;
+  const s = short(q), lines = s.split('\n'), first = (lines[0] ?? '').trim(), more = lines.slice(1).some((l) => l.trim());
+  const steps = /^In (.+), every step I'd take:$/.exec(first);
+  if (steps) return `Can I act in ${steps[1]}? The steps are on the screen. Say yes or no.`;
+  if (!first || first.length > 140) return 'Can I go ahead? The details are on the screen. Say yes or no.';
+  const line = first.replace(/[:.]$/, '');
+  const asked = VERBS.test(line) ? `Can I ${line[0].toLowerCase()}${line.slice(1)}` : line;
+  return `${asked}${/\?$/.test(asked) ? '' : '?'}${more ? ' The details are on the screen.' : ''} Say yes or no.`;
 }
 const ING = { open: 'opening it', search: 'the search', fetch: 'fetching it', bring: 'bringing it forward', save: 'saving it', drop: 'dropping it', change: 'the change',
   forget: 'forgetting it', snooze: 'the snooze', schedule: 'scheduling it', remove: 'removing it', replace: 'replacing it', delete: 'deleting it', install: 'installing it',
@@ -151,10 +177,12 @@ export function skippedLine(q) {
  */
 export function trackAsk({ id, route, question, choices = false, voice = null, deadlineMs = ASK_DEADLINE_MS, log = () => {}, resolve, close = () => {},
   now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-  const t0 = now(), voiced = !!(choices && voice);
+  const t0 = now();
+  // Said aloud only when the voice took the question (it refuses once the turn's voice ended): an ask never said is
+  // never answered by a spoken word, nor expires aloud.
+  let voiced = !!(choices && voice) && voice.progress?.(spokenQuestion(question), 'ask') === true;
   let open = true, timer = null;
   log('ask', { id, route, ...(choices ? { yesno: true } : {}), ...(voiced ? { spoken: true } : {}) });
-  if (voiced) voice.progress?.(spokenQuestion(question), 'ask');
   const done = (answer, how, by) => {
     if (!open) return false;
     open = false;
@@ -169,11 +197,29 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
   }
   return {
     get open() { return open; },
-    voiced,
+    get voiced() { return voiced; },
+    /** When it was shown: only a take that started after it can answer it by voice (askForTake). */
+    at: t0,
+    question,
+    /** The turn's voice ended: no spoken answer, nothing said at its expiry. */
+    unvoice() { voiced = false; },
     /** text: what the screen sent ('yes' for the first choice, null for the rest or a cancel); by: 'voice' when said. */
     answer(text, by) { return done(text, choices ? (text === 'yes' ? 'yes' : 'no') : text == null ? 'cancelled' : 'typed', by); },
     cancel() { return done(null, 'cancelled'); },
   };
+}
+
+/** The open yes/no a take's words answer, or null: one Hydra said aloud, still open, shown before the take started
+ *  (a take already under way when it showed never heard it: "okay thanks" then meant something else), and the words a
+ *  clear yes or no to it. asks: [[id, { a }]] as sidekick's yesNoOpen. Returns { id, w, said }. */
+export function askForTake(asks, { text, takeAt }) {
+  if (!Number.isFinite(takeAt)) return null;
+  for (const [id, w] of asks) {
+    if (!w?.a?.voiced || !w.a.open || !(takeAt >= w.a.at)) continue;
+    const said = spokenAnswer(text, w.a.question);
+    return said ? { id, w, said } : null;
+  }
+  return null;
 }
 
 /**

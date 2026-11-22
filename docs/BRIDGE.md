@@ -41,8 +41,9 @@ interface HydraDesktop {
   detach(drag?: { x: number; y: number; dragging: true }): void; // build 4, added: drag (the pointer's screen point, in
                        // points, from a press-and-drag on the web orb past ~6 px) brings the desktop orb out under the
                        // cursor; it rides the cursor until the button is let go. An older app ignores drag (plain detach).
-  listen?(): void;     // build 4, added: an orb tap. Asleep it wakes Hydra (which listens at once); during a take it ends
-                       // the take; otherwise it opens one, with the listen chime. Absent from an older app (keep sleep()).
+  listen?(): void;     // build 4, added: an orb tap. Asleep it wakes Hydra (which listens at once); during a take it sends
+                       // what was heard (like a second tap on a mic button; Esc still drops a take); otherwise it opens
+                       // one, with the listen chime. Absent from an older app (keep sleep()).
   stop(): void; pause(): void; resume(): void; setMuted(muted: boolean): void; // version 3: the card's buttons
   setup(): Promise<{ paired: boolean; claude: 'signed_in' | 'signed_out'; permissions: { mic: Perm; accessibility: Perm; screen: Perm }; version: string }>;
   pair(code: string): Promise<{ ok: true } | { ok: false; error: string }>; // the one-time code from POST /api/agent/devices/pair

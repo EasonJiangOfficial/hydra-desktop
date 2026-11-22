@@ -227,7 +227,7 @@ console.log('claudecode ok');
   const co = c.calls.options;
   assert.equal(co.strictMcpConfig, undefined, 'no strict MCP config: claude.ai connectors load');
   assert.equal(co.disableClaudeAiConnectors, undefined);
-  assert.deepEqual(co.env, { HOME: '/h', CLAUDE_CONFIG_DIR: '/cfg', CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' }, 'only the claude.ai login\'s environment');
+  assert.deepEqual(co.env, { HOME: '/h', CLAUDE_CONFIG_DIR: '/cfg', CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', ENABLE_TOOL_SEARCH: 'true' }, 'only the claude.ai login\'s environment (and tool search on)');
   assert.equal(co.model, 'claude-opus-5-5');
   assert.deepEqual(co.allowedTools, ['mcp__gg__read_file'], 'connector tools are never pre-allowed');
   assert.equal((await co.canUseTool('mcp__claude_ai_Gmail__search_threads', { q: 'x' }, {})).behavior, 'allow', 'a read the gate lets through');

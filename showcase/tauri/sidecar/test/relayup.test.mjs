@@ -297,10 +297,10 @@ const askMac = (hydra, parent, o = {}) => askMacTool({ api: hydra.api('brain-1',
   assert.deepEqual(bad.events.filter((e) => e.type === 'ui'), [], 'never a scope the server refuses');
 }
 
-// ---- 6. relayschema.mjs is the web's src/lib/agent/relay-schema.ts at 18e392b, byte for byte.
-// The hash was taken from `git show 18e392b:src/lib/agent/relay-schema.ts | shasum -a 256` (Hydra repo, ship/wave-6b).
+// ---- 6. relayschema.mjs is the web's src/lib/agent/relay-schema.ts at c463e2f (web lane A, final), byte for byte.
+// The hash was taken from that file (relay-schema-web-laneA.ts, copied from the web repo at c463e2f) with shasum -a 256.
 {
-  const WEB_SHA256 = '16f9984a482215cef9bab835993ec50435664ef8f19b75d6d5fdddf5728322d2';
+  const WEB_SHA256 = 'ed45a02cc2d5246eae164f6b8e50f8e6f892bf25c82a0cacef6595d3dfa94069';
   const mine = fs.readFileSync(new URL('../relayschema.mjs', import.meta.url));
   assert.equal(crypto.createHash('sha256').update(mine).digest('hex'), WEB_SHA256, 'relayschema.mjs differs from the web\'s relay-schema.ts: copy it again and update the hash');
   assert.ok(relayEventsAnswerSchema.safeParse({ ok: true, status: 'claimed', inputs: [{ seq: 1, text: 'x' }] }).success);

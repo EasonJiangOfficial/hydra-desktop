@@ -50,6 +50,12 @@ enum Cue {
     static let pendingDelay = 0.6, pendingFadeIn = 0.4, pendingFadeOut = 0.15
     /// The loop's level: Hydra's volume, ducked to a quarter under its own voice (the progress lines).
     static func pendingLevel(volume: Float, speaking: Bool) -> Float { volume * (speaking ? 0.25 : 1) }
+    /// The loop's next level while it plays, or nil when the one applied still holds: Hydra's voice starting or
+    /// stopping, and the owner's volume or mute (play_volume) changing meanwhile, all move it.
+    static func pendingRetarget(applied: Float, volume: Float, speaking: Bool) -> Float? {
+        let want = pendingLevel(volume: volume, speaking: speaking)
+        return abs(want - applied) < 0.001 ? nil : want
+    }
     private static var pendingGen = 0
     private static var duck: Timer?
     private(set) static var pendingOn = false
@@ -70,16 +76,14 @@ enum Cue {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + pendingDelay) {
             guard pendingGen == gen, soundOn else { return }
-            var ducked = speaking()
+            var applied = pendingLevel(volume: volume(), speaking: speaking())
             p.numberOfLoops = -1; p.volume = 0
             if !p.isPlaying { p.currentTime = 0; p.play() }
-            p.setVolume(pendingLevel(volume: volume(), speaking: ducked), fadeDuration: pendingFadeIn)
+            p.setVolume(applied, fadeDuration: pendingFadeIn)
             let t = Timer(timeInterval: 0.1, repeats: true) { _ in
-                guard pendingGen == gen else { return }
-                let s = speaking()
-                if s == ducked { return }
-                ducked = s
-                p.setVolume(pendingLevel(volume: volume(), speaking: s), fadeDuration: pendingFadeOut)
+                guard pendingGen == gen, let next = pendingRetarget(applied: applied, volume: volume(), speaking: speaking()) else { return }
+                applied = next
+                p.setVolume(next, fadeDuration: pendingFadeOut)
             }
             RunLoop.main.add(t, forMode: .common)
             duck = t
@@ -99,6 +103,15 @@ enum CueTest {
         check("pending ducks under Hydra's voice", Cue.pendingLevel(volume: 1, speaking: true) == 0.25)
         check("pending follows the volume", Cue.pendingLevel(volume: 0.5, speaking: true) == 0.125 && Cue.pendingLevel(volume: 0, speaking: false) == 0)
         check("pending fades out in 150 ms", Cue.pendingFadeOut == 0.15 && Cue.pendingDelay == 0.6)
+        check("pending holds its level while nothing changes", Cue.pendingRetarget(applied: 1, volume: 1, speaking: false) == nil)
+        check("a mute mid-loop silences the loop", Cue.pendingRetarget(applied: 1, volume: 0, speaking: false) == 0)
+        check("a volume change mid-loop moves it", Cue.pendingRetarget(applied: 1, volume: 0.5, speaking: false) == 0.5)
+        check("Hydra's voice still ducks it", Cue.pendingRetarget(applied: 1, volume: 1, speaking: true) == 0.25)
+        check("ask take: waits for the voice to start", Voice.afterVoiceDue(started: false, quietFor: 0, waited: 1) == nil)
+        check("ask take: no voice in 4 s, it listens", Voice.afterVoiceDue(started: false, quietFor: 0, waited: 4.1) == true)
+        check("ask take: waits while the voice plays", Voice.afterVoiceDue(started: true, quietFor: 0.1, waited: 2) == nil)
+        check("ask take: listens 0.4 s after the voice", Voice.afterVoiceDue(started: true, quietFor: 0.45, waited: 3) == true)
+        check("ask take: still speaking after 30 s, none", Voice.afterVoiceDue(started: true, quietFor: 0, waited: 31) == false)
         if let dir {
             Cue.dir = URL(fileURLWithPath: dir, isDirectory: true)
             for (n, len) in [("listen", 0.5), ("wake", 0.9), ("pending", 2.4)] {
