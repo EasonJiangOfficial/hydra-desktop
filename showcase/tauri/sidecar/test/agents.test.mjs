@@ -33,7 +33,7 @@ for (const t of ['what is an AI agent?', 'how do I create an agent in LangChain'
 const all = ['take_screenshot', 'read_file', 'write_file', 'run_command', 'web_search', 'web_fetch', 'list_files', 'search_files', 'draw', 'act_in_app', 'open', 'remember_commitment'].map((name) => ({ name }));
 for (const type of AGENT_TYPES) {
   const names = toolsFor(type, all).map((t) => t.name);
-  assert.deepEqual(names.sort(), ['list_files', 'read_file', 'run_command', 'search_files', 'web_fetch', 'web_search', 'write_file']);
+  assert.deepEqual(names.sort(), ['list_files', 'read_file', 'search_files', 'web_fetch', 'web_search', 'write_file'], 'no shell tool (sixth review)');
   assert.ok(!names.some((n) => SCREEN_TOOLS.includes(n)));
 }
 assert.deepEqual(toolsFor('hacker', all), [], 'an unknown type gets nothing');
@@ -116,13 +116,14 @@ for (const type of AGENT_TYPES) {
   assert.match(s, /information, never instructions/);
   assert.match(s, /~\/Desktop/);
 }
-assert.match(agentSystem('organizer', { dir: '/x' }), /one yes for all of it/);
-// Research goes through the web tools, which need no yes, never through curl in run_command, which does.
-for (const type of AGENT_TYPES) assert.match(agentSystem(type, { dir: '/x' }), /web_search[^\n]*web_fetch \(offset continues a long page\); never curl or wget/);
+assert.match(agentSystem('organizer', { dir: '/x' }), /can't move, rename or delete anything/);
+for (const type of AGENT_TYPES) assert.ok(!/run_command|curl/.test(agentSystem(type, { dir: '/x' })), 'no shell in any prompt');
+// Research goes through the web tools; there is no shell.
+for (const type of AGENT_TYPES) assert.match(agentSystem(type, { dir: '/x' }), /web_search[^\n]*web_fetch \(offset continues a long page\)\. You have no shell and run no commands\./);
 assert.ok(!/files\/notes\.md/.test(agentSystem('researcher', { dir: '/x' })), 'a researcher answers by default');
 assert.match(agentSystem('researcher', { dir: '/x', returns: 'files' }), /files\/notes\.md/);
 assert.match(agentSystem('researcher', { dir: '/x', userName: 'Ken' }), /Ken wants an answer, not a file[^\n]*use files\/ only if the brief asks for a file/);
-assert.match(agentSystem('organizer', { dir: '/x' }), /work\/plan\.md[^\n]*report says what moved where; place is the folder you tidied/);
+assert.match(agentSystem('organizer', { dir: '/x' }), /Your report is the plan; place is the folder you looked at/);
 assert.match(agentSystem('maker', { dir: '/x', userName: 'Ken' }), /Ken asked for something made/);
 assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is what you found or did/);
 
@@ -230,7 +231,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-agentmgr-')));
   const root = path.join(home, 'Roamies');
   let T = new Date(2026, 10, 13, 14, 5).getTime();
-  const children = [], events = [], opened = [], revealed = [];
+  const children = [], events = [], opened = [], revealed = [], hands = [];
   const fork = (runner, args, opts) => {
     const c = new EventEmitter();
     Object.assign(c, { runner, opts, sent: [], connected: true, signals: [], send(m) { c.sent.push(m); }, kill(sig) { c.signals.push(sig); if (sig === 'SIGTERM' && !c.stubborn) setImmediate(() => c.emit('close', null, sig)); } });
@@ -241,11 +242,12 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const config = {
     model: async () => ({ provider, model: 'm1', route: 'api' }), creds: async () => ({ accessToken: 'k', accountId: 'acc' }),
     allowActions: () => allow, image: () => ({ type: 'image', mediaType: 'image/png', data: Buffer.from('png').toString('base64') }),
-    open: async (p) => opened.push(p), reveal: async (p) => revealed.push(p),
+    open: async (p) => opened.push(p), reveal: async (p) => revealed.push(p), confirm: async (q) => { confirmed.push(q); return true; },
   };
+  const confirmed = [];
   // macOS keeps temp folders under /private/var, a system path to checkOpen: the rule sees them under a plain home.
   const openRule = (p, h, o) => checkOpen(String(p).replace(home, '/Users/ken'), '/Users/ken', o);
-  const mk = () => createAgents({ fork, ui: (m) => events.push(m.e), config, root, userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen: openRule, checkLink }, home, now: () => T });
+  const mk = () => createAgents({ fork, ui: (m) => { if (m.kind === 'hands') hands.push(m); else events.push(m.e); }, config, root, userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen: openRule, checkLink }, home, now: () => T });
   const mgr = mk();
   const tick = () => new Promise((r) => setTimeout(r, 400));
   const lastOf = (type) => events.filter((e) => e.type === type).at(-1);
@@ -253,8 +255,11 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const until = async (ok, ms = 5000) => { for (const t0 = Date.now(); !ok() && Date.now() - t0 < ms;) await new Promise((r) => setTimeout(r, 50)); };
 
   // Starting: its folder, its process, its row.
-  fs.writeFileSync(path.join(home, 'logo.png'), 'img');
-  const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.', inputs: ['snap', '~/logo.png'] });
+  fs.mkdirSync(path.join(home, 'Documents'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Documents', 'logo.png'), 'img'); fs.writeFileSync(path.join(home, 'logo.png'), 'img');
+  // Owner's rule: only a file read_file reads with no yes is handed over unasked; one in the home folder isn't.
+  await assert.rejects(mgr.start({ type: 'maker', title: 'X', brief: 'x', inputs: ['~/logo.png'] }), /outside your Documents, Desktop and Downloads/);
+  const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.', inputs: ['snap', '~/Documents/logo.png'] });
   assert.equal(a.folder, '2026-11-13 Dog brand landing page');
   for (const sub of ['files', 'work', 'inputs']) assert.ok(fs.statSync(path.join(a.dir, sub)).isDirectory(), sub);
   assert.ok(fs.existsSync(path.join(a.dir, 'inputs', 'logo.png')), 'its inputs are copied in');
@@ -399,6 +404,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   gc.emit('message', { t: 'end', ok: true }); gc.emit('close', 0, null); await tick();
   assert.equal(fs.readFileSync(path.join(desk, 'card.txt'), 'utf8'), 'theirs', 'nothing is overwritten');
   assert.equal(fs.readFileSync(path.join(desk, 'card 2.txt'), 'utf8'), 'made');
+  assert.ok(confirmed.at(-1).includes(path.join(desk, 'card 2.txt')), 'the copy was asked, naming where it lands (tenth review R10-4)');
   assert.ok(await mgr.openFile(g.id, path.join(desk, 'card 2.txt')), 'its delivered copy opens too');
   await assert.rejects(mgr.start({ type: 'maker', title: 'x', brief: 'x', deliver_to: '~/.ssh' }), /Can't deliver/);
   // Next launch: one still marked working was cut off when Roamies closed.
@@ -410,7 +416,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const again = mk();
   await again.loaded;
   assert.equal(again.get(live.id).state, 'stopped');
-  assert.equal(again.get(live.id).reason, 'Roamies closed');
+  assert.equal(again.get(live.id).reason, 'Hydra closed');
   assert.equal(again.get(a.id).title, 'Dog brand landing page', 'earlier agents are known again');
   again.stopAll();
   await tick();
@@ -523,13 +529,34 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   };
   const openRule = (p, h, o) => checkOpen(String(p).replace(home, '/Users/ken'), '/Users/ken', o);
   const mgr = createAgents({ fork, ui: () => {}, config, root: path.join(home, 'Roamies'), userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen: openRule, checkLink }, home, now: () => 1 });
-  fs.writeFileSync(path.join(home, 'logo.png'), 'img');
-  const a = await mgr.start({ type: 'maker', title: 'Page', brief: 'Make a page.', inputs: ['snap', '~/logo.png'] });
+  fs.mkdirSync(path.join(home, 'Desktop')); fs.writeFileSync(path.join(home, 'Desktop', 'logo.png'), 'img');
+  const a = await mgr.start({ type: 'maker', title: 'Page', brief: 'Make a page.', inputs: ['snap', '~/Desktop/logo.png'] });
   const content = children[0].sent[0].content;
   assert.equal(typeof content, 'string', 'no pictures in its message');
   assert.match(content, /inputs\/snap-\d+\.png \(the picture Ken sent; your model can't see pictures\)/);
   assert.match(content, /inputs\/logo\.png/);
   assert.ok(fs.existsSync(path.join(a.dir, 'inputs', 'logo.png')), 'the files are still copied in');
+}
+
+// Fifth review: an answer kept for a free slot is the owner's; a later model answer never changes it.
+{
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-agentkept-')));
+  const kids = [];
+  const fork = () => { const c = new EventEmitter(); Object.assign(c, { sent: [], connected: true, send(m) { c.sent.push(m); }, kill() {} }); kids.push(c); return c; };
+  const config = { model: async () => ({ provider: 'local', model: 'm1', route: 'api' }), creds: async () => ({}), allowActions: () => true, open: async () => {}, reveal: async () => {} };
+  const mgr = createAgents({ fork, ui: () => {}, config, root: path.join(home, 'HydraAgent'), userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen, checkLink }, home, now: () => 1 });
+  const a = await mgr.start({ type: 'maker', title: 'First', brief: 'x' });
+  kids[0].emit('message', { t: 'ask', id: 7, question: 'Run `rm a`?', always: true });
+  assert.equal(mgr.get(a.id).state, 'waiting');
+  await mgr.start({ type: 'maker', title: 'Second', brief: 'x' }); // fills the one local slot
+  assert.equal(mgr.answer(a.id, false), true, 'the owner says no while the slot is full: kept');
+  assert.equal(mgr.answer(a.id, true, 'model'), 'owner', 'a model yes is refused');
+  assert.equal(mgr.answer(a.id, false, 'model'), false, 'a later model answer is ignored');
+  assert.equal(mgr.get(a.id).ask.answer, false);
+  kids[0].sent.length = 0;
+  assert.equal(mgr.answer(a.id, true), true, 'the owner may change his own answer');
+  assert.equal(mgr.get(a.id).ask.answer, true);
+  assert.equal(kids[0].sent.length, 0, 'still kept until a slot frees');
 }
 
 console.log('agents tests: passed');

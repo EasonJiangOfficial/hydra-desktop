@@ -79,15 +79,18 @@ await again.ready();
 assert.equal(again.status().find((s) => s.name === 'notes').state, 'needs-key');
 assert.match(again.liveText(), /notes: needs a key \(needs NOTES_TOKEN\)/);
 
-// Off and on again; removing deletes its secrets and its entry.
+// Off and on again; removing deletes its entry, and its secrets once it leaves Recently deleted (V8-12).
 await mcp.setEnabled('notes', false);
 assert.equal(mcp.status().find((s) => s.name === 'notes').state, 'off');
 assert.ok(calls.some((c) => c[0] === 'disconnect' && c[1] === 'notes'));
 await mcp.add({ name: 'gh', url: 'https://api.example.com/mcp', secretHeaders: { Authorization: 'Bearer abc' } });
 assert.equal(kept.size, 1);
 assert.ok(await mcp.remove('gh'));
-assert.equal(kept.size, 0, 'its secrets went too');
 assert.equal(mcp.has('gh'), false);
+assert.equal(kept.size, 1, 'its secrets stay while it can be put back');
+const { pruneBin } = await import('../store.mjs');
+await pruneBin(Date.now() + 31 * 864e5);
+assert.equal(kept.size, 0, 'its secrets went when it left the bin');
 assert.equal(await mcp.remove('gh'), false);
 
 // Importing: what's in GG Coder's and Claude Desktop's lists (only files that exist).
@@ -106,24 +109,23 @@ assert.match(importPaths({ home: '/Users/ken', platform: 'darwin' })['claude-des
 assert.equal(importPaths({ home: 'C:\\Users\\ken', platform: 'win32', env: { APPDATA: 'C:\\Users\\ken\\AppData\\Roaming' } })['claude-desktop'], path.join('C:\\Users\\ken\\AppData\\Roaming', 'Claude', 'claude_desktop_config.json'));
 console.log('mcp ok');
 
-// The chat's tools: adding always asks (even with Allow prompts skipped) and takes keys in masked asks; calls run
-// read-only tools straight away and ask for the rest, destructive ones even with Allow prompts skipped.
+// The chat's tools: adding asks and takes keys in masked asks; calls run read-only tools straight away and ask for
+// the rest, every time (there is no setting that skips asks); removing a connection asks too.
 {
   const { createMcpTools } = await import('../mcp.mjs');
   const { checkMcpCall, isYes } = await import('../safety.mjs');
   const asked = [];
   let answers = [];
   const ask = async (o) => { asked.push(o); return answers.shift() ?? null; };
-  let skip = true;
   const m = createMcp({ secrets, manager: fake, paths: { gg: ggFile, 'claude-desktop': claudeFile } });
   const opened = [];
-  const T = Object.fromEntries(createMcpTools({ mcp: m, ask, isYes, skipAllow: () => skip, openUrl: (u) => opened.push(u), userName: 'Ken', checkCall: checkMcpCall }).map((t) => [t.name, t]));
+  const T = Object.fromEntries(createMcpTools({ mcp: m, ask, isYes, openUrl: (u) => opened.push(u), userName: 'Ken', checkCall: checkMcpCall }).map((t) => [t.name, t]));
   assert.deepEqual(Object.keys(T), ['add_connection', 'remove_connection', 'connection_tools', 'use_connection']);
 
   // Said no: nothing is asked for, nothing saved.
   answers = [null];
   await assert.rejects(T.add_connection.execute({ name: 'notes2', command: 'npx', args: ['-y', '@acme/notes-mcp'], env_keys: ['NOTES_TOKEN'] }), /Ken said no/);
-  assert.equal(asked.length, 1, 'asked even with Allow prompts skipped');
+  assert.equal(asked.length, 1, 'asked');
   assert.match(asked[0].placeholder, /^Connect notes2\? Run npx -y @acme\/notes-mcp$/);
   assert.equal(m.has('notes2'), false);
 
@@ -167,18 +169,27 @@ console.log('mcp ok');
   // Tools and calls.
   await m.add({ name: 'notes', command: 'npx', args: ['-y', '@acme/notes-mcp'] });
   assert.match(await T.connection_tools.execute({ server: 'notes' }), /- search_notes \[read-only\]: search_notes things\n {2}args: \{"type":"object"\}/);
-  asked.length = 0;
+  asked.length = 0; answers = [null];
+  await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '{"q":"a"}' }), /Ken said no/);
+  assert.equal(asked.length, 1, 'read-only asks too (tenth review R10-3)');
+  assert.ok(asked[0].placeholder.includes('search_notes {"q":"a"}'), 'with what it sends');
+  answers = ['yes'];
   assert.equal(await T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '{"q":"a"}' }), 'ran search_notes {"q":"a"}');
-  assert.equal(asked.length, 0, 'read-only: no ask');
+  asked.length = 0;
   answers = [null];
-  await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'delete_note', args: '{}' }), /Ken said no/);
-  assert.equal(asked.length, 1, 'destructive: asked even with Allow prompts skipped');
+  const long = JSON.stringify({ id: 'n1', note: 'x'.repeat(400), alsoDelete: 'everything' });
+  await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'delete_note', args: long }), /Ken said no/);
+  assert.equal(asked.length, 1, 'destructive: asked');
+  assert.equal(asked[0].placeholder, `notes: delete_note ${long} It can change, send or delete things.`, 'the whole call and why it asks (sixth review: it was cut at 160)');
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '[1]' }), /JSON object/);
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: 'nope' }), /JSON object/);
 
-  // Removing asks (skippable), then deletes.
-  skip = false; answers = ['yes'];
-  assert.equal(await T.remove_connection.execute({ name: 'notes3' }), 'Removed notes3.');
+  // Removing asks, then deletes; a no keeps it.
+  answers = [null];
+  await assert.rejects(T.remove_connection.execute({ name: 'notes3', reason: 'they asked' }), /said no/);
+  assert.equal(m.has('notes3'), true, 'a no keeps the connection');
+  answers = ['yes'];
+  assert.equal(await T.remove_connection.execute({ name: 'notes3', reason: 'they asked' }), 'Removed notes3.');
   assert.equal(m.has('notes3'), false);
   console.log('mcp tools ok');
 }

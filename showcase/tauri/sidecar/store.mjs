@@ -87,10 +87,12 @@ export async function pruneSessions() {
   try { names = (await fs.readdir(SESSIONS)).filter((n) => SESSION_FILE.test(n)).sort(); } catch { return; }
   const drop = names.slice(0, Math.max(0, names.length - KEEP_SESSIONS));
   if (!drop.length) return;
-  console.error(`[store] pruning ${drop.length} old session(s), keeping ${KEEP_SESSIONS}`);
+  // Kept, not deleted (owner: nothing of his is deleted without his yes): older chats move to sessions/archive.
+  console.error(`[store] archiving ${drop.length} old session(s), keeping ${KEEP_SESSIONS} at hand`);
+  const archive = path.join(SESSIONS, 'archive');
+  await fs.mkdir(archive, { recursive: true, mode: 0o700 }).catch(() => {});
   for (const n of drop) {
-    await fs.unlink(path.join(SESSIONS, n)).catch(() => {});
-    await fs.unlink(path.join(SESSIONS, n.replace(/\.json$/, '.folded.jsonl'))).catch(() => {});
+    for (const f of [n, n.replace(/\.json$/, '.folded.jsonl')]) await fs.rename(path.join(SESSIONS, f), path.join(archive, f)).catch(() => {});
   }
 }
 
@@ -455,6 +457,8 @@ export async function updateCommitment(id, { status, dueMs, repeat, keepSeries =
   let advanced = false;
   if (status === 'done' && c.repeat && c.status === 'open') advanced = advance(c, now);
   if (advanced) { c.lastDoneAt = now; c.timesDone = (c.timesDone ?? 0) + 1; }
+  // Dropping deletes it (the whole series): a copy goes to Recently deleted first, so it can be put back.
+  if (status === 'dropped' && c.status !== 'dropped') await toBin('commitment', c.text, { ...c });
   if (status && !advanced) { c.status = status; if (status !== 'open') c.doneAt = now; else delete c.doneAt; }
   await saveMemory();
   return { ...c, advanced };
@@ -482,6 +486,8 @@ export async function applySynced({ commitments, facts }, basis) {
 
 const FACT_CAP = 150;
 export const listFacts = () => loadMemory().facts.slice();
+/** The facts in use: replaced ones (kept for the owner to forget) are left out of everything the model sees. */
+export const liveFacts = () => loadMemory().facts.filter((f) => !f.supersededBy);
 
 /** Saves a fact; a near-duplicate of an existing one replaces it instead of piling up. */
 export async function addFact(text) {
@@ -489,10 +495,11 @@ export async function addFact(text) {
   const key = t.toLowerCase().replace(/[^a-z0-9 ]/g, '');
   const facts = loadMemory().facts;
   const same = facts.find((f) => f.text.toLowerCase().replace(/[^a-z0-9 ]/g, '') === key);
-  if (same) { same.updatedAt = Date.now(); await saveMemory(); return same; }
+  // Said again: it's current again, even if a later fact had replaced it.
+  if (same) { same.updatedAt = Date.now(); delete same.supersededBy; delete same.supersededAt; await saveMemory(); return same; }
   const f = { id: newId('f'), text: t, createdAt: Date.now() };
   facts.push(f);
-  if (facts.length > FACT_CAP) facts.splice(0, facts.length - FACT_CAP); // oldest go first
+  // No cap that deletes: every fact stays until the owner forgets it (pickFacts keeps the prompt small).
   await saveMemory();
   return f;
 }
@@ -502,7 +509,7 @@ export async function addFact(text) {
 const STOP = new Set('the a an and or but to of in on at for with is are was were be it this that my me i you your his her its our their what how when where why can do does just like about from have has had will would should could not no yes so if then than'.split(' '));
 const words = (t) => new Set(String(t).toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((w) => !STOP.has(w)) ?? []);
 export function pickFacts(context = '', limit = 40) {
-  const facts = loadMemory().facts;
+  const facts = loadMemory().facts.filter((f) => !f.supersededBy); // replaced ones are kept, never used
   if (facts.length <= limit) return facts.slice();
   const ctx = words(context), byNew = facts.slice().sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt));
   const chosen = new Set(byNew.slice(0, 8).map((f) => f.id));
@@ -522,17 +529,156 @@ export function touchFacts(ids) {
 
 export async function clearFacts() {
   const n = loadMemory().facts.length;
+  if (n) await toBin('facts', `${n} thing${n === 1 ? '' : 's'} I remembered`, memory.facts.map((f) => ({ ...f })));
   memory.facts = [];
   await saveMemory();
   return n;
+}
+
+/** A newer fact corrects an older one: the old one is kept (only the owner deletes), marked replaced, never used. */
+export async function supersedeFact(oldId, newId) {
+  const f = loadMemory().facts.find((x) => x.id === oldId);
+  if (!f || f.id === newId) return null;
+  f.supersededBy = newId; f.supersededAt = Date.now();
+  await saveMemory();
+  return f;
+}
+
+/** What the memory pass learned, saved only with the owner's yes (tenth review R10-7): one question for the batch,
+ *  each fact in full and the one it replaces. yes(question) → true or false. Returns the facts saved. */
+export async function learnFactsAsked(facts, yes) {
+  const list = (Array.isArray(facts) ? facts : []).filter((f) => String(f?.text ?? '').trim());
+  if (!list.length) return [];
+  const had = new Map(listFacts().map((f) => [f.id, f.text]));
+  const line = (f) => `- ${String(f.text).trim()}${f.replaces && had.has(f.replaces) ? ` (instead of "${had.get(f.replaces)}")` : ''}`;
+  if (!(await Promise.resolve().then(() => yes(`Remember ${list.length === 1 ? 'this' : `these ${list.length}`}?\n${list.map(line).join('\n')}`)).catch(() => false))) return [];
+  const added = [];
+  for (const f of list) {
+    // A correction is added and the old fact kept, marked replaced: nothing is deleted without the owner's yes.
+    const nf = await addFact(f.text);
+    if (f.replaces) await supersedeFact(f.replaces, nf.id);
+    added.push(nf);
+  }
+  return added;
 }
 
 export async function forgetFact(id) {
   const facts = loadMemory().facts, i = facts.findIndex((f) => f.id === id);
   if (i < 0) return null;
   const [f] = facts.splice(i, 1);
+  await toBin('fact', f.text, { ...f });
   await saveMemory();
   return f;
+}
+
+// ---------- recently deleted ----------
+// Owner: "I should be able to undo deletions and undo past behaviors." Whatever is deleted (a fact, all facts, a
+// dropped commitment, a scheduled job, a skill, a connection) and a file write_file overwrote is kept here for
+// BIN_DAYS, then let go. Each kind is put back by its own module (onRestore); a skill's folder or an old file's copy
+// sits in Data/bin/<id>/ meanwhile. Nothing in it goes to the model unless the owner asks to see or restore it.
+const BIN = path.join(DIR, 'bin.json'), BIN_DIR = path.join(DIR, 'bin');
+export const BIN_DAYS = 30, BIN_MAX = 200;
+const restorers = new Map(), purgers = new Map();
+let bin = null;
+const loadBin = () => {
+  if (bin) return bin;
+  const b = readJson(BIN, { backup: true });
+  bin = b?.version === 1 && Array.isArray(b.items) ? b : { version: 1, items: [] };
+  return bin;
+};
+const saveBin = () => writeJson(BIN, loadBin(), { backup: true });
+/** Where an item's files are kept while it's in the bin. */
+export const binFolder = (id) => path.join(BIN_DIR, String(id).replace(/[^a-z0-9]/gi, ''));
+/** How a kind is put back: fn(item) → a line saying what came back (throws when it can't). */
+export const onRestore = (kind, fn) => restorers.set(kind, fn);
+/** What else goes when an item of this kind leaves the bin for good (a connection's saved keys). */
+export const onPurge = (kind, fn) => purgers.set(kind, fn);
+
+/** Keeps something deleted so it can be put back. title: what the owner sees; data: all it takes to restore it. */
+export async function toBin(kind, title, data, { files = null } = {}) {
+  const b = loadBin(), id = `d${randomBytes(4).toString('hex')}`;
+  b.items.unshift({ id, kind, title: String(title ?? ''), at: Date.now(), data, ...(files ? { files } : {}) });
+  await pruneBin();
+  await saveBin();
+  return id;
+}
+/** Lets go of what's older than BIN_DAYS or past BIN_MAX (a connection's keys, a skill's folder go with it). */
+export async function pruneBin(now = Date.now()) {
+  const b = loadBin(), cut = now - BIN_DAYS * 864e5;
+  const gone = b.items.filter((x, i) => x.at < cut || i >= BIN_MAX);
+  if (!gone.length) return 0;
+  const left = new Set(b.items.filter((x) => !gone.includes(x)).map((x) => x.id));
+  for (const x of gone) {
+    // A kind whose module isn't loaded yet can't tidy up after itself: kept until it is.
+    const purge = purgers.get(x.kind);
+    if (x.kind === 'connection' && !purge) { left.add(x.id); continue; }
+    try { await purge?.(x); } catch {}
+    await fs.rm(binFolder(x.id), { recursive: true, force: true }).catch(() => {});
+  }
+  b.items = b.items.filter((x) => left.has(x.id));
+  await saveBin();
+  return gone.length;
+}
+/** What's in the bin, newest first: { id, kind, title, at } (no contents). */
+export const listBin = () => loadBin().items.map(({ id, kind, title, at }) => ({ id, kind, title, at }));
+export const getBin = (id) => { const x = loadBin().items.find((i) => i.id === String(id)); return x ? JSON.parse(JSON.stringify(x)) : null; };
+/** Puts one item back where it was and takes it out of the bin. → the restorer's line. Throws with a reason. */
+export async function restoreFromBin(id) {
+  const b = loadBin(), x = b.items.find((i) => i.id === String(id));
+  if (!x) throw new Error(`Nothing in Recently deleted has the id ${id}.`);
+  const fn = restorers.get(x.kind);
+  if (!fn) throw new Error(`I can't put back a ${x.kind} yet.`);
+  const said = await fn(JSON.parse(JSON.stringify(x)));
+  b.items = b.items.filter((i) => i !== x);
+  await saveBin();
+  await fs.rm(binFolder(x.id), { recursive: true, force: true }).catch(() => {});
+  return said;
+}
+/** A bin line for the model and the panel: what it was, when it went. */
+export const binLine = (x, fmt = (ms) => new Date(ms).toLocaleString()) => `${x.id}  ${BIN_KIND[x.kind] ?? x.kind}: ${x.title} (deleted ${fmt(x.at)})`;
+export const binKind = (k) => BIN_KIND[k] ?? k;
+const BIN_KIND = { fact: 'Fact', facts: 'Facts', commitment: 'Commitment', job: 'Scheduled job', skill: 'Skill', connection: 'Connection', file: 'File before it was changed' };
+
+// Facts and commitments come back with a new id, so sync doesn't take them for the ones it saw deleted.
+onRestore('fact', async ({ data }) => {
+  const f = { ...data, id: newId('f'), updatedAt: Date.now() };
+  delete f.supersededBy; delete f.supersededAt;
+  loadMemory().facts.push(f);
+  await saveMemory();
+  return `Remembered again: ${f.text}`;
+});
+onRestore('facts', async ({ data }) => {
+  const have = new Set(loadMemory().facts.map((f) => f.text));
+  const back = (Array.isArray(data) ? data : []).filter((f) => f?.text && !have.has(f.text)).map((f) => ({ ...f, id: newId('f'), updatedAt: Date.now() }));
+  memory.facts.push(...back);
+  await saveMemory();
+  return `Remembered ${back.length} thing${back.length === 1 ? '' : 's'} again.`;
+});
+onRestore('commitment', async ({ data }) => {
+  const m = loadMemory();
+  m.commitments = m.commitments.filter((c) => c.id !== data.id);
+  const c = { ...data, id: newId('c'), updatedAt: Date.now() };
+  m.commitments.push(c);
+  await saveMemory();
+  return `Back on the list: ${c.text}`;
+});
+// A file write_file changed: its old contents go back where they were (what's there now is kept in the bin too).
+onRestore('file', async ({ id, data }) => {
+  const from = path.join(binFolder(id), 'old');
+  if (!existsSync(from)) throw new Error('Its old copy is gone, so it can\'t be put back.');
+  if (existsSync(data.path)) await keepOldFile(data.path);
+  await fs.mkdir(path.dirname(data.path), { recursive: true });
+  await fs.copyFile(from, data.path);
+  return `Put back ${data.path} as it was before it was changed.`;
+});
+/** Keeps a copy of a file about to be overwritten (a regular file up to 25 MB) so the change can be undone. */
+export async function keepOldFile(file) {
+  const st = await fs.lstat(file).catch(() => null);
+  if (!st?.isFile() || st.size > 25 * 2 ** 20) return null;
+  const id = await toBin('file', file, { path: file, size: st.size });
+  await fs.mkdir(binFolder(id), { recursive: true, mode: 0o700 });
+  await fs.copyFile(file, path.join(binFolder(id), 'old'));
+  return id;
 }
 
 /** Open commitments whose time has come and that haven't been reminded yet. Marks them reminded; plain

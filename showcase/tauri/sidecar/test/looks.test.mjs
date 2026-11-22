@@ -3,96 +3,61 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_VOICE } from '../fish.mjs';
 
-// Every look the app offers has a drawing and its voice; the setup guide offers the same looks.
+// One character: Hydra, with the one Fish Audio voice the owner picked. No other look or picker is left; the orb's
+// size is a setting (owner, 2026-11-22: "it's way too big"): Small 40, Medium 48 (default), Large 64.
 const src = (p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8');
-const side = src('../sidekick.mjs'), guide = src('../../../onboarding/onboarding.js');
-const looks = [...side.slice(side.indexOf('const LOOKS = ['), side.indexOf('];', side.indexOf('const LOOKS = ['))).matchAll(/\['(\w+)', '([^']+)', (DEFAULT_VOICE|'(\w+)')\]/g)];
-assert.deepEqual(looks.map((m) => m[1]), ['classic', 'jarvis', 'glayos', 'ultren', 'anime', 'sarah', 'adrian', 'rita']);
-const voices = Object.fromEntries(looks.map((m) => [m[1], m[4] ?? null]));
-assert.equal(voices.classic, null, 'Roamie uses DEFAULT_VOICE');
-assert.equal(DEFAULT_VOICE, '2680da81de8348a68e1f4dbaa79272f1');
-assert.equal(voices.jarvis, 'e13fa398a7f445a685316a3de6089ce7');
-// Regression: Roamie spoke with JARVIS's voice (the default was JARVIS's ID).
-assert.equal(new Set([DEFAULT_VOICE, ...Object.values(voices).filter(Boolean)]).size, 8, 'every look has its own voice');
-assert.ok(!/config\.fishVoice/.test(side), 'a saved fishVoice (the old JARVIS default) is never used');
-assert.equal(voices.anime, 'd8f3b4c1199f4568a767ec54112d2b17');
-assert.equal(voices.sarah, '933563129e564b19a115bedd57b7406a');
-assert.equal(voices.adrian, 'bf322df2096a46f18c579d0baa36f41d');
-assert.equal(voices.rita, '84aadb575ed74e9aa44ba7ab8619d1a1');
-assert.equal(voices.ultren, '06cfdb3653a4496983d6ad77f98cc184');
-assert.equal(voices.glayos, 'ee885900b0874d12b1c3439d1e56cc95');
-for (const [, id, label] of looks) assert.ok(guide.includes(`['${id}', '${label}']`), `the setup guide offers ${label}`);
-// Each look greets you in its voice when picked, with the words Settings and the setup guide show.
-{
-  const obj = (text, name) => new Function(`return ${text.match(new RegExp(`const ${name} = (\\{[^}]*\\})`))[1]}`)();
-  const said = obj(side, 'LOOK_GREETINGS');
-  assert.deepEqual(Object.keys(said), looks.map((m) => m[1]), 'a greeting for every look');
-  assert.deepEqual(obj(src('../../../panel/panel.js'), 'QUIPS'), said, 'Settings shows the spoken greeting');
-  assert.deepEqual(obj(guide, 'LOOK_QUIPS'), said, 'the setup guide shows the spoken greeting');
-  const set = side.slice(side.indexOf('function setLook('), side.indexOf('\n}\n', side.indexOf('function setLook(')));
-  assert.match(set, /if \(changed && VOICE_ON\(\) && !busy\)/, 'only for a new look, with voice on, and not over a reply');
-  assert.match(set, /v\.say\(LOOK_GREETINGS\[l\]\)/);
-  // Each talks its own way, in the full prompt and in Lite mode, and the prompt names every look.
-  assert.deepEqual(Object.keys(obj(side, 'LOOK_STYLE')), looks.map((m) => m[1]), 'a talking style for every look');
-  assert.match(side, /Personality: \$\{LOOK_STYLE\[config\.look\] \?\? LOOK_STYLE\.classic\}/);
-  assert.match(side, /style: LOOK_STYLE\[config\.look\]/);
-  assert.match(side, /your name and your voice: \$\{LOOKS\.slice\(0, -1\)/);
+const side = src('../sidekick.mjs');
+const HYDRA_VOICE = '612b878b113047d9a770c069c8b4fdfe';
+assert.match(side, /const LOOKS = \[\['hydra', 'Hydra', HYDRA_VOICE\]\];/);
+assert.match(side, new RegExp(`const HYDRA_VOICE = '${HYDRA_VOICE}';`));
+assert.equal(DEFAULT_VOICE, HYDRA_VOICE, 'Fish Audio speaks in Hydra\'s voice by default');
+assert.match(side, /const SIZES = \[\['small', 'Small'\], \['default', 'Medium'\], \['large', 'Large'\]\];/);
+const OLD = /\b(jarvis|glayos|ultren|anime girl|sarah|adrian|rita x)\b|'classic'|people\.js/i;
+for (const f of ['../../../panel/panel.js', '../../../panel/index.html', '../../../onboarding/onboarding.js', '../../../onboarding/index.html', '../../../roamies/host.js', '../../../roamies/notch.js', '../../../desktop.html', '../gemini.mjs']) {
+  assert.ok(!OLD.test(src(f)), `${f} names no removed character`);
 }
 
-// The characters draw at every size without throwing, inside their area, and the sprites are well formed.
-const warns = [];
+// The orb draws an open sphere of dots, in every state, inside its area; asleep or at rest it barely moves.
 globalThis.window = { Roamie: {} };
-const warn = console.warn; console.warn = (m) => warns.push(m);
-new Function(src('../../../roamies/people.js'))();
-console.warn = warn;
-assert.deepEqual(warns, [], 'every sprite row is half or whole width');
-const P = window.Roamie.people;
-const th = () => 0.5;
-// ken: Ken Kai, on the About page (drawn the same way, though not a look you can pick).
-for (const who of ['anime', 'sarah', 'adrian', 'rita', 'ultren', 'glayos', 'ken']) for (const size of ['default', 'small', 'cursor']) for (const state of [{}, { mode: 'talk', voice: 0.9 }, { happy: 1 }, { open: 0 }, { dizzy: 1 }, { sleepy: 1 }, { act: 'hype', actA: 0.2 }, { act: 'upset', actA: 0.1 }]) {
-  const cells = [];
-  const k = { put: (x, y, l) => { assert.ok(Number.isInteger(x) && Number.isInteger(y) && l >= 0 && l <= 4, `${who} ${size} cell`); cells.push([x, y]); }, L: 4, th };
-  const st = { t: 1, mode: null, voice: null, act: null, actA: 0, open: 1, look: [0.5, -0.3], vx: 0, sq: 0, wide: 0, dizzy: 0, happy: 0, sleepy: 0, mouth: null, brow: null, ...state };
-  if (size === 'cursor') P[who].cursor(k, 50, 50, 46, 43, st); else P[who].body(k, 50, 50, size === 'small' ? 6.4 : 12.75, st);
-  assert.ok(cells.length > 40, `${who} ${size} draws`);
-  const span = Math.max(...cells.map(([x]) => x)) - Math.min(...cells.map(([x]) => x));
-  assert.ok(span < (size === 'default' ? 40 : 24), `${who} ${size} stays its size (${span})`);
+new Function(src('../../../roamies/hydra.js'))();
+const H = window.Roamie.hydra;
+const draw = (st, rad = 12) => {
+  const dots = [];
+  H.body({ dot: (x, y, r, shade) => dots.push([x, y, r, shade]), L: 4 }, 50, 50, rad, { t: 1, dt: 0.016, ...st });
+  return dots;
+};
+for (const st of [{}, { mode: 'talk', voice: 0.9 }, { mode: 'listen', heard: 0.8 }, { mode: 'think' }, { asleep: true }]) {
+  const d = draw(st);
+  assert.ok(d.length >= 150, 'enough dots to read as a sphere');
+  for (const [x, y, r, shade] of d) {
+    assert.ok(Math.hypot(x - 50, y - 50) <= 12 * 1.3, 'inside the orb');
+    assert.ok(r > 0 && r < 1 && shade >= 0 && shade <= 1);
+  }
 }
-assert.ok(!looks.some((m) => m[1] === 'ken'), 'Ken is not a pickable look');
+const spread = (d) => Math.max(...d.map(([x, y]) => Math.hypot(x - 50, y - 50)));
+assert.ok(spread(draw({ mode: 'talk', voice: 1 })) > spread(draw({ asleep: true })), 'speaking ripples it outward');
+const a = draw({ asleep: true, t: 1 }), b = draw({ asleep: true, t: 3 });
+assert.deepEqual(a.map(([x, y]) => [x.toFixed(3), y.toFixed(3)]), b.map(([x, y]) => [x.toFixed(3), y.toFixed(3)]), 'asleep, it holds still');
+assert.ok(draw({ asleep: true }).every(([, , , shade]) => shade >= 0.75), 'asleep, it is pale');
+// Without vector dots (the notch lens), it writes LED cells instead.
+const cells = [];
+H.body({ put: (x, y, l) => cells.push(l), L: 4 }, 20, 20, 10, { t: 1 });
+assert.ok(cells.length > 100 && cells.every((l) => l >= 1 && l <= 4));
 console.log('looks tests: passed');
 
-// Regression: a selected stage canvas showed as a grey box around the Roamie (WebKit tints selected canvases).
+// Regression: a selected stage canvas showed as a grey box around the orb (WebKit tints selected canvases).
 assert.match(src('../../../desktop.html'), /canvas \{[^}]*-webkit-user-select: none; user-select: none;[^}]*\}/);
 
-// Regression: after a drawing the Sidekick stopped following the cursor and hopped away from it instead.
+// Regression: after a drawing the agent stopped following the cursor and hopped away from it instead.
 {
   const agent = src('../../../roamies/agent.js'), rel = agent.slice(agent.indexOf('async release()'), agent.indexOf('place: (x, y) =>'));
   assert.match(agent, /pen\.follow = !!station\.byCursor/, 'take() remembers whether it was following the cursor');
   assert.match(rel, /if \(pen\.follow && presence\.ptr\) station\.byCursor = presence\.ptr\.slice\(\)/, 'release() goes back to following');
 }
 
-// The bubbles, tags and step list draw with glass.js, so the overlay loads it before them.
+// The bubbles, tags and step list draw with glass.js, so the overlay loads it before them; hydra.js before the kit.
 {
   const page = src('../../../desktop.html'), at = (f) => page.indexOf(`roamies/${f}`);
   assert.ok(at('glass.js') > 0 && at('glass.js') < at('agent.js') && at('glass.js') < at('agent-cards.js'), 'desktop.html loads glass.js before agent.js and agent-cards.js');
-}
-
-// Regression: the hands trailed behind the body when it moved fast (they sprang after screen points, not body ones).
-{
-  const kit = src('../../../roamies/10-dither.js');
-  assert.match(kit, /spring\(h\.o, tg\[0\] \* R, tg\[1\] \* R/, 'hands spring in the body\'s own space');
-  assert.match(kit, /h\.y = m\.y \+ oy \+ h\.o\.y/, 'and ride its hop once');
-  assert.match(kit, /lerp\(sx, bx \+ h\.o\.x, arms\)/, 'hands are drawn from where the body is drawn');
-}
-
-// Regression: the cheer (hype) stuttered on the characters: the kit's hop plus one of their own at another rate.
-for (const who of ['anime', 'sarah', 'adrian', 'rita', 'ultren', 'glayos']) {
-  const tops = new Set();
-  for (const actA of [0, 0.1, 0.2, 0.3, 0.45]) {
-    let top = Infinity;
-    const st = { t: 1, mode: null, voice: null, act: 'hype', actA, open: 1, look: [0, 0], vx: 0, sq: 0, wide: 0, dizzy: 0, happy: 1, sleepy: 0, mouth: null, brow: null };
-    P[who].body({ put: (x, y) => { top = Math.min(top, y); }, L: 4, th }, 50, 50, 12.75, st);
-    tops.add(top);
-  }
-  assert.equal(tops.size, 1, `${who} doesn't hop on its own while cheering (the kit moves it)`);
+  assert.ok(at('hydra.js') > 0 && at('hydra.js') < at('10-dither.js'), 'and hydra.js before the kit that draws it');
 }

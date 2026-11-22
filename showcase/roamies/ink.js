@@ -1,5 +1,5 @@
-// Roamies drawing on screen: the Sidekick turns into its cursor and draws hand-drawn teal marks with its tip (the
-// same pen as the user's ⌃⌥ ink: teal, a dark edge so it reads on white, a soft glow), paced to its voice with a
+// Roamies drawing on screen: the Sidekick turns into its cursor and draws hand-drawn ink marks with its tip (the
+// same pen as the user's ⌃⌥ ink: ink #1D1D1F over a thin white halo so it reads on dark and light apps), paced to its voice with a
 // caption at the bottom. Screen marks follow each thing's real shape; cards and diagrams go on calm space beside the
 // window and stay until closed. The sidecar (draw.mjs, tools.mjs) sends beats already checked and placed in global
 // screen points; this overlay draws what falls on its own monitor. No model-written code runs here.
@@ -8,18 +8,25 @@
   if (!R || typeof document === 'undefined') return;
 
   // ---------------------------------------------------------------- look
-  const P = 4, MONO = '"Martian Mono", "Roamies Arabic", ui-monospace, monospace', DOTO = '"Doto", "Martian Mono", "Roamies Arabic", ui-monospace, monospace';
-  const ACC = '#78ffe2', HOT = '#e6fffa', MID = '#28c4b8', DEEP = '#0e5c60', EDGE = 'rgba(3,39,34,0.6)';
-  const GLASS = 'rgba(6,22,24,0.94)', TEXT = '#dcfff6', DIM = '#8ab8b0', INKDARK = '#032722';
-  const TONES = { accent: ACC, teal: '#78ffe2', amber: '#ffcf5c', coral: '#ff8a7a', lilac: '#b9a4ff', sky: '#7cc8ff', lime: '#b6f36b', red: '#ff6b6b', white: '#e8fffa' };
-  const LED = ['#051214', '#0e5c60', '#28c4b8', '#78ffe2', '#e6fffa'];
+  // Monochrome: ink, grays, white cards with hairlines; red only for lost, overdue or wrong. One system sans.
+  const P = 4, MONO = 'system-ui, -apple-system, "Helvetica Neue", sans-serif', DOTO = MONO;
+  const ACC = '#1D1D1F', HOT = '#1D1D1F', MID = '#6E6E73', DEEP = '#D2D2D7', EDGE = '#E5E5EA';
+  const GLASS = 'rgba(255,255,255,0.97)', TEXT = '#1D1D1F', DIM = '#6E6E73', INKDARK = '#FFFFFF';
+  const TINT = '#F5F5F7', LINE = '#D2D2D7', RED = '#B3261E', HALO = 'rgba(255,255,255,0.92)';
+  // The model still sends these names: ink, two grays and red.
+  const TONES = { accent: ACC, teal: ACC, white: ACC, sky: '#424245', lilac: '#424245', amber: MID, lime: MID, coral: RED, red: RED };
+  // Gray ramp, white to ink, for pictures and models drawn as dots.
+  const LED = ['#FFFFFF', '#E5E5EA', '#A1A1A6', '#6E6E73', '#1D1D1F'];
+  const sentence = (s) => { s = String(s ?? ''); return s.charAt(0).toUpperCase() + s.slice(1); };
+  // A model's shading on a white card: shadow in ink, the lit side a light gray (level 0 is empty).
+  const MODEL = [null, '#1D1D1F', '#424245', '#6E6E73', '#A1A1A6'];
   const B4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
   const tone = (t) => TONES[t] || ACC;
   const now = () => performance.now() / 1000;
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const lerp = (a, b, t) => a + (b - a) * t;
   const ease = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
-  const back = (u) => 1 + 2.2 * (u - 1) ** 3 + 1.2 * (u - 1) ** 2;
+  const back = (u) => 1 - (1 - clamp(u, 0, 1)) ** 3; // an ease-out: no overshoot
   const rnd = (a, b) => a + Math.random() * (b - a);
   const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
   const mixHex = (a, b, k) => '#' + hex(a).map((v, i) => Math.round(v + (hex(b)[i] - v) * k).toString(16).padStart(2, '0')).join('');
@@ -49,12 +56,12 @@
     r = clamp(r, 0, Math.min(w, h) / 2);
     return [...arc(x + w - r, y + r, r, r, -Math.PI / 2, 0, 10), ...arc(x + w - r, y + h - r, r, r, 0, Math.PI / 2, 10), ...arc(x + r, y + h - r, r, r, Math.PI / 2, Math.PI, 10), ...arc(x + r, y + r, r, r, Math.PI, Math.PI * 1.5, 10)];
   }
-  function stepped(x, y, w, h, c = 2 * P) {
-    const s = c / 2;
-    return [[x + c, y], [x + w - c, y], [x + w - c, y + s], [x + w - s, y + s], [x + w - s, y + c], [x + w, y + c], [x + w, y + h - c], [x + w - s, y + h - c], [x + w - s, y + h - s], [x + w - c, y + h - s], [x + w - c, y + h],
-      [x + c, y + h], [x + c, y + h - s], [x + s, y + h - s], [x + s, y + h - c], [x, y + h - c], [x, y + c], [x + s, y + c], [x + s, y + s], [x + c, y + s], [x + c, y]];
-  }
-  const steppedPath = (x, y, w, h, c) => { const p = new Path2D(); stepped(x, y, w, h, c).forEach((q, i) => (i ? p.lineTo(q[0], q[1]) : p.moveTo(q[0], q[1]))); return p; };
+  // Rounded rectangles: the old pixel-step sizes become 12 px for cards, 8 px for controls, 4 px for small marks.
+  const steppedPath = (x, y, w, h, c = 2 * P) => {
+    const r = clamp(c >= 2 * P ? 12 : c >= P ? 8 : 4, 0, Math.min(w, h) / 2), p = new Path2D();
+    p.moveTo(x + r, y); p.arcTo(x + w, y, x + w, y + h, r); p.arcTo(x + w, y + h, x, y + h, r); p.arcTo(x, y + h, x, y, r); p.arcTo(x, y, x + w, y, r); p.closePath();
+    return p;
+  };
   function catmull(pts, closed) {
     const Q = closed ? [pts[pts.length - 1], ...pts, pts[0], pts[1]] : [pts[0], ...pts, pts[pts.length - 1]], out = [];
     for (let i = 1; i < Q.length - 2; i++) for (let k = 0; k < 10; k++) {
@@ -123,7 +130,6 @@
   view.setAttribute('aria-hidden', 'true');
   Object.assign(view.style, { position: 'fixed', left: '0', top: '0', width: '100vw', height: '100vh', pointerEvents: 'none', visibility: 'hidden', cursor: 'default' });
   const V = view.getContext('2d'), Lc = litC.getContext('2d');
-  const hasFilter = 'filter' in V;
   let W = innerWidth, H = innerHeight, DPR = 1, alloc = false;
   const mount = () => { const st = document.getElementById('stage'); if (st?.parentNode) st.parentNode.insertBefore(view, st); else document.body.appendChild(view); };
   if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount);
@@ -153,8 +159,7 @@
   };
   const markBox = (m) => { const b = typeof m.box === 'function' ? m.box() : m.box ?? (m.pts ? boxOf(m.pts) : null); return b ? xf(m, b) : [0, 0, W, H]; };
   const clampR = (r) => { const x0 = Math.max(0, Math.floor(r[0])), y0 = Math.max(0, Math.floor(r[1])), x1 = Math.min(W, Math.ceil(r[0] + r[2])), y1 = Math.min(H, Math.ceil(r[1] + r[3])); return [x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0)]; };
-  // Repaints one area: clears it on both layers, draws the marks that touch it, then the glow (the ink blurred under
-  // itself, like the user's pen: 0.75, radius ~6).
+  // Repaints one area: clears it on both layers, draws the marks that touch it, then the ink layer over them.
   // The ink (lit layer) lands on top of what was drawn before it, so names, buttons and toasts (z 6 and up) are drawn
   // in a second pass after it: a circle or arrow never covers a label.
   function paint(C, t) {
@@ -175,9 +180,8 @@
       for (const c of [V, Lc]) c.restore();
       const sx = C[0] * DPR, sy = C[1] * DPR, sw = C[2] * DPR, sh = C[3] * DPR;
       V.save(); V.setTransform(1, 0, 0, 1, 0, 0);
-      if (hasFilter) { V.globalAlpha = 0.75; V.filter = `blur(${4 * DPR}px)`; V.drawImage(litC, sx, sy, sw, sh, sx, sy, sw, sh); V.filter = 'none'; V.globalAlpha = 1; }
-      else { V.shadowColor = rgba(ACC, 0.75); V.shadowBlur = 8 * DPR; }
-      V.drawImage(litC, sx, sy, sw, sh, sx, sy, sw, sh);
+      V.drawImage(litC, sx, sy, sw, sh, sx, sy, sw, sh); // flat: the ink lands as drawn, no glow
+
       V.restore();
     });
   }
@@ -210,7 +214,7 @@
   }
 
   // ---------------------------------------------------------------- the pen
-  // An even line with soft ends and a little pressure change along it, and a dark edge so it reads on white.
+  // An even line with soft ends and a little pressure change along it, and a thin white halo so it reads on dark apps.
   function outline(pts, w) {
     const n = pts.length, Lf = [], Rt = [], hw = [], ph = rnd(0, 6);
     for (let i = 0; i < n; i++) {
@@ -224,7 +228,7 @@
   function pen(base, lit, m, pts, p, color, o = {}) {
     if (p <= 0 || !pts || pts.length < 2) return;
     if (p < 1) touch(0.1);
-    const key = o.key || 'o', w = o.w || 3.6;
+    const key = o.key || 'o', w = (o.w || 3.6) * 0.68; // about 2.5 px for the usual 3.6
     const ol = (m.__ol ??= {})[key]?.src === pts ? m.__ol[key] : (m.__ol[key] = { src: pts, ...outline(pts, w) });
     const k = Math.max(1, Math.round((pts.length - 1) * clamp(p, 0, 1)));
     const body = new Path2D(); body.moveTo(ol.Lf[0][0], ol.Lf[0][1]);
@@ -232,19 +236,18 @@
     for (let i = k; i >= 0; i--) body.lineTo(ol.Rt[i][0], ol.Rt[i][1]);
     body.closePath();
     const c = colorOf(m, color);
-    base.save(); base.lineJoin = 'round'; base.lineWidth = 2.5; base.strokeStyle = EDGE; base.stroke(body); base.beginPath(); base.arc(pts[k][0], pts[k][1], ol.hw[k] + 1.2, 0, Math.PI * 2); base.fillStyle = EDGE; base.fill(); base.restore();
+    base.save(); base.lineJoin = 'round'; base.lineWidth = 3; base.strokeStyle = HALO; base.stroke(body); base.beginPath(); base.arc(pts[k][0], pts[k][1], ol.hw[k] + 1.5, 0, Math.PI * 2); base.fillStyle = HALO; base.fill(); base.restore();
     lit.save(); lit.fillStyle = c; lit.fill(body); lit.beginPath(); lit.arc(pts[k][0], pts[k][1], ol.hw[k], 0, Math.PI * 2); lit.arc(pts[0][0], pts[0][1], ol.hw[0], 0, Math.PI * 2); lit.fill(); lit.restore();
   }
-  // Our chrome for cards and chips: stepped corners, dark glass, an accent edge, a glint along the top.
+  // Our chrome for cards and chips: white, a 1 px hairline, rounded corners. Flat: no shadow, no glow.
   function chrome(c, x, y, w, h, o = {}) {
-    const path = steppedPath(x, y, w, h, o.corner ?? 2 * P), edge = o.edge || ACC;
+    const path = steppedPath(x, y, w, h, o.corner ?? 2 * P), edge = o.edge && o.edge !== ACC ? o.edge : LINE;
     c.save();
-    c.fillStyle = o.fill || GLASS; c.shadowColor = 'rgba(0,0,0,0.35)'; c.shadowBlur = 14; c.shadowOffsetY = 4; c.fill(path);
-    c.shadowColor = rgba(edge, 0.7); c.shadowBlur = 8; c.shadowOffsetY = 0; c.strokeStyle = edge; c.lineWidth = 1.5; c.globalAlpha *= 0.9; c.stroke(path);
-    c.globalAlpha *= 0.6; c.shadowBlur = 0; c.strokeStyle = '#ffffff'; c.lineWidth = 1; c.beginPath(); c.moveTo(x + 3 * P, y + 1.5); c.lineTo(x + Math.min(w * 0.45, 90), y + 1.5); c.stroke();
+    c.fillStyle = o.fill || GLASS; c.fill(path);
+    c.strokeStyle = edge; c.lineWidth = 1; c.stroke(path);
     c.restore();
   }
-  // Words typing themselves in; the last couple land white.
+  // Words typing themselves in; the last couple land in ink.
   function typed(c, str, x, y, font, color, u, o = {}) {
     str = String(str ?? '');
     c.save(); c.font = R.rtlFont(str, font); c.textBaseline = o.baseline || 'alphabetic'; c.textAlign = 'left';
@@ -253,9 +256,9 @@
     const n = reduced() ? str.length : Math.floor(str.length * clamp(u, 0, 1));
     // Still typing in: keep repainting until it's all there (a card stopped after 1.5 s, freezing long text mid-word).
     if (n < str.length) touch(0.1);
-    if (o.rim) { c.lineWidth = o.rim; c.strokeStyle = EDGE; c.lineJoin = 'round'; c.strokeText(str.slice(0, n), x0, y); }
+    if (o.rim) { c.lineWidth = o.rim; c.strokeStyle = HALO; c.lineJoin = 'round'; c.strokeText(str.slice(0, n), x0, y); }
     if (n >= str.length || o.land === false) { c.fillStyle = color; c.fillText(str.slice(0, n), x0, y); }
-    else { const head = str.slice(0, Math.max(0, n - 2)); c.fillStyle = color; c.fillText(head, x0, y); c.fillStyle = '#ffffff'; c.fillText(str.slice(head.length, n), x0 + c.measureText(head).width, y); }
+    else { const head = str.slice(0, Math.max(0, n - 2)); c.fillStyle = color; c.fillText(head, x0, y); c.fillStyle = TEXT; c.fillText(str.slice(head.length, n), x0 + c.measureText(head).width, y); }
     c.restore();
     return full;
   }
@@ -295,7 +298,7 @@
   // The card fonts load on first use; measuring before they arrive gave widths for the fallback font, and the text
   // then grew past its card once the real one loaded. Everything waits for them once (never more than 1.5 s).
   let fontsOk = null;
-  const fontsReady = () => (fontsOk ??= Promise.race([Promise.all([`500 13px ${MONO}`, `700 11px ${MONO}`, `800 16px ${DOTO}`].map((f) => document.fonts?.load(f))), sleep(1500)]).catch(() => {}));
+  const fontsReady = () => (fontsOk ??= Promise.race([Promise.all([`500 13px ${MONO}`, `500 12px ${MONO}`, `500 16px ${DOTO}`].map((f) => document.fonts?.load(f))), sleep(1500)]).catch(() => {}));
   function wrapped(c, rows, x, y, lh, font, color, u) {
     const total = rows.reduce((s, r) => s + r.length + 1, 0);
     let left = reduced() ? total : Math.floor(total * clamp(u, 0, 1));
@@ -326,18 +329,19 @@
   }
 
   // ---------------------------------------------------------------- names: pixel tags on the calmest free spot
-  // A solid teal tag with a hard drop shadow; it lands in three pixel steps. Names, step numbers and buttons share it.
-  const CHIP = (k = 1) => `700 ${11 * k}px ${MONO}`;
+  // A solid ink tag with white words, 8 px corners; it eases into place. Names, step numbers and buttons share it.
+  const CHIP = (k = 1) => `500 ${12 * k}px ${MONO}`;
   const pillSize = (s) => [Math.round(textW(s, CHIP()) + 22), 23];
   function chip(b, x, y, w, h, str, age, o = {}) {
     const k = o.k || 1, cx = x + w / 2, cy = y + h / 2 + 0.5, type = (age - 0.08) / (0.12 + String(str).length * 0.025), fill = o.color || ACC;
-    const u = clamp(age / 0.2, 0, 1), drop = reduced() ? 0 : Math.round((1 - u) * 3) * 3;
+    const u = clamp(age / 0.2, 0, 1), drop = reduced() ? 0 : (1 - back(u)) * 6;
     b.save(); b.translate(0, -drop);
-    if (o.down) b.translate(0, 2);
-    b.fillStyle = mixHex(fill, '#000000', 0.62); b.fill(steppedPath(x, y + (o.down ? 1 : 3), w, h, P));
-    b.fillStyle = o.hover ? mixHex(fill, '#ffffff', 0.3) : fill; b.fill(steppedPath(x, y, w, h, P));
-    b.fillStyle = 'rgba(255,255,255,0.55)'; b.fillRect(x + P, y + 1, w - 2 * P, 1.5); b.fillStyle = 'rgba(3,39,34,0.25)'; b.fillRect(x + P, y + h - 2.5, w - 2 * P, 1.5);
-    typed(b, str, cx, cy, CHIP(k), INKDARK, type, { anchor: 'middle', baseline: 'middle', land: false });
+    if (o.down) b.translate(0, 1);
+    const face = steppedPath(x, y, w, h, P);
+    if (o.outline) { b.fillStyle = o.hover ? TINT : '#FFFFFF'; b.fill(face); b.strokeStyle = LINE; b.lineWidth = 1; b.stroke(face); }
+    // Filled: a thin white halo round it, so an ink chip still reads over a dark app.
+    else { b.strokeStyle = HALO; b.lineWidth = 3; b.stroke(face); b.fillStyle = o.hover ? mixHex(fill, '#ffffff', 0.18) : fill; b.fill(face); }
+    typed(b, str, cx, cy, CHIP(k), o.outline ? TEXT : INKDARK, type, { anchor: 'middle', baseline: 'middle', land: false });
     b.restore();
   }
   // What's on screen (from the sidecar: controls read this request), so names avoid covering words.
@@ -381,12 +385,12 @@
   }
   // A small report in our chrome near the cursor: copied, opening, handed off.
   function toast(str, sub, o = {}) {
-    const [x, y] = tipNow(), w = Math.min(420, Math.max(textW(str, `600 11px ${MONO}`), sub ? textW(sub, `400 11px ${MONO}`) : 0) + 50), h = sub ? 46 : 28;
+    const [x, y] = tipNow(), w = Math.min(420, Math.max(textW(str, `500 12px ${MONO}`), sub ? textW(sub, `400 12px ${MONO}`) : 0) + 50), h = sub ? 46 : 28;
     // Clear of the cursor, and stacked under any toast still showing (several actions in one beat).
     const S = scr(), live = marks.filter((m) => m.alive && m.kind === 'toast' && !m.leave);
     const below = live.reduce((yy, m) => Math.max(yy, m.box[1] + m.box[3] - 20 + 6), y + 30);
     const bx = clamp(x + 34, S[0] + 4, S[2] - w - 4), by = clamp(below, S[1] + 4, S[3] - h - 4);
-    const subText = sub ? ellipsize(String(sub).replace(/\s+/g, ' '), w - 44, `400 11px ${MONO}`) : '';
+    const subText = sub ? ellipsize(String(sub).replace(/\s+/g, ' '), w - 44, `400 12px ${MONO}`) : '';
     return add({ z: 8, p: 1, kind: 'toast', box: [bx - 4, by - 4, w + 8, h + 20], live: () => true, draw(b, l, t) {
       const u = clamp((t - this.born) / 0.25, 0, 1), out = this.leave ? clamp((t - this.leave) / 0.3, 0, 1) : 0;
       b.save(); b.globalAlpha *= 1 - out; b.translate(0, (1 - back(u)) * 10);
@@ -394,8 +398,8 @@
       const cx = bx + 16, cy = by + 14;
       if (o.spin) for (let k = 0; k < 8; k++) { const a = (k / 8) * Math.PI * 2, on = (Math.floor(t * 10) - k + 8) % 8 < 3; b.fillStyle = on ? ACC : DEEP; b.fillRect(Math.round(cx + Math.cos(a) * 6) - 1.5, Math.round(cy + Math.sin(a) * 6) - 1.5, 3, 3); }
       else { b.fillStyle = ACC; [[-5, 0], [-2, 3], [1, 0], [4, -3], [7, -6]].forEach(([dx, dy]) => b.fillRect(cx + dx - 1.5, cy + dy - 1.5, 3, 3)); }
-      typed(b, ellipsize(str, w - 44, `600 11px ${MONO}`), bx + 32, by + 18, `600 11px ${MONO}`, TEXT, (t - this.born) / 0.4);
-      if (subText) typed(b, subText, bx + 32, by + 36, `400 11px ${MONO}`, DIM, (t - this.born - 0.2) / 0.6);
+      typed(b, ellipsize(str, w - 44, `500 12px ${MONO}`), bx + 32, by + 18, `500 12px ${MONO}`, TEXT, (t - this.born) / 0.4);
+      if (subText) typed(b, subText, bx + 32, by + 36, `400 12px ${MONO}`, DIM, (t - this.born - 0.2) / 0.6);
       b.restore();
       if (out >= 1) this.alive = false;
     } });
@@ -451,7 +455,7 @@
     },
     async label(m) { const box = rectOf(m), str = m.text || m.label, r = nameSpot(box, str); await fly(r[0] + r[2] - 8, r[1] + 19); sfx('pop'); pillMark(m.part, r, str); },
     async write(m) {
-      const [x0, y0, w0, h0] = rectOf(m), str = m.text || m.label, S0 = scr(), size = clamp(Math.min(m.size ?? 30, ((S0[2] - S0[0] - 40) / Math.max(1, textW(str, `800 30px ${DOTO}`))) * 30), 12, 64), font = `800 ${size}px ${DOTO}`, w = textW(str, font);
+      const [x0, y0, w0, h0] = rectOf(m), str = m.text || m.label, S0 = scr(), size = clamp(Math.min(m.size ?? 30, ((S0[2] - S0[0] - 40) / Math.max(1, textW(str, `500 30px ${DOTO}`))) * 30), 12, 64), font = `800 ${size}px ${DOTO}`, w = textW(str, font);
       const x = clamp(x0, scr()[0], scr()[2] - w), y = y0 + h0 + size * 1.05;
       const s = add({ z: 4, part: m.part, screen: true, color: tone(m.tone), box: [x - 4, y - size, w + 8, size * 1.4], marked: [x, y - size, w, size * 1.2], draw(b) { typed(b, str, x, y, font, colorOf(this, this.color), this.p, { rim: 5 }); } });
       await trace(handLine([x, y - size * 0.3], [x + w, y - size * 0.3], { jitter: 1 }), 0.4 + str.length * 0.06, (e) => (s.p = e)); await rest(x + w, y);
@@ -466,22 +470,16 @@
     async spotlight(m) {
       const [x, y, w, h] = rectOf(m), p = 8, g = (v) => Math.round(v / P) * P, hole = [g(x - p), g(y - p), g(w + 2 * p), g(h + 2 * p)];
       add({ z: 0, part: m.part, screen: true, p: 1, box: () => [0, 0, W, H], draw(b, l, t) {
-        const u = clamp((t - this.born) / 0.5, 0, 1), BAND = 6, e = BAND * P;
-        b.fillStyle = `rgba(3,14,16,${0.62 * u})`;
-        const outer = new Path2D(); outer.rect(0, 0, W, H); outer.rect(hole[0] - e, hole[1] - e, hole[2] + 2 * e, hole[3] + 2 * e); b.fill(outer, 'evenodd');
-        // a dithered falloff round the opening (our pixels) instead of a blur
-        for (let gy = Math.floor((hole[1] - e) / P); gy < (hole[1] + hole[3] + e) / P; gy++) for (let gx = Math.floor((hole[0] - e) / P); gx < (hole[0] + hole[2] + e) / P; gx++) {
-          const cx = gx * P + 2, cy = gy * P + 2, dx = Math.max(hole[0] - cx, 0, cx - hole[0] - hole[2]), dy = Math.max(hole[1] - cy, 0, cy - hole[1] - hole[3]), d = Math.hypot(dx, dy) / P;
-          if (d === 0) continue;
-          if (d < BAND && (d / BAND) * 16 * u < B4[(((gy % 4) + 4) % 4) * 4 + (((gx % 4) + 4) % 4)] + 0.5) continue;
-          b.fillRect(gx * P, gy * P, P, P);
-        }
+        const u = clamp((t - this.born) / 0.2, 0, 1);
+        // A flat dim round a rounded opening: no falloff texture.
+        b.fillStyle = `rgba(29,29,31,${0.45 * u})`;
+        const outer = new Path2D(); outer.rect(0, 0, W, H); outer.addPath(steppedPath(hole[0], hole[1], hole[2], hole[3])); b.fill(outer, 'evenodd');
       } });
       sfx('focus'); await fly(x + w * 0.85, y + h + 10); await name(m.part, [x, y, w, h], m.label);
     },
     async highlight(m) {
       const [x, y, w, h] = rectOf(m), band = handLine([x, y + h / 2], [x + w, y + h / 2 + rnd(-1.5, 1.5)], { jitter: 1 });
-      const s = add({ z: 0, part: m.part, screen: true, color: tone(m.tone || 'amber'), box: [x - 6, y - 6, w + 12, h + 12], draw(b) { const k = Math.max(2, Math.round(band.length * this.p)); b.save(); b.lineCap = 'butt'; b.lineJoin = 'round'; b.lineWidth = h; b.strokeStyle = rgba(colorOf(this, this.color), 0.4); b.beginPath(); band.slice(0, k).forEach((q, i) => (i ? b.lineTo(q[0], q[1]) : b.moveTo(q[0], q[1]))); b.stroke(); b.restore(); } });
+      const s = add({ z: 0, part: m.part, screen: true, color: tone(m.tone || 'amber'), box: [x - 6, y - 6, w + 12, h + 12], draw(b) { const k = Math.max(2, Math.round(band.length * this.p)); b.save(); b.lineCap = 'butt'; b.lineJoin = 'round'; b.lineWidth = h; b.strokeStyle = rgba(colorOf(this, this.color), 0.16); b.beginPath(); band.slice(0, k).forEach((q, i) => (i ? b.lineTo(q[0], q[1]) : b.moveTo(q[0], q[1]))); b.stroke(); b.restore(); } });
       await trace(band, 0.5, (e) => (s.p = e)); await name(m.part, [x, y, w, h], m.label);
     },
     line: (m) => free(m, handPath(pathPts(m))),
@@ -552,7 +550,7 @@
     },
     async copy(m) { sfx('tick'); leaveAfter(toast('Copied to your clipboard', m.text), 1800); },
     async open(m) { let h = m.url; try { h = new URL(m.url).hostname.replace(/^www\./, ''); } catch {} sfx('whoosh'); leaveAfter(toast(`Opening ${h}`, m.url, { spin: true }), 1800); },
-    async handoff(m) { sfx('toolstart'); leaveAfter(toast('Handed off', m.task || m.text || m.label || '', { spin: true }), 2200); },
+    async handoff(m) { leaveAfter(toast('Handed off', m.task || m.text || m.label || '', { spin: true }), 2200); },
     async button(m) {
       const k = 1.15, w = Math.round(textW(m.text, CHIP(k)) + 34), h = 32;
       const r = m.at ? nameSpot(rectOf(m), m.text, [w, h]) : place(w, h, m.part);
@@ -565,7 +563,8 @@
       for (let k = 0; k < 9; k++) { const a = (k / 9) * Math.PI * 2 + rnd(-0.2, 0.2), r0 = rnd(30, 40), ln = rnd(10, 16), col = k % 3 ? ACC : tone('amber'); add({ z: 9, p: 1, box: [x - 90, y - 90, 180, 180], live: () => true, draw(b, l, t) { const u = (t - this.born) / 0.8; if (u > 1) { this.alive = false; return; } const r = r0 + u * 22; l.save(); l.globalAlpha *= 1 - u; l.strokeStyle = col; l.lineWidth = 3; l.lineCap = 'round'; l.beginPath(); l.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r); l.lineTo(x + Math.cos(a) * (r + ln), y + Math.sin(a) * (r + ln)); l.stroke(); l.restore(); } }); }
       sfx(m.name === 'hype' ? 'hype' : 'pop'); await sleep(900);
     },
-    async sfx(m) { sfx(m.name); },
+    // A sound the model asks for (draw.mjs sfx) is silent: the premium chimes mark only real events (owner: random sounds).
+    async sfx() {},
   };
 
   // ---------------------------------------------------------------- cards and diagrams on calm space
@@ -616,8 +615,10 @@
   // nothing in it is ever cut off.
   // The pin button in a card's title bar, centred on (px, py): drawn like the full-screen and close buttons; pinned, it
   // sits on a lit tile (the filled-button look), so the state shows by shape as well as colour.
+  // A small ×: two 1.5 px strokes, gray, ink on hover.
+  function closeX(b, cx, cy, hot) { b.save(); b.strokeStyle = hot ? HOT : DIM; b.lineWidth = 1.5; b.lineCap = 'round'; b.beginPath(); b.moveTo(cx - 4, cy - 4); b.lineTo(cx + 4, cy + 4); b.moveTo(cx + 4, cy - 4); b.lineTo(cx - 4, cy + 4); b.stroke(); b.restore(); }
   function pinIcon(b, px, py, m) {
-    if (m.pinned) { b.fillStyle = m.hoverPin ? HOT : ACC; b.fillRect(px - 10, py - 9, 20, 18); }
+    if (m.pinned) { b.fillStyle = m.hoverPin ? '#424245' : ACC; b.fill(steppedPath(px - 10, py - 9, 20, 18, 2)); }
     b.fillStyle = m.pinned ? INKDARK : m.hoverPin ? HOT : DIM;
     b.fillRect(px - 4, py - 6, 8, 2); b.fillRect(px - 2, py - 4, 4, 4); b.fillRect(px - 5, py, 10, 2); b.fillRect(px - 1, py + 2, 2, 4);
   }
@@ -649,10 +650,8 @@
         chrome(b, x, y, this.cw, this.ch, { edge: o.edge ? colorOf(this, this.color) : ACC });
         if (this.p < 1) return;
         if (bar) {
-          b.fillStyle = 'rgba(120,255,226,0.06)'; b.fillRect(x + 2, y + 2, w - 4, bar - 2);
-          b.fillStyle = DEEP; b.fillRect(x + 2, y + bar, w - 4, 1);
-          [0, 1].forEach((k) => { b.fillStyle = k ? DEEP : ACC; b.fillRect(x + 12 + k * 12, y + 11, 5, 5); });
-          if (o.title) typed(b, ellipsize(String(o.title).toLowerCase(), w - 206, `500 10px ${MONO}`), x + w / 2, y + 17, `500 10px ${MONO}`, DIM, (t - this.done) / 0.4, { anchor: 'middle' });
+          b.fillStyle = EDGE; b.fillRect(x + 1, y + bar, w - 2, 1);
+          if (o.title) typed(b, ellipsize(sentence(String(o.title).toLowerCase()), w - 120, `400 12px ${MONO}`), x + 14, y + 17, `400 12px ${MONO}`, DIM, (t - this.done) / 0.4);
           // pin: a pixel pushpin with the full-screen and close buttons, drawn like them; pinned, it sits on a lit tile
           // (the filled-button look), so the state shows by shape as well as colour. The card stays until its ×.
           pinIcon(b, x + w - 70, y + 13, this);
@@ -668,18 +667,18 @@
             } }
           // close: a small pixel ×
           const cx = x + w - 18, cy = y + 13, hot = this.hoverClose;
-          b.fillStyle = hot ? HOT : DIM; for (let k = -3; k <= 3; k++) { b.fillRect(cx + k - 1, cy + k - 1, 2, 2); b.fillRect(cx + k - 1, cy - k - 1, 2, 2); }
+          closeX(b, cx, cy, hot);
         }
         // A last guard: nothing inside a card is drawn outside it.
         for (const c of [b, l]) { c.save(); c.beginPath(); c.rect(x + 2, y + bar + 1, w - 4, h - bar - 3); c.clip(); }
         try { inner.call(this, b, l, t, x, y + bar - this.sy, t - this.done); } finally { b.restore(); l.restore(); }
         if (this.scrollMax > 0) {
           const top = y + bar + 6, len = h - bar - 12, th = Math.max(18, (len * h) / full), ty = top + (len - th) * (this.sy / this.scrollMax);
-          b.fillStyle = rgba(ACC, 0.15); b.fillRect(x + w - 7, top, 2, len);
-          b.fillStyle = ACC; b.fillRect(x + w - 7, ty, 2, th);
+          b.fillStyle = TINT; b.fillRect(x + w - 7, top, 2, len);
+          b.fillStyle = MID; b.fillRect(x + w - 7, ty, 2, th);
         }
         // resize grip: three pixel steps in the bottom right corner
-        if (this.p >= 1 && !this.full) { b.fillStyle = this.hoverGrip ? HOT : rgba(ACC, 0.45); for (let k = 0; k < 3; k++) for (let j = 0; j <= k; j++) b.fillRect(x + w - 6 - j * 4, y + h - 14 + k * 4, 2, 2); }
+        if (this.p >= 1 && !this.full) { b.fillStyle = this.hoverGrip ? HOT : LINE; for (let k = 0; k < 3; k++) for (let j = 0; j <= k; j++) b.fillRect(x + w - 6 - j * 4, y + h - 14 + k * 4, 2, 2); }
       },
       hits() {
         const out = bar ? [{ rect: [x + w - 28, y + 2, 26, 22], kind: 'close', part: m.part }, { rect: [x + w - 54, y + 2, 22, 22], kind: 'full', part: m.part }, { rect: [x + w - 82, y + 2, 24, 22], kind: 'pin', part: m.part }, { rect: [x + w - 106, y + 2, 22, 22], kind: 'save', part: m.part, title: o.title || m.kind }, { rect: [x, y, w - 108, bar], kind: 'drag', part: m.part }] : [{ rect: [x, y, w, Math.min(h, 24)], kind: 'drag', part: m.part }];
@@ -705,7 +704,7 @@
     if (m.tie?.rect) { const T = locRect(m.tie.rect), C = [x, y, w, h], tc = [T[0] + T[2] / 2, T[1] + T[3] / 2]; await arrow(m.part, edgeToward(T, [x + w / 2, y + h / 2], 6), edgeToward(C, tc, 6), { bend: -0.2, screen: false }); }
     return c;
   }
-  const BODY = `400 13px ${MONO}`, SMALL = `400 11px ${MONO}`;
+  const BODY = `400 13px ${MONO}`, SMALL = `400 12px ${MONO}`;
   // Drawn checklists that are up, by part: each takes its new items (listItems).
   const lists = new Map();
   // The tallest a card may be: the screen less its margins and the caption.
@@ -713,7 +712,7 @@
   // A row of sources: favicon (or a dot) and name, each opening its link.
   function sourcesRow(c, list, x, y, w, t) {
     let cx = x; const hits = [];
-    c.font = `500 10px ${MONO}`; c.fillStyle = DIM; c.fillText('SOURCES', cx, y); cx += textW('SOURCES', c.font) + 12;
+    c.font = `400 12px ${MONO}`; c.fillStyle = DIM; c.fillText('Sources', cx, y); cx += textW('Sources', c.font) + 12;
     for (const s of list) {
       const nw = textW(s.name, SMALL) + 26;
       if (cx + nw > x + w) break;
@@ -727,7 +726,7 @@
   const loadIcons = (list) => (list ?? []).map((s) => { const o = { ...s }; if (s.icon) { o.img = new Image(); o.img.onload = () => touch(); o.img.src = s.icon; } return o; });
   const CARDS_DRAW = {
     async card(m) {
-      const HEAD = `800 22px ${DOTO}`, srcs = loadIcons(m.sources);
+      const HEAD = `500 22px ${DOTO}`, srcs = loadIcons(m.sources);
       // Everything shown: laid out 340 wide, then 440 and 560 while it's taller than the screen allows; past that it scrolls.
       const lay = (w) => {
         const heads = m.heading ? wrapRows(m.heading, w - 40, HEAD) : [], head = heads.length ? heads.length * 26 + 14 : 0;
@@ -760,7 +759,7 @@
     // opens or closes its points (the map slides to make room); a click on the topic opens or closes them all. The
     // card is sized for everything open, so nothing moves out from under the pointer.
     async mindmap(m) {
-      const ROOTF = `800 16px ${DOTO}`, RW = 150, BW = 160, LW = 180, GAP = 36, PX = 16;
+      const ROOTF = `500 16px ${DOTO}`, RW = 150, BW = 160, LW = 180, GAP = 36, PX = 16;
       const rootRows = wrapRows(m.title || 'topic', RW - 20, ROOTF), rootH = rootRows.length * 20 + 18;
       const B = (m.branches ?? []).slice(0, 8).map((q) => {
         const rows = wrapRows(q.text, BW - 40, BODY), leaves = (q.items ?? []).slice(0, 6).map((it) => { const r = wrapRows(it, LW - 20, SMALL); return { rows: r, h: r.length * 14 + 12 }; });
@@ -841,7 +840,7 @@
     // A checklist: a click on a ring ticks an item off (or back), on its words edits it, and "+ Add" adds one. The
     // sidecar asks for the words and hears every change (list_card), and sends the new items back (listItems).
     async list(m) {
-      const TITLE = `800 20px ${DOTO}`, S = { items: m.items.map(String), done: m.items.map(() => false), born: [], ver: m.items.map(() => 0), down: 0 };
+      const TITLE = `500 20px ${DOTO}`, S = { items: m.items.map(String), done: m.items.map(() => false), born: [], ver: m.items.map(() => 0), down: 0 };
       const ticked = new Map(), ink = new Map();
       // The whole title and every point in full: 280 wide, wider while a point runs past three lines or it's too tall.
       const lay = (w) => {
@@ -909,7 +908,7 @@
       for (let i = 0; i < S.items.length; i++) { touch(0.5); await sleep(260); }
     },
     async clip(m) {
-      const TF = `800 18px ${DOTO}`, CF = `400 12px ${MONO}`;
+      const TF = `500 18px ${DOTO}`, CF = `400 12px ${MONO}`;
       // The whole title and text: 320 wide, 420 when long.
       const lay = (w) => { const title = wrapRows(m.title, w - 36, TF), rows = wrapRows(m.text, w - 36, CF); return { w, title, rows, h: 26 + 62 + (title.length - 1) * 22 + rows.length * 18 }; };
       let L = lay(320);
@@ -959,8 +958,8 @@
         q.line = handLine(from, to, { jitter: 0.3, bow: rnd(-0.01, 0.01) }); q.to = to;
       }
       // The whole caption: a short one big, a long one in body type; the credit under it.
-      const long = cap.length > 60, CAPF = long ? `400 12px ${MONO}` : `800 16px ${DOTO}`, capLh = long ? 17 : 20;
-      const capRows = cap ? wrapRows(cap, w - 24, CAPF) : [], credRows = m.credit ? wrapRows(m.credit, w - 24, `400 10px ${MONO}`) : [];
+      const long = cap.length > 60, CAPF = long ? `400 12px ${MONO}` : `500 16px ${DOTO}`, capLh = long ? 17 : 20;
+      const capRows = cap ? wrapRows(cap, w - 24, CAPF) : [], credRows = m.credit ? wrapRows(m.credit, w - 24, `400 12px ${MONO}`) : [];
       // 12 above the picture, 12 between it and the caption, as at its sides.
       const capY = 12 + ah + 12 + (long ? 12 : 15), credY = capRows.length ? capY + (capRows.length - 1) * capLh + 16 : 12 + ah + 12 + 10;
       const h = 26 + 12 + ah + 12 + capRows.length * capLh + credRows.length * 14 + 12;
@@ -976,10 +975,10 @@
       }
       const c = await card(m, w, h, function (b, l, t, x, y, age) {
         const u = clamp(age / 1, 0, 1);
-        if (ready) for (const [gx, gy, v] of cells) { if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + ix + gx * 3, y + 12 + gy * 3, 3, 3); }
-        else { b.fillStyle = 'rgba(14,92,96,0.25)'; b.fillRect(x + ix, y + 12, pw, ph); typed(b, 'no picture found', x + w / 2, y + 12 + ph / 2, SMALL, DIM, 1, { anchor: 'middle' }); }
+        if (ready) for (const [gx, gy, v] of cells) { if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[4 - v]; b.fillRect(x + ix + gx * 3, y + 12 + gy * 3, 3, 3); }
+        else { b.fillStyle = TINT; b.fill(steppedPath(x + ix, y + 12, pw, ph, P)); typed(b, 'no picture found', x + w / 2, y + 12 + ph / 2, SMALL, DIM, 1, { anchor: 'middle' }); }
         capRows.forEach((r, i) => typed(b, r, x + w / 2, y + capY + i * capLh, CAPF, TEXT, (age - 0.6 - i * 0.15) / 0.5, { anchor: 'middle' }));
-        credRows.forEach((r, i) => typed(b, r, x + w / 2, y + credY + i * 14, `400 10px ${MONO}`, DIM, (age - 0.8) / 0.4, { anchor: 'middle' }));
+        credRows.forEach((r, i) => typed(b, r, x + w / 2, y + credY + i * 14, `400 12px ${MONO}`, DIM, (age - 0.8) / 0.4, { anchor: 'middle' }));
         named.forEach((q, i) => {
           if (q.p <= 0) return;
           pen(b, l, this, placed(this, `n${i}`, q.line, x, y), q.p, this.color, { key: `n${i}`, w: 2.2 });
@@ -1017,7 +1016,7 @@
         const O = this.__off;
         pen(b, l, this, O.axes, ax, MID, { key: 'ax', w: 2.4 });
         if (ax >= 1) {
-          b.font = `400 10px ${MONO}`; b.fillStyle = DIM;
+          b.font = `400 12px ${MONO}`; b.fillStyle = DIM;
           for (let k = 0; k <= 4; k++) { const v = xr[0] + ((xr[1] - xr[0]) * k) / 4, v2 = yr[0] + ((yr[1] - yr[0]) * k) / 4; b.textAlign = 'center'; b.fillText(fmt(v), x + sx(v), y + gy0 + gh + 16); b.textAlign = 'right'; b.fillText(fmt(v2), x + gx0 - 8, y + sy(v2) + 3); }
           b.textAlign = 'left';
         }
@@ -1058,7 +1057,7 @@
           // Centred on its dot, but never past the card's edges.
           const inCard = (str, font) => { const tw = textW(str, font); return clamp(px, x + 10 + tw / 2, x + w - 10 - tw / 2); };
           const inCol = (str) => { const tw = textW(str, SMALL); return clamp(px, x + cols[i][0] + tw / 2, x + cols[i][1] - tw / 2); };
-          const when = `800 15px ${DOTO}`, rows = words[i], n = rows.length;
+          const when = `500 15px ${DOTO}`, rows = words[i], n = rows.length;
           typed(b, e.when, inCard(e.when, when), y + ty + (up ? -18 : 34), when, TEXT, a / 0.3, { anchor: 'middle' });
           rows.forEach((r, k) => typed(b, r, inCol(r), y + ty + (up ? -36 - (n - 1 - k) * 13 : 50 + k * 13), SMALL, DIM, (a - 0.1 - k * 0.1) / 0.4, { anchor: 'middle' }));
         });
@@ -1073,9 +1072,9 @@
       await card(m, w, h, function (b, l, t, x, y, age) {
         if (!view3d) { typed(b, '3D isn’t available here', x + w / 2, y + 100, SMALL, DIM, 1, { anchor: 'middle' }); return; }
         const u = clamp(age / 0.8, 0, 1), f = view3d.frame(reduced() ? 0 : t);
-        for (let i = 0; i < f.lv.length; i++) { const v = f.lv[i]; if (!v) continue; const gx = i % f.gw, gy = (i / f.gw) | 0; if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + 12 + gx * 3, y + 6 + gy * 3, 3, 3); }
+        for (let i = 0; i < f.lv.length; i++) { const v = f.lv[i]; if (!v) continue; const gx = i % f.gw, gy = (i / f.gw) | 0; if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = MODEL[v]; b.fillRect(x + 12 + gx * 3, y + 6 + gy * 3, 3, 3); }
         // Labels follow their parts as it turns; one that would land on another this frame waits its turn.
-        if (u >= 1) { const took = []; for (const lab of f.labels) { const lx = x + 12 + lab.x, ly = y + 6 + lab.y, r = [lx - 2, ly - 14, textW(lab.text, `600 10px ${MONO}`) + 10, 16]; if (took.some((q) => overlap(q, r) > 0)) continue; took.push(r); b.fillStyle = ACC; b.fillRect(lx - 1.5, ly - 1.5, 3, 3); typed(b, lab.text, lx + 6, ly - 4, `600 10px ${MONO}`, TEXT, 1, { rim: 3 }); } }
+        if (u >= 1) { const took = []; for (const lab of f.labels) { const lx = x + 12 + lab.x, ly = y + 6 + lab.y, r = [lx - 2, ly - 14, textW(lab.text, `500 12px ${MONO}`) + 10, 16]; if (took.some((q) => overlap(q, r) > 0)) continue; took.push(r); b.fillStyle = ACC; b.fillRect(lx - 1.5, ly - 1.5, 3, 3); typed(b, lab.text, lx + 6, ly - 4, `500 12px ${MONO}`, TEXT, 1, { rim: 3 }); } }
       }, { title: m.title || m.label || 'model', live: () => !!view3d && !reduced() });
       sfx('scan');
     },
@@ -1187,7 +1186,7 @@
   const ATOM_TONE = { O: 'coral', N: 'sky', S: 'amber', P: 'lilac', F: 'lime', Cl: 'lime', Br: 'coral', I: 'lilac' };
   async function drawMolecule(m) {
     const mol = m.mol, { pos, rings } = layoutMolecule(mol), w = 320, bw = w - 48, bh = 214;
-    const cap = m.label || m.text || '', CAPF = `800 16px ${DOTO}`, capRows = cap ? wrapRows(cap, w - 24, CAPF) : [];
+    const cap = m.label || m.text || '', CAPF = `500 16px ${DOTO}`, capRows = cap ? wrapRows(cap, w - 24, CAPF) : [];
     const h = 26 + 270 + Math.max(0, capRows.length - 1) * 20;
     const bx = boxOf(pos), s = Math.min(bw / Math.max(bx[2], 1), bh / Math.max(bx[3], 1), 34);
     const P2 = pos.map(([x, y]) => [24 + (x - bx[0]) * s + (bw - bx[2] * s) / 2, 18 + (y - bx[1]) * s + (bh - bx[3] * s) / 2]);
@@ -1221,7 +1220,7 @@
       labels.forEach((lab, i) => {
         if (!lab || born[i] == null) return;
         const [px, py] = [P2[i][0] + x, P2[i][1] + y], a = mol.atoms[i];
-        typed(b, lab, px, py + 4, `700 13px ${MONO}`, tone(ATOM_TONE[a.el] || 'white'), (t - born[i]) / 0.25, { anchor: 'middle', rim: 4, land: false });
+        typed(b, lab, px, py + 4, `500 13px ${MONO}`, tone(ATOM_TONE[a.el] || 'white'), (t - born[i]) / 0.25, { anchor: 'middle', rim: 4, land: false });
       });
       capRows.forEach((r, i) => typed(b, r, x + w / 2, y + 256 + i * 20, CAPF, TEXT, (age - 0.5 - i * 0.15) / 0.5, { anchor: 'middle' }));
     }, { title: 'molecule' });
@@ -1247,20 +1246,20 @@
   // How far a small stroke has got; all the way at once with reduced motion.
   const strokeAt = (age, dur) => (reduced() ? 1 : clamp(age / dur, 0, 1));
   const placed = (m, key, pts, ox, oy) => { const c = (m.__at ??= {})[key]; return c && c.x === ox && c.y === oy ? c.pts : (m.__at[key] = { x: ox, y: oy, pts: pts.map(([px, py]) => [px + ox, py + oy]) }).pts; };
-  const TH = `600 10px ${MONO}`, TD = `400 12px ${MONO}`, TD1 = `600 12px ${MONO}`;
+  const TH = `400 12px ${MONO}`, TD = `400 13px ${MONO}`, TD1 = `500 13px ${MONO}`;
   const tickPts = () => handPath([[0, 6], [4, 10], [12, 0]], 0.3), crossPts = () => [handLine([1, 0], [11, 10], { jitter: 0.3 }), handLine([11, 0], [1, 10], { jitter: 0.3 })];
   async function drawTable(m) {
     const cols = m.columns, n = cols.length, PX = 10, LH = 16, EDGE_X = 8;
     const font = (ci) => (ci === 0 ? TD1 : TD), yn = (v) => { const k = String(v).trim().toLowerCase(); return k === 'yes' ? 1 : k === 'no' ? -1 : 0; };
     // Each column as wide as its longest cell; when that's wider than the card may be, the widest give way and wrap.
-    const natural = cols.map((h, ci) => Math.ceil(Math.max(28, textW(h.toUpperCase(), TH), ...m.rows.map((r) => (yn(r[ci]) ? 14 : textW(r[ci], font(ci)))))));
+    const natural = cols.map((h, ci) => Math.ceil(Math.max(28, textW(h, TH), ...m.rows.map((r) => (yn(r[ci]) ? 14 : textW(r[ci], font(ci)))))));
     const lay = (maxW) => {
       const room = maxW - 2 * EDGE_X - n * 2 * PX;
       let cap = Math.max(...natural);
       while (cap > 56 && natural.reduce((a, v) => a + Math.min(v, cap), 0) > room) cap -= 4;
       const ws = natural.map((v) => Math.min(v, cap)), xs = [];
       let cx = EDGE_X + PX; for (const cw of ws) { xs.push(cx); cx += cw + 2 * PX; }
-      const heads = cols.map((h, ci) => wrapRows(h.toUpperCase(), ws[ci], TH)), headH = Math.max(...heads.map((r) => r.length)) * 13 + 14;
+      const heads = cols.map((h, ci) => wrapRows(h, ws[ci], TH)), headH = Math.max(...heads.map((r) => r.length)) * 15 + 14;
       const rows = m.rows.map((r) => r.map((v, ci) => (yn(v) ? { yn: yn(v), rows: [''] } : { rows: wrapRows(v, ws[ci], font(ci)) })));
       const rowH = rows.map((r) => Math.max(...r.map((cell) => cell.rows.length)) * LH + 12);
       return { w: cx - PX + EDGE_X, xs, heads, headH, rows, rowH, h: 26 + 6 + headH + rowH.reduce((a, v) => a + v, 0) + 8, deep: Math.max(...rows.flat().map((cell) => cell.rows.length)) };
@@ -1271,18 +1270,18 @@
     const glyphs = rows.map((r) => r.map((cell) => (cell.yn > 0 ? [tickPts()] : cell.yn < 0 ? crossPts() : null)));
     await card(m, w, h, function (b, l, t, x, y, age) {
       let yy = y + 6;
-      heads.forEach((r, ci) => r.forEach((line, k) => typed(b, line, x + xs[ci], yy + 15 + k * 13, TH, DIM, age / 0.3)));
+      heads.forEach((r, ci) => r.forEach((line, k) => typed(b, line, x + xs[ci], yy + 15 + k * 15, TH, DIM, age / 0.3)));
       yy += headH;
-      b.fillStyle = MID; b.fillRect(x + EDGE_X, yy - 1, w - 2 * EDGE_X, 1);
+      b.fillStyle = LINE; b.fillRect(x + EDGE_X, yy - 1, w - 2 * EDGE_X, 1);
       rows.forEach((cells, ri) => {
         const a = age - 0.2 - ri * 0.09;
         if (a > 0) cells.forEach((cell, ci) => {
           // yes and no as a tick and a cross: told apart by shape, not only by colour.
-          if (cell.yn) glyphs[ri][ci].forEach((pts, k) => pen(b, l, this, placed(this, `g${ri}.${ci}.${k}`, pts, x + xs[ci], Math.round(yy + rowH[ri] / 2 - 5)), strokeAt(a - k * 0.12, 0.2), tone(cell.yn > 0 ? 'lime' : 'coral'), { key: `g${ri}.${ci}.${k}`, w: 2.6 }));
+          if (cell.yn) glyphs[ri][ci].forEach((pts, k) => pen(b, l, this, placed(this, `g${ri}.${ci}.${k}`, pts, x + xs[ci], Math.round(yy + rowH[ri] / 2 - 5)), strokeAt(a - k * 0.12, 0.2), cell.yn > 0 ? TEXT : MID, { key: `g${ri}.${ci}.${k}`, w: 2.6 }));
           else wrapped(b, cell.rows, x + xs[ci], yy + 6 + 12, LH, font(ci), TEXT, a / 0.3);
         });
         yy += rowH[ri];
-        if (ri < rows.length - 1) { b.fillStyle = DEEP; b.fillRect(x + EDGE_X, yy - 1, w - 2 * EDGE_X, 1); }
+        if (ri < rows.length - 1) { b.fillStyle = EDGE; b.fillRect(x + EDGE_X, yy - 1, w - 2 * EDGE_X, 1); }
       });
     }, { title: m.title || 'table' });
     sfx('page'); touch(0.6 + rows.length * 0.1);
@@ -1306,8 +1305,8 @@
         if (a <= 0) return;
         const u = reduced() ? 1 : ease(clamp(a / 0.5, 0, 1)), full = Math.max(2, (q.value / top) * track), bw = Math.max(2, full * u), col = tone(q.tone);
         if (u < 1) touch(0.1);
-        b.fillStyle = col; b.fillRect(x + x0, mid - BH / 2, bw, BH);
-        b.fillStyle = 'rgba(255,255,255,0.45)'; b.fillRect(x + x0, mid - BH / 2, bw, 1.5); b.fillStyle = 'rgba(3,39,34,0.3)'; b.fillRect(x + x0, mid + BH / 2 - 1.5, bw, 1.5);
+        b.fillStyle = TINT; b.fill(steppedPath(x + x0, mid - BH / 2, track, BH, 2));
+        b.fillStyle = col; b.fill(steppedPath(x + x0, mid - BH / 2, bw, BH, 2));
         if (u >= 1) typed(b, vals[i], x + x0 + full + 8, mid + 4, TD1, TEXT, (a - 0.5) / 0.25);
       });
     }, { title: m.title || 'bars' });
@@ -1536,7 +1535,7 @@
     c.restore();
   }
   async function drawMath(m) {
-    const FS = 17, GUT = 26, PADR = 20, NLH = 14, NUMF = `500 10px ${MONO}`;
+    const FS = 17, GUT = 26, PADR = 20, NLH = 14, NUMF = `500 12px ${MONO}`;
     // Every step at full size; the card as wide as the widest (300 to 560), and a step wider than that is set smaller to fit.
     const raw = m.steps.map((st) => texBox(st.tree, FS)), w = clamp(Math.ceil(Math.max(...raw.map((q) => q.w))) + GUT + 20 + PADR, 300, 560), room = w - GUT - 20 - PADR;
     // A step too wide for the card: a little smaller first (down to 13 px), then carried on to more lines, breaking
@@ -1612,7 +1611,7 @@
       return [p[0] + (dx / n) * d, p[1] + (dy / n) * d];
     };
     // Words already placed (names of points, then angles, then lines): later ones keep off them.
-    const LAB = `600 12px ${MONO}`, taken = [], names = new Map(vs.map((v) => [v.id, away(v.id, 13)]));
+    const LAB = `500 12px ${MONO}`, taken = [], names = new Map(vs.map((v) => [v.id, away(v.id, 13)]));
     const spot = (str, font, cx, cy) => [cx - textW(str, font) / 2 - 2, cy - 8, textW(str, font) + 4, 16];
     for (const v of vs) taken.push(spot(v.id, LAB, ...names.get(v.id)));
     const lineSpots = (q) => {
@@ -1653,7 +1652,7 @@
         if (q.dash && q.p > 0) {
           // A dashed line: drawn straight onto both layers, as far as the pen has got.
           const n = Math.max(2, Math.round(pts.length * q.p));
-          for (const [cx, style, lw] of [[b, EDGE, 4.5], [l, lc, 2.2]]) { cx.save(); cx.setLineDash([6, 5]); cx.lineCap = 'round'; cx.strokeStyle = style; cx.lineWidth = lw; cx.beginPath(); for (let j = 0; j < n; j++) (j ? cx.lineTo(pts[j][0], pts[j][1]) : cx.moveTo(pts[j][0], pts[j][1])); cx.stroke(); cx.restore(); }
+          for (const [cx, style, lw] of [[b, HALO, 4.5], [l, lc, 2]]) { cx.save(); cx.setLineDash([6, 5]); cx.lineCap = 'round'; cx.strokeStyle = style; cx.lineWidth = lw; cx.beginPath(); for (let j = 0; j < n; j++) (j ? cx.lineTo(pts[j][0], pts[j][1]) : cx.moveTo(pts[j][0], pts[j][1])); cx.stroke(); cx.restore(); }
           if (q.p < 1) touch(0.1);
         } else pen(b, l, this, pts, q.p, lc, { key: `l${i}`, w: 2.6 });
         if (q.label && q.p >= 1) typed(b, q.label, x + q.at[0], y + q.at[1] + 4, SMALL, TEXT, (t - q.done) / 0.3, { anchor: 'middle', rim: 3 });
@@ -1681,7 +1680,7 @@
   // world.js. Longitudes are squeezed by the view's latitude so shapes look right; no streets, no terrain.
   async function drawMap(m) {
     const world = R.world, [vw, vs, ve, vn] = m.view, lon0 = (vw + ve) / 2, lat0 = (vs + vn) / 2, kx = Math.max(0.3, Math.cos((lat0 * Math.PI) / 180));
-    const PW = Math.max(0.5, (ve - vw) * kx), PH = Math.max(0.5, vn - vs), X0 = 12, Y0 = 10, NAMEF = `600 11px ${MONO}`;
+    const PW = Math.max(0.5, (ve - vw) * kx), PH = Math.max(0.5, vn - vs), X0 = 12, Y0 = 10, NAMEF = `500 12px ${MONO}`;
     // 420 wide for most places, wider for a wide one (the world, Russia); a tall one (Chile, Norway) is narrower
     // instead of very tall.
     let mw = PW / PH > 1.8 ? Math.min(560, scr()[2] - scr()[0] - 60) : 420, mh = (mw * PH) / PW;
@@ -1711,12 +1710,12 @@
       // country filled over it, which leaves the half of the line that lies in the sea. Then the borders, thin and dark.
       const paths = world.countries.map(([, rings]) => pathOf(rings));
       lc.scale(dpr, dpr); lc.lineJoin = 'round';
-      lc.strokeStyle = MID; lc.lineWidth = 3; for (const p of paths) lc.stroke(p);
-      lc.fillStyle = mixHex(DEEP, LED[0], 0.3); for (const p of paths) lc.fill(p, 'evenodd');
-      lc.strokeStyle = rgba(LED[0], 1); lc.lineWidth = 1; for (const p of paths) lc.stroke(p);
+      lc.strokeStyle = LINE; lc.lineWidth = 2; for (const p of paths) lc.stroke(p);
+      lc.fillStyle = TINT; for (const p of paths) lc.fill(p, 'evenodd');
+      lc.strokeStyle = '#FFFFFF'; lc.lineWidth = 1; for (const p of paths) lc.stroke(p);
     }
     const pins = (m.pins ?? []).map((p) => ({ ...p, at: proj(p.lon, p.lat, near(p.lon)) })), byName = new Map(pins.map((p) => [p.name, p]));
-    const shaded = world ? (m.shade ?? []).filter((q) => world.countries[q.i]).map((q) => ({ ...q, path: pathOf(world.countries[q.i][1]), edge: tone(q.tone), fill: mixHex(tone(q.tone), LED[0], 0.62), c: proj(q.at[0], q.at[1], near(q.at[0])) })) : [];
+    const shaded = world ? (m.shade ?? []).filter((q) => world.countries[q.i]).map((q) => ({ ...q, path: pathOf(world.countries[q.i][1]), edge: tone(q.tone), fill: mixHex(tone(q.tone), '#FFFFFF', 0.78), c: proj(q.at[0], q.at[1], near(q.at[0])) })) : [];
     const routes = (m.routes ?? []).filter((q) => byName.has(q.from) && byName.has(q.to)).map((q) => {
       // A gentle arc between its pins, bowed towards the top of the map.
       const a = byName.get(q.from).at, b = byName.get(q.to).at, d = dist(a, b), n = [-(b[1] - a[1]) / (d || 1), (b[0] - a[0]) / (d || 1)], up = n[1] > 0 ? -1 : 1, c = [(a[0] + b[0]) / 2 + n[0] * d * 0.18 * up, (a[1] + b[1]) / 2 + n[1] * d * 0.18 * up];
@@ -1770,7 +1769,7 @@
   // One question at a time. A click on an option marks it right or wrong there and then (a tick or a cross as well as
   // a colour) and shows why; the last Next shows the score and tells the sidecar which options were picked.
   async function drawQuiz(m) {
-    const qs = m.questions, QF = `600 13px ${MONO}`, PAD = 18, OPX = 34, NUMF = `500 10px ${MONO}`;
+    const qs = m.questions, QF = `500 13px ${MONO}`, PAD = 18, OPX = 34, NUMF = `500 12px ${MONO}`;
     const lay = (w) => {
       const pages = qs.map((q) => {
         const text = wrapRows(q.text, w - 2 * PAD, QF), opts = q.options.map((o) => wrapRows(o, w - 2 * PAD - OPX - 10, TD)), why = q.explain ? wrapRows(q.explain, w - 2 * PAD, SMALL) : [], tops = [];
@@ -1791,7 +1790,7 @@
       hits = [];
       const a = t - S.at;
       if (S.done) {
-        typed(b, `${score()} of ${qs.length}`, x + PAD, y + 52, `800 30px ${DOTO}`, TEXT, a / 0.4);
+        typed(b, `${score()} of ${qs.length}`, x + PAD, y + 52, `500 30px ${DOTO}`, TEXT, a / 0.4);
         typed(b, 'right', x + PAD, y + 74, SMALL, DIM, (a - 0.3) / 0.3);
         sum.forEach((rows, i) => {
           const ok = picks[i] === qs[i].right, aa = a - 0.4 - i * 0.12;
@@ -1813,12 +1812,12 @@
         const shown = answered && (right || mine), path = steppedPath(r[0], r[1], r[2], r[3], P);
         b.save();
         if (answered && !shown) b.globalAlpha *= 0.6;
-        b.fillStyle = rgba(ACC, hot ? 0.16 : 0.07); b.fill(path);
-        b.strokeStyle = shown ? tone(right ? 'lime' : 'coral') : hot ? ACC : MID; b.lineWidth = shown ? 2 : 1.5; b.stroke(path);
-        if (!shown) typed(b, 'ABCD'[k], r[0] + 17, oy + oh / 2 + 4, `700 11px ${MONO}`, DIM, 1, { anchor: 'middle' });
+        b.fillStyle = hot ? TINT : '#FFFFFF'; b.fill(path);
+        b.strokeStyle = shown ? (right ? TEXT : RED) : hot ? MID : LINE; b.lineWidth = shown ? 1.5 : 1; b.stroke(path);
+        if (!shown) typed(b, 'ABCD'[k], r[0] + 17, oy + oh / 2 + 4, `500 12px ${MONO}`, DIM, 1, { anchor: 'middle' });
         rows.forEach((row, j) => typed(b, row, r[0] + OPX, oy + 19 + j * 16, TD, TEXT, (a - 0.2 - k * 0.08) / 0.3));
         b.restore();
-        if (shown) glyph(`q${S.i}.${k}`, right).forEach((pts, j) => pen(b, l, this, placed(this, `q${S.i}.${k}.${j}`, pts, r[0] + 11, Math.round(oy + oh / 2 - 5)), strokeAt(since - j * 0.1, 0.2), tone(right ? 'lime' : 'coral'), { key: `q${S.i}.${k}.${j}`, w: 2.6 }));
+        if (shown) glyph(`q${S.i}.${k}`, right).forEach((pts, j) => pen(b, l, this, placed(this, `q${S.i}.${k}.${j}`, pts, r[0] + 11, Math.round(oy + oh / 2 - 5)), strokeAt(since - j * 0.1, 0.2), right ? TEXT : RED, { key: `q${S.i}.${k}.${j}`, w: 2.6 }));
         if (!answered) hits.push({ rect: r, kind: 'pick', id: `o${k}` });
       });
       if (!answered) return;
@@ -1847,16 +1846,15 @@
 
   // ---------------------------------------------------------------- the welcome tour: job tickets and a goal medal
   async function drawTicket(m) {
-    const w = 270, TF = `800 18px ${DOTO}`, titles = wrapRows(m.title, w - 36 - (m.n != null ? 34 : 0), TF), off = (titles.length - 1) * 22;
+    const w = 270, TF = `500 18px ${DOTO}`, titles = wrapRows(m.title, w - 36 - (m.n != null ? 34 : 0), TF), off = (titles.length - 1) * 22;
     const rows = m.text ? wrapRows(m.text, w - 40, `400 12px ${MONO}`) : [], btn = m.action ? 36 : 0, h = 64 + off + rows.length * 17 + btn + 14;
     const k = 1.05, btnText = ellipsize(m.label || 'Try it', w - 80, CHIP(k)), realBw = Math.round(textW(btnText, CHIP(k)) + 34);
     let hover = false, down = 0, br = null;
     const c = await card(m, w, h, function (b, l, t, x, y, age) {
-      // a ticket: notches on both sides, a dashed tear line, a big number
-      b.fillStyle = 'rgba(3,14,16,1)'; for (const sx of [x - 1, x + w - 9]) b.fillRect(sx, y + 36 + off, 10, 10);
-      b.fillStyle = DEEP; for (let dx = x + 14; dx < x + w - 14; dx += 8) b.fillRect(dx, y + 41 + off, 4, 1);
+      // a ticket: a dashed tear line, a big number
+      b.fillStyle = LINE; for (let dx = x + 14; dx < x + w - 14; dx += 8) b.fillRect(dx, y + 41 + off, 4, 1);
       titles.forEach((r, i) => typed(b, r, x + 18, y + 26 + i * 22, TF, TEXT, (age - i * 0.2) / 0.4));
-      if (m.n != null) typed(b, String(m.n).padStart(2, '0'), x + w - 18, y + 26, `800 18px ${DOTO}`, MID, 1, { anchor: 'end' });
+      if (m.n != null) typed(b, String(m.n).padStart(2, '0'), x + w - 18, y + 26, `500 18px ${DOTO}`, MID, 1, { anchor: 'end' });
       wrapped(b, rows, x + 18, y + 64 + off, 17, `400 12px ${MONO}`, DIM, (age - 0.2) / 0.8);
       if (m.action) { br = [x + 18, y + h - btn - 10, realBw, 30]; chip(b, br[0], br[1], br[2], br[3], btnText, age - 0.5, { k, color: this.color, hover, down: now() - down < 0.15 }); }
     }, { bar: false, edge: true });
@@ -1867,7 +1865,7 @@
   async function drawMedal(m) {
     const w = 230, ring = loop(0, 0, 120, 120, { pad: 0, r: 60, over: 0.12 }), star = (() => { const pts = []; for (let i = 0; i <= 10; i++) { const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 16 : 36; pts.push([Math.cos(a) * r, Math.sin(a) * r]); } return handPath(pts, 0.6); })();
     let rp = 0, sp = 0;
-    const goal = wrapRows((m.title || 'your goal').toUpperCase(), w - 30, `600 10px ${MONO}`), rows = wrapRows(m.text, w - 40, `600 12px ${MONO}`);
+    const goal = wrapRows(sentence(m.title || 'your goal'), w - 30, `400 12px ${MONO}`), rows = wrapRows(m.text, w - 40, `500 12px ${MONO}`);
     const goff = (goal.length - 1) * 14, h = 250 + goff + Math.max(0, rows.length - 3) * 17;
     const c = await card(m, w, h, function (b, l, t, x, y, age) {
       const cx = x + w / 2, cy = y + 86;
@@ -1875,8 +1873,8 @@
       b.fillStyle = DEEP; b.beginPath(); b.moveTo(cx - 34, y + 6); b.lineTo(cx - 8, y + 40); b.lineTo(cx - 20, y + 44); b.closePath(); b.fill(); b.beginPath(); b.moveTo(cx + 34, y + 6); b.lineTo(cx + 8, y + 40); b.lineTo(cx + 20, y + 44); b.closePath(); b.fill();
       this.__r ??= ring.map(([px, py]) => [px + cx - 60, py + cy - 60]); this.__st ??= star.map(([px, py]) => [px + cx, py + cy]);
       pen(b, l, this, this.__r, rp, tone('amber'), { key: 'r' }); pen(b, l, this, this.__st, sp, tone('amber'), { key: 's', w: 3 });
-      goal.forEach((r, i) => typed(b, r, cx, y + 168 + i * 14, `600 10px ${MONO}`, DIM, (age - 0.6) / 0.4, { anchor: 'middle' }));
-      wrapped(b, rows, x + 20, y + 190 + goff, 17, `600 12px ${MONO}`, TEXT, (age - 0.8) / 0.8);
+      goal.forEach((r, i) => typed(b, r, cx, y + 168 + i * 14, `400 12px ${MONO}`, DIM, (age - 0.6) / 0.4, { anchor: 'middle' }));
+      wrapped(b, rows, x + 20, y + 190 + goff, 17, `500 12px ${MONO}`, TEXT, (age - 0.8) / 0.8);
       if (sp >= 1 && !reduced()) { const g = (Math.sin(t * 2) + 1) / 2; l.fillStyle = rgba(tone('amber'), 0.25 * g); l.fillRect(cx - 2, cy - 48, 4, 4); }
     }, { bar: false, edge: true, live: () => sp >= 1 });
     c.color = tone('amber');
@@ -1922,7 +1920,7 @@
       if (clearAll?.alive && clearAll.str === str) return;
       if (clearAll) clearAll.alive = false;
       const r = () => [Math.round(W / 2 - w / 2), Math.round(H - (R.safe?.bottom ?? 0) - 18 - 34 - 12 - h), w, h];
-      clearAll = add({ z: 7, kind: 'clearall', str, box: () => grow(r(), 4), hover: false, draw(b, l, t) { const q = r(); chip(b, q[0], q[1], q[2], q[3], str, t - this.born, { color: this.hover ? HOT : DIM, hover: this.hover }); },
+      clearAll = add({ z: 7, kind: 'clearall', str, box: () => grow(r(), 4), hover: false, draw(b, l, t) { const q = r(); chip(b, q[0], q[1], q[2], q[3], str, t - this.born, { outline: true, hover: this.hover }); },
         hits() { return [{ rect: r(), kind: 'clearall' }]; } });
     } else if (clearAll) { clearAll.alive = false; clearAll = null; touch(); }
   }
@@ -1951,7 +1949,7 @@
   // ---------------------------------------------------------------- speech: the caption at the bottom
   const cap = document.createElement('div');
   cap.setAttribute('role', 'status'); cap.setAttribute('aria-live', 'polite');
-  Object.assign(cap.style, { position: 'fixed', left: '50%', bottom: '18px', transform: 'translateX(-50%)', maxWidth: 'min(720px, 80vw)', padding: '8px 16px', font: `500 13px ${MONO}`, color: TEXT, background: GLASS, border: `1.5px solid ${ACC}`, boxShadow: `0 0 12px ${rgba(ACC, 0.45)}`, borderRadius: '2px', opacity: '0', transition: 'opacity .2s', pointerEvents: 'none', textAlign: 'center', zIndex: '5' });
+  Object.assign(cap.style, { position: 'fixed', left: '50%', bottom: '18px', transform: 'translateX(-50%)', maxWidth: 'min(720px, 80vw)', padding: '8px 16px', font: `400 13px ${MONO}`, color: TEXT, background: GLASS, border: `1px solid ${LINE}`, borderRadius: '12px', opacity: '0', transition: 'opacity .2s', pointerEvents: 'none', textAlign: 'center', zIndex: '5' });
   const mountCap = () => document.body.appendChild(cap);
   if (document.body) mountCap(); else document.addEventListener('DOMContentLoaded', mountCap);
   const caption = { show(text) { cap.style.bottom = `${(R.safe?.bottom ?? 0) + 18}px`; cap.textContent = text; cap.style.opacity = text ? '1' : '0'; }, hide() { cap.style.opacity = '0'; } };
@@ -2118,7 +2116,7 @@
   // ---------------------------------------------------------------- the reminders card: Today / Later
   // The sidecar's list ({ today, later, seconds, flash, toggle }), shown as a card like the drawn list. It belongs to
   // this overlay (part 'reminders', local): new drawings and stale windows leave it; ×, Esc and Clear all close it.
-  const REM_W = 340, REM_PART = 'reminders', HEADF = `800 16px ${DOTO}`;
+  const REM_W = 340, REM_PART = 'reminders', HEADF = `500 16px ${DOTO}`;
   const REM = { data: { today: [], later: [] }, known: false, m: null, until: 0, timer: 0, shown: new Map(), ticked: new Map(), rings: new Map(), checks: new Map(), strikes: new Map(), flash: null, flashAt: 0 };
   const remOpen = () => !!REM.m && REM.m.alive && !REM.m.leaving;
   const remWhen = (i) => (i.done ? 'done' : i.overdue ? `late ${i.when}` : i.when || '');
@@ -2158,13 +2156,11 @@
     if (cw < 4) return;
     chrome(b, x, y, cw, ch);
     if (!this.ready) return;
-    b.fillStyle = 'rgba(120,255,226,0.06)'; b.fillRect(x + 2, y + 2, w - 4, 24);
-    b.fillStyle = DEEP; b.fillRect(x + 2, y + 26, w - 4, 1);
-    [0, 1].forEach((k) => { b.fillStyle = k ? DEEP : ACC; b.fillRect(x + 12 + k * 12, y + 11, 5, 5); });
-    typed(b, 'reminders', x + w / 2, y + 17, `500 10px ${MONO}`, DIM, (t - this.opened) / 0.4, { anchor: 'middle' });
+    b.fillStyle = EDGE; b.fillRect(x + 1, y + 26, w - 2, 1);
+    typed(b, 'Reminders', x + 14, y + 17, `400 12px ${MONO}`, DIM, (t - this.opened) / 0.4);
     pinIcon(b, x + w - 44, y + 13, this);
     const cx = x + w - 18, cyy = y + 13;
-    b.fillStyle = this.hoverClose ? HOT : DIM; for (let k = -3; k <= 3; k++) { b.fillRect(cx + k - 1, cyy + k - 1, 2, 2); b.fillRect(cx + k - 1, cyy - k - 1, 2, 2); }
+    closeX(b, cx, cyy, this.hoverClose);
     for (const c of [b, l]) { c.save(); c.beginPath(); c.rect(x + 2, y + 27, w - 4, h - 29); c.clip(); }
     try {
       for (const r of this.rows) {
@@ -2262,7 +2258,7 @@
   let drag = null, hovered = null, sizing = null;
   // Zoom limits for a card: never smaller than 60 %, never bigger than the screen.
   const maxK = (m) => { const S = scr(); return Math.max(1, Math.min((S[2] - S[0] - 16) / (m.w + 8), (S[3] - S[1] - 16) / (m.h + 14))); };
-  // Save as image: the card drawn again on its own, at twice the size, glow and all, as a PNG. It's copied to the
+  // Save as image: the card drawn again on its own, at twice the size, as a PNG. It's copied to the
   // clipboard where the webview allows it, and always sent to the sidecar, which saves it to Downloads.
   function cardImage(m, scale = 2) {
     const [bx, by, bw, bh] = typeof m.box === 'function' ? m.box() : m.box, pad = 12;
@@ -2273,7 +2269,6 @@
     Object.assign(m, { alpha: 1, hover: false, hoverSave: false, hoverClose: false, hoverFull: false, hoverGrip: false, hoverPin: false });
     try { m.draw(B, L, now()); } finally { Object.assign(m, keep); }
     B.setTransform(1, 0, 0, 1, 0, 0);
-    if (hasFilter) { B.globalAlpha = 0.75; B.filter = `blur(${4 * scale}px)`; B.drawImage(lit, 0, 0); B.filter = 'none'; B.globalAlpha = 1; }
     B.drawImage(lit, 0, 0);
     return base;
   }

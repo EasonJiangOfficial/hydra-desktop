@@ -331,7 +331,7 @@ const isAbortLike = (err) => /abort/i.test(err instanceof Error ? err.message : 
 // prompt, tools, session to resume) starts cold as before. At most one, let go after SPARE_IDLE_MS unused.
 let spare = null;
 const sha = (x) => crypto.createHash('sha256').update(typeof x === 'string' ? x : JSON.stringify(x)).digest('hex').slice(0, 16);
-const spareKey = (o, resume) => sha([o.executable, o.cwd, o.model, sha(o.system ?? ''), (o.tools ?? []).map((t) => t.name), o.maxTurns ?? 0, o.thinking ?? null, resume ?? null, sha(o.env ?? {})]);
+const spareKey = (o, resume) => sha([o.executable, o.cwd, o.model, sha(o.system ?? ''), (o.tools ?? []).map((t) => t.name), o.maxTurns ?? 0, o.thinking ?? null, resume ?? null, sha(o.env ?? {}), !!o.connectors]);
 export function closeSpare() {
   const s = spare; spare = null;
   if (!s) return;
@@ -341,7 +341,17 @@ export function closeSpare() {
 // Claude Code cuts each tool's description at 4,096 characters unless told otherwise, and draw's is about twice that:
 // Claude never saw maps, tables, maths or deep explanations. Ours fit in this.
 export const MAX_TOOL_DESCRIPTION = 16_384;
+// The owner's claude.ai connectors (Gmail, Google Calendar...) load only when Claude Code runs on his claude.ai
+// login (W3 contract): nothing in its environment may pick another account or provider, or switch them off.
+export const NOT_CLAUDE_AI = /^(ANTHROPIC_|CLAUDE_CODE_OAUTH|CLAUDE_CODE_USE_|AWS_BEARER_TOKEN_BEDROCK$|ENABLE_CLAUDEAI_MCP_SERVERS$|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC$)/;
+export function claudeAiEnv(env) {
+  return Object.fromEntries(Object.entries(env ?? {}).filter(([k, v]) => v !== undefined && !NOT_CLAUDE_AI.test(k)));
+}
+// A connector's tool (mcp__claude_ai_Gmail__search_threads): its server and tool names.
+export const connectorTool = (name) => { const m = /^mcp__(.+?)__(.+)$/.exec(name); return m ? { server: m[1], tool: m[2] } : null; };
 // Everything a query is started with; `link` carries what's only known once a request takes it.
+// o.connectors: the owner's claude.ai connectors load too, and every call to one goes through o.gate(name, input,
+// signal) → true to run it (the desktop risk gate: reads run, anything else asks the owner).
 function sdkOptions(o, resume, link) {
   const bridge = createToolBridge({ tools: o.tools ?? [], signal: () => link.signal, onEvent: (event) => link.onEvent?.(event) });
   const abortController = new AbortController();
@@ -352,13 +362,30 @@ function sdkOptions(o, resume, link) {
     systemPrompt: { type: 'custom', prompt: o.system ?? '' },
     tools: [], // none of Claude Code's own tools: only ours, through the bridge (and its safety checks)
     settingSources: [],
-    strictMcpConfig: true,
+    // Without connectors only our tools exist. With them, no strict MCP config: claude.ai's servers load beside ours.
+    ...(o.connectors ? {} : { strictMcpConfig: true }),
     mcpServers: { [MCP_SERVER]: bridge.config },
+    // Ours are allowed here (each runs its own safety checks); a connector's tool is never listed, so every call to
+    // one comes to canUseTool and the gate.
     allowedTools: bridge.allowedTools(),
-    canUseTool: async (name, toolInput) => (name.startsWith(TOOL_PREFIX) ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `${name} is not available in Roamies.` }),
+    // o.disallowedTools: names Claude Code must never run, on top of tools: [] (the server brain lists every built-in).
+    ...(o.disallowedTools?.length ? { disallowedTools: [...o.disallowedTools] } : {}),
+    canUseTool: async (name, toolInput, opts) => {
+      if (name.startsWith(TOOL_PREFIX)) return { behavior: 'allow', updatedInput: toolInput };
+      if (o.connectors && connectorTool(name) && o.gate) {
+        const ok = await Promise.resolve(o.gate(name, toolInput, opts?.signal)).catch(() => false);
+        return ok ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `The owner did not allow ${name}, so it was not run.` };
+      }
+      return { behavior: 'deny', message: `${name} is not available in Hydra.` };
+    },
     includePartialMessages: true,
     pathToClaudeCodeExecutable: o.executable,
-    env: { ...(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION) },
+    ...(o.spawn ? { spawnClaudeCodeProcess: o.spawn } : {}), // test seam: sees the exact command line
+    // No telemetry from Claude Code. With connectors the environment is the claude.ai login's alone (claudeAiEnv);
+    // without them, no non-essential traffic either: only the model requests leave this Mac.
+    env: o.connectors
+      ? { ...claudeAiEnv(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' }
+      : { ...(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1' },
     abortController,
     stderr: (d) => link.stderr?.(d),
     ...(resume ? { resume } : {}),
@@ -418,7 +445,18 @@ async function* claudeCodeLoop(messages, o) {
     }
   };
   const mapper = new SdkMessageMapper({ messages, takeResult: (id) => run.bridge.takeResult(id), onSessionId: o.onSessionId, onRateLimit: o.onRateLimit });
+  // Words the owner adds while this runs (W5 contract 2): one more user message on the same streaming input. Claude Code
+  // takes it into the turn under way, or answers it right after; a result that comes before any assistant message
+  // after the last addition is not the end yet (the addition is still to be answered).
+  let step = 0, addedAt = 0, answeredAt = 0, streamed = false;
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
+  // After begin(): the first message is on the input already, so an addition always comes after it.
+  o.takeInput?.((text) => {
+    if (aborted || !input || !String(text ?? '').trim()) return false;
+    input.push(toSdkUserMessage([{ type: 'text', text: String(text) }]));
+    addedAt = ++step;
+    return true;
+  });
 
   let killTimer;
   const onAbort = () => {
@@ -443,16 +481,25 @@ async function* claudeCodeLoop(messages, o) {
       const message = item.message;
       // After Stop, keep the transcript in step until Claude Code reports the interrupted result, but stop emitting.
       if (aborted) { if (message.type === 'result') break; mapper.handle(message); continue; }
-      if (message.type !== 'result') { yield* mapper.handle(message); continue; }
+      if (message.type !== 'result') {
+        // An assistant message that starts after an addition is its answer (or takes it in).
+        if (!message.parent_tool_use_id) {
+          if (message.type === 'stream_event' && message.event?.type === 'message_start') { streamed = true; answeredAt = ++step; }
+          else if (message.type === 'assistant' && !streamed) answeredAt = ++step;
+        }
+        yield* mapper.handle(message); continue;
+      }
       if (message.subtype === 'error_max_turns') { hitMaxTurns = true; break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
         throw new Error(detail || `Claude Code stopped: ${message.subtype}`);
       }
       if (message.is_error) throw new Error(message.result || mapper.syntheticError || 'Claude Code request failed.');
+      if (addedAt > answeredAt) continue; // an addition came after the last answer: its own answer follows
       break;
     }
   } finally {
+    o.takeInput?.(null);
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
@@ -487,6 +534,7 @@ export function resumeId(state, messages) {
  */
 export class ClaudeCodeAgent {
   #running = false;
+  #add = null; #early = [];
   constructor(options) {
     this.options = options;
     this.resume = options.resume ?? null;
@@ -499,10 +547,15 @@ export class ClaudeCodeAgent {
     warmSpare(this.options, resumeId(this.resume, [...this.messages, { role: 'user', content: '' }]));
   }
   setSignal(signal) { this.options = { ...this.options, signal }; }
+  /** While a prompt runs: the owner's added words go into it as one more user message. False when nothing runs. */
+  addInput(text) { return this.#add ? this.#add(text) : false; }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
     this.messages.push({ role: 'user', content });
+    // Additions before Claude Code has started wait for it (the stream starts when it is first read).
+    this.#early = [];
+    this.#add = (t) => { this.#early.push(t); return true; };
     return new AgentStream(this.#run(), () => { this.#running = false; });
   }
   async *#run() {
@@ -515,6 +568,7 @@ export class ClaudeCodeAgent {
     try {
       return yield* claudeCodeLoop(loopMsgs, {
         ...o, resume,
+        takeInput: (fn) => { this.#add = fn; if (fn) for (const t of this.#early.splice(0)) fn(t); },
         onSessionId: (id) => { sessionId = id; },
         onRateLimit: o.onRateLimit ?? ((info) => void recordClaudeCodeRateLimit(info).catch(() => {})),
       });

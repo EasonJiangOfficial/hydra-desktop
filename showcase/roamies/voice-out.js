@@ -1,6 +1,8 @@
 // Plays spoken replies: 16-bit mono PCM chunks from the brain (Fish Audio), scheduled back to back so a
 // reply plays without gaps or clicks. A new reply's id replaces the old one at once; "stop" fades out fast.
-// level() is the live loudness, for the body to move with the voice.
+// level() is the live loudness, for the body to move with the voice. setNative(true): the Mac's voice helper plays the
+// sound (the echo canceller's reference, W5 contract 6); here every chunk is still scheduled, silently, so timing,
+// level and lip-sync stay as they were.
 (() => {
   const R = window.Roamie;
   const LEAD = 0.12; // cushion before a reply's first chunk, so the next chunk is never late
@@ -29,10 +31,10 @@
       out = ac.createGain();
       meter = ac.createAnalyser(); meter.fftSize = 512; buf = new Float32Array(meter.fftSize);
       // The volume setting comes after the meter, so a quiet voice still moves the mouth fully.
-      vol = ac.createGain(); vol.gain.value = volume;
+      vol = ac.createGain(); vol.gain.value = native ? 0 : volume;
       out.connect(meter); meter.connect(vol); vol.connect(ac.destination);
     }
-    if (ac.state !== 'running') ac.resume().catch(() => {});
+    if (ac.state !== 'running' && !paused) ac.resume().catch(() => {});
     return ac;
   };
 
@@ -70,9 +72,10 @@
     s.onended = () => { live = live.filter((x) => x !== s); };
   };
 
-  let vol = null, volume = 1;
+  let vol = null, volume = 1, paused = false, native = false;
   R.voiceOut = {
-    setVolume(v) { volume = Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : 1; if (vol) vol.gain.value = volume; },
+    setVolume(v) { volume = Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : 1; if (vol) vol.gain.value = native ? 0 : volume; },
+    setNative(on) { native = !!on; if (vol) vol.gain.value = native ? 0 : volume; },
     handle(m) {
       if (m.stop) return stop();
       if ('feel' in m) {
@@ -131,6 +134,8 @@
       return buf;
     },
     stop,
+    // Paused from the Hydra window (bridge v3 pause/resume): the voice holds where it is, then goes on.
+    pause(on) { paused = !!on; if (!ac) return; (paused ? ac.suspend() : ac.resume()).catch(() => {}); },
     // Make the audio context ahead of the first reply (host.js calls it when a request starts), so the first
     // chunk doesn't pay for creating it.
     warm() { try { ctx(); } catch { /* no audio */ } },

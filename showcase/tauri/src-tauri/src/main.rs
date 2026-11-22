@@ -1,10 +1,11 @@
-// Menu-bar-only shell for the roamies. One transparent, always-on-top, click-through webview per
-// monitor; a Node sidecar (gg-agent) is the brain and owns the tray menu, settings and logins.
-// No Dock icon (LSUIElement + Accessory policy) and no taskbar entries on Windows/Linux.
+// Hydra Desktop (a modified version of Roamies by Ken Kai, AGPL-3.0). The main window is the Hydra web app
+// (hydra.rs); the Hydra Agent lives on screen in one transparent, always-on-top, click-through webview per
+// monitor; a Node sidecar (gg-agent) is the brain and owns the menu bar menu, settings and logins.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(target_os = "macos")]
 mod fullscreen;
+mod hydra;
 #[cfg(target_os = "linux")]
 mod linux;
 mod sidecar;
@@ -317,6 +318,21 @@ fn to_sidekick_buddy(app: &AppHandle, msg: &Value) {
     for (label, w) in app.webview_windows() {
         if is_overlay(&label) {
             let _ = w.eval(&js);
+        }
+    }
+}
+
+/// The overlay's agent state and levels, for the web app's orb in the main window (hydra.rs push).
+#[tauri::command]
+fn orb_state(app: AppHandle, window: WebviewWindow, msg: Value) {
+    if is_overlay(window.label()) {
+        hydra::push(&app, &msg);
+        refresh_tray(&app, msg.get("state").and_then(Value::as_str).unwrap_or(""));
+        // Speaking or not, for barge-in: the voice helper listens over Hydra's voice only while it plays.
+        static SPEAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let now = msg.get("state").and_then(Value::as_str) == Some("Speaking");
+        if SPEAKING.swap(now, Ordering::Relaxed) != now {
+            to_voice(&app, &json!({ "cmd": "speaking", "on": now }));
         }
     }
 }
@@ -699,42 +715,65 @@ fn intro_at_tray(app: &AppHandle, tray: Option<tauri::Rect>, text: &str) {
 // ---------- menu bar icon ----------
 
 /// The "Wave" icon: the Sidekick waving a floating mitt, as a 12×12 LED grid.
-const TRAY_ART: [&str; 12] = [
-    "............",
-    "..........#.",
-    ".........###",
-    "..........#.",
-    "..####......",
-    ".######.....",
-    "##.##.##....",
-    "##.##.##....",
-    "########....",
-    ".######.....",
-    "..####......",
-    "............",
-];
+/// The Hydra mark (three linked rings, design/logo/hydra-mark.svg) drawn with smooth edges at 36 px (18 pt at 2x).
+/// Black on transparent, used as a template image so macOS tints it for light, dark and highlighted menu bars.
+fn tray_image() -> tauri::image::Image<'static> { tray_image_for(TrayLook::Plain) }
 
-/// Renders the grid as LED dots (2 px on a 3 px pitch, 36 px = 18 pt at 2x). Black on transparent, used
-/// as a template image so macOS tints it for light, dark and highlighted menu bars.
-fn tray_image() -> tauri::image::Image<'static> {
-    const PITCH: usize = 3;
-    const DOT: usize = 2;
-    let n = TRAY_ART.len() * PITCH;
-    let mut rgba = vec![0u8; n * n * 4];
-    for (y, row) in TRAY_ART.iter().enumerate() {
-        for (x, c) in row.chars().enumerate() {
-            if c != '#' {
-                continue;
-            }
-            for dy in 0..DOT {
-                for dx in 0..DOT {
-                    let i = ((y * PITCH + dy) * n + x * PITCH + dx) * 4;
-                    rgba[i + 3] = 255;
-                }
-            }
+/// The menu bar icon's look. Attached (the orb lives in the Hydra window), while that window is hidden it shows the
+/// agent's state, in the template's one ink: asleep the rings go faint, thinking they break into dashes, speaking they
+/// thicken. Listening and every other case: the plain mark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TrayLook { Plain, Asleep, Thinking, Speaking }
+
+fn tray_look(state: &str, detached: bool, window_shown: bool) -> TrayLook {
+    if detached || window_shown { return TrayLook::Plain; }
+    match state {
+        "Asleep" => TrayLook::Asleep,
+        "Thinking" => TrayLook::Thinking,
+        "Speaking" => TrayLook::Speaking,
+        _ => TrayLook::Plain,
+    }
+}
+
+static DETACHED: AtomicBool = AtomicBool::new(false);
+static TRAY_LOOK: AtomicU8 = AtomicU8::new(0);
+
+/// Sets the menu bar icon for the agent's state (macOS; the other systems keep their app icon).
+fn refresh_tray(app: &AppHandle, state: &str) {
+    let shown = app.get_webview_window(hydra::MAIN_LABEL).is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false));
+    let look = tray_look(state, DETACHED.load(Ordering::Relaxed), shown);
+    if TRAY_LOOK.swap(look as u8, Ordering::Relaxed) == look as u8 { return; }
+    #[cfg(target_os = "macos")]
+    if let Some(t) = app.tray_by_id("roamies") {
+        let _ = t.set_icon(Some(tray_image_for(look)));
+        let _ = t.set_icon_as_template(true);
+        let _ = t.set_tooltip(Some(match look { TrayLook::Asleep => "Hydra: asleep", TrayLook::Thinking => "Hydra: thinking", TrayLook::Speaking => "Hydra: speaking", TrayLook::Plain => "Hydra" }));
+    }
+}
+
+fn tray_image_for(look: TrayLook) -> tauri::image::Image<'static> {
+    const N: usize = 36;
+    // The mark's box is 69.47 x 66; fit it in 32 px, centred.
+    let k = 32.0 / 69.47;
+    let (ox, oy) = ((N as f64 - 69.47 * k) / 2.0, (N as f64 - 66.0 * k) / 2.0);
+    let rings = [(34.74, 21.71), (21.71, 44.29), (47.76, 44.29)];
+    let (r, half) = (19.21 * k, 2.9 * k * if look == TrayLook::Speaking { 1.7 } else { 1.0 });
+    let alpha = if look == TrayLook::Asleep { 0.4 } else { 1.0 };
+    let mut rgba = vec![0u8; N * N * 4];
+    for y in 0..N {
+        for x in 0..N {
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            let cover = rings.iter().map(|(cx, cy)| {
+                let (dx, dy) = (px - (ox + cx * k), py - (oy + cy * k));
+                // Thinking: each ring in 8 dashes.
+                if look == TrayLook::Thinking && (dy.atan2(dx) / std::f64::consts::PI * 8.0).rem_euclid(2.0) < 0.8 { return 0.0; }
+                let d = (dx * dx + dy * dy).sqrt();
+                (half + 0.5 - (d - r).abs()).clamp(0.0, 1.0)
+            }).fold(0.0, f64::max);
+            rgba[(y * N + x) * 4 + 3] = (cover * alpha * 255.0).round() as u8;
         }
     }
-    tauri::image::Image::new_owned(rgba, n as u32, n as u32)
+    tauri::image::Image::new_owned(rgba, N as u32, N as u32)
 }
 
 // ---------- panel ----------
@@ -796,7 +835,7 @@ fn show_panel(app: &AppHandle, rect: Option<tauri::Rect>, toggle: bool) {
         Some(w) => w,
         None => {
             let b = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel/index.html".into()))
-                .title("Roamies")
+                .title("Hydra")
                 .inner_size(PANEL_W, PANEL_H)
                 .resizable(false)
                 .maximizable(false)
@@ -928,6 +967,10 @@ fn set_panel_position(w: &WebviewWindow, x: f64, y: f64, _s: f64) {
 /// While the setup guide is open Roamies is a normal app (Dock icon, ⌘Tab), so it's easy to get
 /// back to after a trip to System Settings. Otherwise it lives only in the menu bar.
 fn set_dock(app: &AppHandle, visible: bool) {
+    // Hydra Desktop is a normal app with a Dock icon and its main window: the setup guide never takes it away.
+    if !visible {
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         let policy = if visible { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory };
@@ -954,7 +997,7 @@ fn open_onboarding(app: &AppHandle, mode: Option<&str>) {
     }
     let url = if chat { "onboarding/index.html?mode=chat" } else { "onboarding/index.html" };
     let mut b = WebviewWindowBuilder::new(app, ONBOARDING_LABEL, WebviewUrl::App(url.into()))
-        .title(if chat { "Get to know you" } else { "Welcome to Roamies" })
+        .title(if chat { "Get to know you" } else { "Welcome to Hydra" })
         .inner_size(780.0, 540.0)
         .resizable(false)
         .maximizable(false)
@@ -963,7 +1006,7 @@ fn open_onboarding(app: &AppHandle, mode: Option<&str>) {
         // macOS: the first click acts even while another app is active, instead of only activating Roamies.
         .accept_first_mouse(true)
         .focused(true)
-        .background_color(tauri::window::Color(5, 16, 18, 255));
+        .background_color(tauri::window::Color(255, 255, 255, 255));
     #[cfg(target_os = "macos")]
     {
         b = b.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
@@ -1159,7 +1202,7 @@ fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
         #[cfg(not(target_os = "linux"))]
         let unmanaged = false;
         let b = WebviewWindowBuilder::new(app, label, WebviewUrl::App("desktop.html".into()))
-            .title("Roamies")
+            .title("Hydra")
             .visible(!unmanaged)
             .transparent(true)
             .decorations(false)
@@ -1622,8 +1665,8 @@ fn fallback_menu(app: &AppHandle, status: &str) {
     set_menu(app, &[
         json!({ "id": "status", "label": status, "enabled": false }),
         json!({ "sep": true }),
-        json!({ "id": "restart", "label": "Restart Roamies" }),
-        json!({ "id": "quit", "label": "Quit Roamies" }),
+        json!({ "id": "restart", "label": "Restart Hydra" }),
+        json!({ "id": "quit", "label": "Quit Hydra" }),
     ]);
 }
 
@@ -1648,10 +1691,12 @@ fn log_stdio(name: &str) -> Stdio {
         .unwrap_or_else(Stdio::null)
 }
 
-/// Where the app's own logs go: ~/Roamies/Data/logs. Until the sidecar has moved old data out of ~/.gg (datadir.mjs),
-/// they stay in ~/.gg, so creating the new folder here never makes that move think it's already done.
+/// Where the app's own logs go: ~/HydraAgent/Data/logs. Until the sidecar has moved old data out of ~/.gg or
+/// ~/Roamies (datadir.mjs), they stay in the old place, so creating the new folder here never makes a move think it's
+/// already done.
 fn log_path(home: &std::path::Path, name: &str) -> Option<PathBuf> {
-    let data = home.join("Roamies").join("Data");
+    let root = if home.join("Roamies").is_dir() && !home.join("HydraAgent").exists() { "Roamies" } else { "HydraAgent" };
+    let data = home.join(root).join("Data");
     let old = home.join(".gg");
     if !data.exists() && (old.join("sidekick").exists() || old.join("sidekick.json").exists()) {
         return Some(old.join(name));
@@ -1727,60 +1772,72 @@ fn login_item(app: &AppHandle, set: Option<bool>) {
     to_sidecar(app, &json!({ "type": "login_item_status", "supported": supported, "on": on, "approval": approval }));
 }
 
-/// Checks the signed update feed (latest.json on the newest GitHub release). With `install`, downloads,
-/// verifies the signature, swaps the app in place and restarts. Progress goes to the sidecar as update_status.
-fn update(app: &AppHandle, install: bool) {
-    use tauri_plugin_updater::UpdaterExt;
-    let app = app.clone();
-    // Linux: only an AppImage can swap itself in place. A copy from a .deb or .rpm is told about the new version
-    // (page: true) and "install" opens the releases page instead.
-    #[cfg(target_os = "linux")]
-    let by_page = linux::appimage().is_none();
-    #[cfg(not(target_os = "linux"))]
-    let by_page = false;
-    tauri::async_runtime::spawn(async move {
-        let status = |state: &str, extra: Value| {
-            let mut m = json!({ "type": "update_status", "state": state });
-            if let (Some(m), Some(e)) = (m.as_object_mut(), extra.as_object()) {
-                m.extend(e.clone());
-            }
-            to_sidecar(&app, &m);
-        };
-        let found = match app.updater() {
-            Ok(u) => u.check().await,
-            Err(e) => Err(e),
-        };
-        match found {
-            Ok(None) => status("none", json!({})),
-            Ok(Some(u)) if !install => status("available", json!({ "version": u.version, "page": by_page })),
-            #[cfg(target_os = "linux")]
-            Ok(Some(u)) if by_page => {
-                linux::open_releases_page();
-                status("page", json!({ "version": u.version }));
-            }
-            Ok(Some(u)) => {
-                status("downloading", json!({ "version": u.version }));
-                match u.download_and_install(|_, _| {}, || {}).await {
-                    Ok(()) => {
-                        status("installed", json!({ "version": u.version }));
-                        tokio_sleep(Duration::from_millis(1500)).await;
-                        app.restart();
-                    }
-                    Err(e) => status("error", json!({ "error": e.to_string() })),
-                }
-            }
-            Err(e) => status("error", json!({ "error": e.to_string() })),
+/// macOS permission states in the bridge's words (W3 bridge v3): granted, denied or not_determined.
+fn perm_word(v: Option<&str>) -> &'static str {
+    match v { Some("granted") => "granted", Some("denied") => "denied", _ => "not_determined" }
+}
+/// One permission's state now. mic counts speech recognition too, where this Mac still needs it.
+fn perm_now(kind: &str) -> &'static str {
+    if !cfg!(target_os = "macos") { return "not_determined"; }
+    if kind == "accessibility" { return perm_word(Some(accessibility(false))); }
+    let v = helper_perms(&["--perms"]);
+    let s = |k: &str| perm_word(v.get(k).and_then(Value::as_str));
+    match kind {
+        "mic" => {
+            let speech = if v.get("speechNeeded").and_then(Value::as_bool) == Some(true) { s("speech") } else { "granted" };
+            if s("mic") == "denied" || speech == "denied" { "denied" } else if s("mic") == "granted" && speech == "granted" { "granted" } else { "not_determined" }
         }
+        _ => s("screen"),
+    }
+}
+
+/// window.hydraDesktop.setup(): the permissions here, the rest (paired, Claude, version) from the sidecar, which
+/// answers the page (bridge_req setup).
+pub(crate) fn bridge_setup(app: &AppHandle, id: u32) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let perms = json!({ "mic": perm_now("mic"), "accessibility": perm_now("accessibility"), "screen": perm_now("screen") });
+        to_sidecar(&app, &json!({ "type": "bridge_req", "id": id, "cmd": "setup", "perms": perms }));
     });
 }
 
-async fn tokio_sleep(d: Duration) {
-    let _ = tauri::async_runtime::spawn_blocking(move || thread::sleep(d)).await;
+/// window.hydraDesktop.requestPermission(kind): the macOS prompt, or the right System Settings pane when it was
+/// already refused; then the new state once it changes, or after 2 minutes.
+pub(crate) fn bridge_permission(app: &AppHandle, id: u32, kind: String) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let before = perm_now(&kind);
+        if cfg!(target_os = "macos") && before != "granted" {
+            let pane = match kind.as_str() { "mic" => "Privacy_Microphone", "screen" => "Privacy_ScreenCapture", _ => "Privacy_Accessibility" };
+            match (kind.as_str(), before) {
+                ("accessibility", _) => { accessibility(true); }
+                (_, "denied") => open_settings(pane.into()),
+                ("mic", _) => {
+                    helper_perms(&["--request", "mic"]);
+                    let v = helper_perms(&["--perms"]);
+                    if v.get("speechNeeded").and_then(Value::as_bool) == Some(true) && v.get("speech").and_then(Value::as_str) != Some("granted") {
+                        helper_perms(&["--request", "speech"]);
+                    }
+                }
+                _ => { helper_perms(&["--request", "screen"]); }
+            }
+            let until = Instant::now() + Duration::from_secs(120);
+            while perm_now(&kind) == before && Instant::now() < until {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        hydra::answer(&app, id, json!(perm_now(&kind)));
+    });
 }
 
 fn handle_sidecar(app: &AppHandle, msg: Value) {
     match msg.get("type").and_then(Value::as_str) {
-        Some("update") => update(app, msg.get("install").and_then(Value::as_bool) == Some(true)),
+        // The Hydra window's bridge (hydra.rs): reply and heard text, muted and paused, UI actions, promise answers.
+        Some("hydra_push") => {
+            if let Some(m) = msg.get("msg") {
+                hydra::push(app, m);
+            }
+        }
         Some("login_item") => login_item(app, msg.get("on").and_then(Value::as_bool)),
         Some("menu") => {
             if let Some(items) = msg.get("items").and_then(Value::as_array) {
@@ -1792,12 +1849,24 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 to_overlays(app, m);
             }
         }
+        // Hydra's voice played by the voice helper (the same engine as the mic: the echo reference), W5 contract 6.
+        Some("voice_play") => {
+            if let Some(cmd) = msg.get("msg").and_then(voice::play_cmd) {
+                to_voice(app, &cmd);
+            }
+        }
         Some("panel") => {
             if let Some(m) = msg.get("msg") {
                 to_panel(app, m);
             }
         }
         Some("panel_show") => show_panel(app, None, false),
+        Some("main_show") => {
+            hydra::open_main(app);
+            if let Some(url) = msg.get("url").and_then(Value::as_str) {
+                hydra::navigate(app, url);
+            }
+        }
         Some("diagnostics") => {
             let app = app.clone();
             thread::spawn(move || to_sidecar(&app, &diagnostics(&app)));
@@ -1863,6 +1932,12 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         // The panel's mic picker: ask for the list, and pass on the pick (an id from it, or "" for automatic).
         Some("voice_mics") => to_voice(app, &json!({ "cmd": "mics" })),
         Some("voice_mic") => to_voice(app, &json!({ "cmd": "mic", "id": msg.get("id").and_then(Value::as_str).unwrap_or("") })),
+        // Where the orb lives: attached to the Hydra window (default) or detached on the desktop.
+        Some("orb_mode") => {
+            DETACHED.store(msg.get("detached").and_then(Value::as_bool).unwrap_or(false), Ordering::Relaxed);
+            TRAY_LOOK.store(u8::MAX, Ordering::Relaxed); // look again on the next state
+            hydra::push(app, &json!({ "detached": DETACHED.load(Ordering::Relaxed) }));
+        }
         Some("voice_config") => {
             if let Some(dir) = msg.get("model").and_then(Value::as_str) {
                 *app.state::<VoiceModel>().0.lock().unwrap() = Some(dir.to_owned());
@@ -1881,6 +1956,17 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 // The language takes are recognised in ("auto": the Mac's own language list). macOS helper only.
                 let lang = msg.get("lang").and_then(Value::as_str).unwrap_or("auto");
                 to_voice(app, &json!({ "cmd": "lang", "id": lang }));
+                // The on-device double-clap detector: asleep it only wakes Hydra; awake (clap-to-talk) it starts a take.
+                // The sleep word, while it's awake. Barge-in: talking over Hydra stops it and starts a take.
+                let clap = msg.get("clap").and_then(Value::as_bool).unwrap_or(false);
+                to_voice(app, &json!({ "cmd": "clap", "on": clap, "sensitivity": msg.get("clapSensitivity").and_then(Value::as_f64).unwrap_or(0.5),
+                    "asleep": msg.get("asleep").and_then(Value::as_bool).unwrap_or(false), "talk": msg.get("clapTalk").and_then(Value::as_bool).unwrap_or(false) }));
+                to_voice(app, &json!({ "cmd": "barge", "on": msg.get("barge").and_then(Value::as_bool).unwrap_or(true) }));
+                to_voice(app, &json!({ "cmd": "sleep_word", "phrase": msg.get("sleepWord").and_then(Value::as_str).unwrap_or("") }));
+                // Hydra's wake phrase (agent_settings.wake_phrase), after wake_name: it decides.
+                if let Some(p) = msg.get("wakePhrase").and_then(Value::as_str) {
+                    to_voice(app, &json!({ "cmd": "wake_phrase", "phrase": p }));
+                }
             } else {
                 stop_voice(app);
             }
@@ -1928,6 +2014,11 @@ fn second_launch(app: &AppHandle, args: &[String]) {
     }
 }
 
+fn app_commands(invoke: tauri::ipc::Invoke<Wry>) -> bool {
+    let handler: fn(tauri::ipc::Invoke<Wry>) -> bool = tauri::generate_handler![buddy, ink_wait, set_hot, set_hit_rects, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, guide_aside, drag_window, orb_state];
+    handler(invoke)
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     linux::init();
@@ -1937,33 +2028,42 @@ fn main() {
             let app2 = app.clone();
             let _ = app.run_on_main_thread(move || second_launch(&app2, &args));
         }))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Sidecar(Mutex::new(None)))
         .manage(Roster(Mutex::new(vec!["sidekick".into()])))
         .manage(Voice(Mutex::new(None), AtomicUsize::new(0)))
         .manage(TalkChord(Mutex::new(vec!["control".into(), "option".into()])))
         .manage(VoiceModel(Mutex::new(None)))
         .manage(PermGuide(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![buddy, ink_wait, set_hot, set_hit_rects, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, guide_aside, drag_window])
+        .invoke_handler({
+            // The main window shows a web site: it gets no app commands at all (its bridge is hydra.rs).
+            move |invoke: tauri::ipc::Invoke<Wry>| {
+                if invoke.message.webview().label() == hydra::MAIN_LABEL {
+                    invoke.resolver.reject("Hydra's window has no app commands");
+                    return true;
+                }
+                app_commands(invoke)
+            }
+        })
         .on_menu_event(|app, e| match e.id.as_ref() {
             "quit" => app.exit(0),
             "restart" => spawn_sidecar(app),
+            "open_main" => hydra::open_main(app),
             id => to_sidecar(app, &json!({ "type": "menu", "id": id })),
         })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
-                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                // Hidden (no Dock, no visible menu bar) but gives text fields Cmd+V/C/X/A/Z.
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                // The standard app menu: it gives text fields Cmd+V/C/X/A/Z and the window Cmd+W/M/Q.
                 app.set_menu(Menu::default(app.handle())?)?;
             }
 
-            let starting = MenuItem::with_id(app, "status", "Starting Roamies…", false, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit Roamies", true, None::<&str>)?;
+            let starting = MenuItem::with_id(app, "status", "Starting Hydra…", false, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Hydra", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&starting, &quit])?;
             // Left click opens the panel; right click shows the short menu.
             let mut tray = TrayIconBuilder::with_id("roamies")
-                .tooltip("Roamies")
+                .tooltip("Hydra")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, e| {
@@ -1998,19 +2098,43 @@ fn main() {
             #[cfg(target_os = "macos")]
             fullscreen::watch(app.handle().clone());
             spawn_sidecar(app.handle());
+            hydra::open_main(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("failed to run Roamies")
-        .run(|_, e| {
+        .expect("failed to run Hydra")
+        .run(|app, e| {
             if matches!(e, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 sidecar::QUITTING.store(true, Ordering::SeqCst);
             }
+            // A click on the Dock icon brings the main window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = e {
+                hydra::open_main(app);
+            }
+            let _ = app;
         });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_menu_bar_icon_shows_the_state_only_when_attached_and_the_window_is_hidden() {
+        use super::{tray_image_for, tray_look, TrayLook};
+        assert_eq!(tray_look("Asleep", false, false), TrayLook::Asleep);
+        assert_eq!(tray_look("Thinking", false, false), TrayLook::Thinking);
+        assert_eq!(tray_look("Speaking", false, false), TrayLook::Speaking);
+        assert_eq!(tray_look("Listening", false, false), TrayLook::Plain);
+        assert_eq!(tray_look("Asleep", false, true), TrayLook::Plain, "the window shows the orb itself");
+        assert_eq!(tray_look("Speaking", true, false), TrayLook::Plain, "detached: the desktop orb shows it");
+        let ink = |l| tray_image_for(l).rgba().chunks(4).map(|p| p[3] as u64).sum::<u64>();
+        let plain = ink(TrayLook::Plain);
+        assert!(ink(TrayLook::Asleep) < plain * 6 / 10, "asleep is faint");
+        assert!(ink(TrayLook::Thinking) < plain * 8 / 10, "thinking is dashed");
+        assert!(ink(TrayLook::Speaking) > plain * 12 / 10, "speaking is bolder");
+        assert!(tray_image_for(TrayLook::Asleep).rgba().chunks(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0), "one ink, no colour (a template image)");
+    }
+
     use super::*;
 
     #[test]
@@ -2070,19 +2194,24 @@ mod tests {
     }
 
     #[test]
-    fn app_logs_go_in_the_roamies_data_folder_once_old_data_has_moved() {
-        let home = std::env::temp_dir().join(format!("roamies-logpath-{}", std::process::id()));
+    fn app_logs_go_in_the_hydra_data_folder_once_old_data_has_moved() {
+        let home = std::env::temp_dir().join(format!("hydra-logpath-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".gg").join("sidekick")).unwrap();
         assert_eq!(log_path(&home, "sidekick.log"), Some(home.join(".gg").join("sidekick.log")), "old data not moved yet");
-        assert!(!home.join("Roamies").exists(), "and Data/ isn't created early");
-        std::fs::create_dir_all(home.join("Roamies").join("Data")).unwrap();
-        let logs = home.join("Roamies").join("Data").join("logs");
+        assert!(!home.join("HydraAgent").exists(), "and Data/ isn't created early");
+        std::fs::create_dir_all(home.join("HydraAgent").join("Data")).unwrap();
+        let logs = home.join("HydraAgent").join("Data").join("logs");
         assert_eq!(log_path(&home, "sidekick.log"), Some(logs.join("sidekick.log")), "after the move");
         assert!(logs.is_dir(), "the logs folder is made");
         let fresh = home.join("fresh");
         std::fs::create_dir_all(&fresh).unwrap();
-        assert_eq!(log_path(&fresh, "sidekick-voice.log"), Some(fresh.join("Roamies").join("Data").join("logs").join("sidekick-voice.log")), "a fresh install");
+        assert_eq!(log_path(&fresh, "sidekick-voice.log"), Some(fresh.join("HydraAgent").join("Data").join("logs").join("sidekick-voice.log")), "a fresh install");
+        // ~/Roamies not moved yet: logs stay there, and ~/HydraAgent isn't made early (the move would think it's done).
+        let before = home.join("before");
+        std::fs::create_dir_all(before.join("Roamies").join("Data")).unwrap();
+        assert_eq!(log_path(&before, "a.log"), Some(before.join("Roamies").join("Data").join("logs").join("a.log")));
+        assert!(!before.join("HydraAgent").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 }

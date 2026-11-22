@@ -45,5 +45,7 @@ function copy(name, from) {
 for (const name of process.argv.slice(2)) copy(name, process.cwd());
 EOF
 # The recorded beats (beats/make.mjs): the audio and its index, not the script.
-mkdir -p dist/beats && cp beats/index.json beats/*.pcm dist/beats/
+mkdir -p dist/beats && cp beats/index.json dist/beats/
+shopt -s nullglob; pcm=(beats/*.pcm); shopt -u nullglob
+[ ${#pcm[@]} -eq 0 ] || cp "${pcm[@]}" dist/beats/
 echo '{"type":"module"}' > dist/package.json

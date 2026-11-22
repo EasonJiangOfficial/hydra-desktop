@@ -1,0 +1,54 @@
+# Hydra's server brain (showcase/tauri/sidecar/brain-server.mjs), installed by scripts/deploy-brain.sh.
+# Runs as the non-root user hydra on the owner's claude.ai login (claude, then /login, once as hydra).
+[Unit]
+Description=Hydra server brain (relay device)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hydra
+Group=hydra
+WorkingDirectory=/home/hydra/hydra-brain
+ExecStart=/usr/bin/node /home/hydra/hydra-brain/brain-server.mjs run
+Restart=always
+RestartSec=5
+# Exit 2: a forbidden variable (an API key, a setup-token) is set. Restarting would not help.
+RestartPreventExitStatus=2
+Environment=NODE_ENV=production
+Environment=HYDRA_CLAUDE_BIN=/home/hydra/.npm-global/bin/claude
+Environment=PATH=/home/hydra/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DISABLE_AUTOUPDATER=1
+# Claude Code keeps its login and its .claude.json in ~/.claude (writable below), never in read-only /home/hydra.
+Environment=CLAUDE_CONFIG_DIR=/home/hydra/.claude
+# Hardening: read-only system and home; writable only its own config and state, and Claude Code's login files.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/hydra/.config/hydra-brain /home/hydra/.local/state/hydra-brain /home/hydra/.claude -/home/hydra/.cache
+# What the owner's own interactive claude would load stays read-only to the service (the brain itself loads none).
+ReadOnlyPaths=-/home/hydra/.claude/settings.json -/home/hydra/.claude/settings.local.json -/home/hydra/.claude/hooks -/home/hydra/.claude/CLAUDE.md -/home/hydra/.claude/agents -/home/hydra/.claude/commands -/home/hydra/.claude/skills
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RemoveIPC=yes
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hydra-brain
+
+[Install]
+WantedBy=multi-user.target

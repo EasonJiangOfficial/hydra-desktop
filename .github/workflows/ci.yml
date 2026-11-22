@@ -15,12 +15,12 @@ concurrency:
 
 jobs:
   build:
-    # Linux for the shared code and the Linux beta (voice helper, overlay), macOS for the Swift helpers, Windows for
-    # its Rust helpers (voice and hands).
+    # Hydra Desktop ships for macOS only (Apple silicon). The Linux and Windows steps below are Roamies' and stay in the
+    # file, skipped, for whoever ports it again.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     defaults:
@@ -76,11 +76,14 @@ jobs:
         run: |
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-gain
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-wake
+          src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-clap
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-snap
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-clicks
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-chord
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-mics
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-spaces
+          src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-bands
+          src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-ducking
 
       - name: Test the macOS hands helper
         if: runner.os == 'macOS'

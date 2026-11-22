@@ -511,7 +511,7 @@ async function getChecked(url, { fetchImpl = fetch, max, accept }) {
   for (let hop = 0; ; hop++) {
     const v = checkUrl(at);
     if (v.level === 'block') throw new Error(`Blocked for safety: ${v.reason}`);
-    res = await fetchImpl(at, { headers: { 'user-agent': 'Roamies-Sidekick', accept }, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+    res = await fetchImpl(at, { headers: { 'user-agent': 'Hydra-Desktop', accept }, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
     const next = res.status >= 300 && res.status < 400 && res.headers.get('location');
     if (!next) break;
     if (hop >= 4) throw new Error('Too many redirects.');
@@ -569,6 +569,8 @@ export function createPhotos({ fetchImpl = fetch, max = 12 } = {}) {
       }
       return null;
     },
+    /** Whether that picture was looked at already (fetched once, with a yes for a link). */
+    has: (m) => seen.has(key(m)),
     /** The picture for a photo mark: the one looked at, else fetched now. */
     get: async (m) => seen.get(key(m)) ?? photoFor({ query: m.query, url: m.url }, { fetchImpl }),
   };

@@ -73,7 +73,7 @@ const o = calls.options;
 assert.equal(o.systemPrompt.prompt, 'You are Roamie.');
 assert.deepEqual(o.tools, [], 'none of Claude Code\'s own tools');
 assert.deepEqual(o.allowedTools, ['mcp__gg__read_file']);
-assert.equal(o.cwd, '/home/me'); assert.equal(o.pathToClaudeCodeExecutable, '/bin/claude'); assert.deepEqual(o.env, { A: '1', CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384' });
+assert.equal(o.cwd, '/home/me'); assert.equal(o.pathToClaudeCodeExecutable, '/bin/claude'); assert.deepEqual(o.env, { A: '1', CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1' }, 'no telemetry or other non-essential traffic from Claude Code');
 assert.equal(o.effort, 'low'); assert.equal(o.maxTurns, 24); assert.equal(o.resume, undefined, 'a fresh session');
 assert.deepEqual((await o.canUseTool('Bash', {})).behavior, 'deny', 'anything not ours is denied');
 const sent = calls.inputs[0].message.content.map((p) => p.text).join('\n');
@@ -213,6 +213,32 @@ console.log('claudecode ok');
   fail = null;
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(cc.binary(), '/cc/claude', 'the retry installed it');
+}
+
+// Connectors (W3 contract): the owner's claude.ai connectors load (no strict MCP config), the environment is his
+// claude.ai login's only (no API key, OAuth token, profile or cloud provider), and every connector call is gated.
+{
+  const gated = [];
+  const c = fakeQuery(toolRun);
+  const env = { HOME: '/h', ANTHROPIC_API_KEY: 'k', ANTHROPIC_PROFILE: 'p', ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_OAUTH_TOKEN: 't', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', AWS_BEARER_TOKEN_BEDROCK: 'b', ENABLE_CLAUDEAI_MCP_SERVERS: 'false', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CONFIG_DIR: '/cfg' };
+  const a = new ClaudeCodeAgent({ model: 'claude-opus-5-5', system: 's', tools: [readFile], executable: '/bin/claude', cwd: '/', env, query: c.query, onRateLimit: () => {},
+    connectors: true, gate: async (name, input) => { gated.push([name, input]); return name.endsWith('search_threads'); } });
+  for await (const e of agentEvents(a.prompt('mail?'))) void e;
+  const co = c.calls.options;
+  assert.equal(co.strictMcpConfig, undefined, 'no strict MCP config: claude.ai connectors load');
+  assert.equal(co.disableClaudeAiConnectors, undefined);
+  assert.deepEqual(co.env, { HOME: '/h', CLAUDE_CONFIG_DIR: '/cfg', CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' }, 'only the claude.ai login\'s environment');
+  assert.equal(co.model, 'claude-opus-5-5');
+  assert.deepEqual(co.allowedTools, ['mcp__gg__read_file'], 'connector tools are never pre-allowed');
+  assert.equal((await co.canUseTool('mcp__claude_ai_Gmail__search_threads', { q: 'x' }, {})).behavior, 'allow', 'a read the gate lets through');
+  const no = await co.canUseTool('mcp__claude_ai_Gmail__send_message', { to: 'a' }, {});
+  assert.equal(no.behavior, 'deny', 'a send the owner did not allow');
+  assert.deepEqual(gated.map(([n]) => n), ['mcp__claude_ai_Gmail__search_threads', 'mcp__claude_ai_Gmail__send_message'], 'every connector call reaches the gate');
+  assert.equal((await co.canUseTool('Bash', {}, {})).behavior, 'deny', 'Claude Code\'s own tools stay off');
+  assert.equal((await co.canUseTool('mcp__gg__read_file', {}, {})).behavior, 'allow');
+  // Without connectors, as before: strict, and no connector call can pass.
+  assert.equal(o.strictMcpConfig, true);
+  assert.equal((await o.canUseTool('mcp__claude_ai_Gmail__search_threads', {}, {})).behavior, 'deny');
 }
 
 // The SDK drives gg-core's pinned Claude Code binary: updating one without the other is a version mismatch.

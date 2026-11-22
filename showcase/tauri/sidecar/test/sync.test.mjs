@@ -192,3 +192,17 @@ assert.deepEqual(checkFolder('~/Cloud', TMP), { ok: true, dir: path.join(TMP, 'C
   delete process.env.ROAMIES_DATA_DIR;
 }
 console.log('sync tests: passed');
+
+// The shared folder: an existing "Roamies Sync" keeps its name (renaming it on one Mac would split the others); a new
+// one is "Hydra Sync".
+{
+  const { syncSub } = await import('../sync.mjs');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-syncsub-'));
+  fs.mkdirSync(path.join(d, 'Roamies Sync')); fs.writeFileSync(path.join(d, 'Roamies Sync', 'sync.json'), '{"version":1}');
+  assert.equal(syncSub(d), path.join(d, 'Roamies Sync'), 'the existing folder is used as it is');
+  assert.ok(fs.existsSync(path.join(d, 'Roamies Sync', 'sync.json')) && !fs.existsSync(path.join(d, 'Hydra Sync')), 'and never renamed');
+  const e = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-syncsub-'));
+  assert.equal(syncSub(e), path.join(e, 'Hydra Sync'), 'a new folder uses the new name');
+  fs.rmSync(d, { recursive: true, force: true }); fs.rmSync(e, { recursive: true, force: true });
+  console.log('sync folder name: passed');
+}

@@ -191,7 +191,7 @@ pub(crate) fn set_hotkey(slot: usize, accel: &str) -> Result<(), String> {
             return Ok(());
         }
         if keys.iter().enumerate().any(|(i, k)| i != slot && k.map(|c| c.id()) == Some(new.id())) {
-            return Err("already used by the other Roamies shortcut".to_string());
+            return Err("already used by the other Hydra shortcut".to_string());
         }
         if let Some(old) = current {
             let _ = manager.unregister(old);
@@ -253,6 +253,26 @@ pub(crate) fn set_esc(app: &AppHandle, label: &str, on: bool) {
     });
 }
 
+/// Hydra's own voice through the voice helper (W5 contract 6): the sidecar's speech messages as the helper's commands.
+/// A chunk of 16-bit mono PCM (base64) plays; stop, pause and volume go along. Anything else is not for the helper.
+pub(crate) fn play_cmd(msg: &Value) -> Option<Value> {
+    if msg.get("stop").and_then(Value::as_bool) == Some(true) { return Some(json!({ "cmd": "play_stop" })); }
+    if let Some(on) = msg.get("paused").and_then(Value::as_bool) { return Some(json!({ "cmd": "play_pause", "on": on })); }
+    if let Some(v) = msg.get("volume").and_then(Value::as_f64) { return Some(json!({ "cmd": "play_volume", "v": v.clamp(0.0, 1.0) })); }
+    let id = msg.get("id").and_then(Value::as_str).filter(|i| (1..=64).contains(&i.len()))?;
+    let pcm = msg.get("pcm").and_then(Value::as_str).filter(|p| !p.is_empty() && p.len() <= 16_000_000)?;
+    let rate = msg.get("rate").and_then(Value::as_f64).filter(|r| (8000.0..=96000.0).contains(r)).unwrap_or(44100.0);
+    Some(json!({ "cmd": "play", "id": id, "pcm": pcm, "rate": rate }))
+}
+
+/// The orb's spectrum from the helper (24 bands, 0..1) for the Hydra window: cleaned, or None.
+pub(crate) fn bands_push(msg: &Value) -> Option<Value> {
+    let b = msg.get("b").and_then(Value::as_array)?;
+    if b.len() != 24 { return None; }
+    let v: Option<Vec<f64>> = b.iter().map(|x| x.as_f64().map(|f| (f.clamp(0.0, 1.0) * 1000.0).round() / 1000.0)).collect();
+    Some(json!({ "bands": v? }))
+}
+
 fn handle_voice(app: &AppHandle, msg: Value) {
     let mut ui = msg.clone();
     ui["kind"] = json!("voice");
@@ -290,11 +310,23 @@ fn handle_voice(app: &AppHandle, msg: Value) {
     match msg.get("type").and_then(Value::as_str) {
         Some("state") => {
             to_overlays(app, &ui);
-            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state") }));
+            // mode: what opened a take (hold, handsfree, wake): a phrase take while Hydra thinks adds to the turn.
+            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state"), "mode": msg.get("mode") }));
         }
-        Some("partial") | Some("level") => to_overlays(app, &ui),
+        // The orb's spectrum (W5 contract 5), straight to the Hydra window (at most 30 a second, from the helper).
+        Some("bands") => { if let Some(p) = bands_push(&msg) { hydra::push(app, &p); } }
+        // The helper couldn't play Hydra's voice: the overlay plays it again.
+        Some("play_failed") => to_sidecar(app, &json!({ "type": "voice_play_failed", "why": msg.get("why").cloned().unwrap_or(Value::Null) })),
+        Some("level") => to_overlays(app, &ui),
+        // The words as they're recognised, for the Hydra window's orb card too (bridge v3: heard).
+        Some("partial") => {
+            to_overlays(app, &ui);
+            // The owner talks again: a new turn, so the last reply clears (W3 contract-fixes 10).
+            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": false }, "reply": Value::Null }));
+        }
         Some("final") => {
             to_overlays(app, &ui);
+            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": true }, "reply": Value::Null }));
             // area: the part of the screen marked with the pen while talking (a PNG, its rect and the strokes).
             to_sidecar(app, &json!({ "type": "voice", "text": msg.get("text"), "area": msg.get("area"), "ms": msg.get("ms"), "via": msg.get("via") }));
         }
@@ -309,6 +341,16 @@ fn handle_voice(app: &AppHandle, msg: Value) {
             m["type"] = json!("voice_lang");
             to_sidecar(app, &m);
         }
+        // Hydra's sleep and wake: a double clap while it sleeps, or the sleep word while it listens.
+        Some("clap") => to_sidecar(app, &json!({ "type": "agent_power", "on": true, "from": "clap" })),
+        // The wake phrase while it sleeps: it wakes, and the take the phrase opened goes on (W5 contract 4).
+        Some("phrase_wake") => to_sidecar(app, &json!({ "type": "agent_power", "on": true, "from": "phrase" })),
+        // A take a clap, the key phrase or talking over Hydra started: it counts as talking (the 5-minute timer).
+        // No echo cancellation on this Mac: barge-in is off for this session (the panel says why).
+        Some("barge_unavailable") => to_sidecar(app, &json!({ "type": "voice_barge_unavailable" })),
+        Some("barge_available") => to_sidecar(app, &json!({ "type": "voice_barge_available" })),
+        Some("trigger") => to_sidecar(app, &json!({ "type": "voice_trigger", "via": msg.get("via").cloned().unwrap_or(Value::Null) })),
+        Some("sleep_word") => to_sidecar(app, &json!({ "type": "agent_power", "on": false, "from": "sleep_word" })),
         // The mic list, for the panel's picker.
         Some("mics") => {
             let mut m = msg.clone();
@@ -316,5 +358,31 @@ fn handle_voice(app: &AppHandle, msg: Value) {
             to_sidecar(app, &m);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn hydras_voice_goes_to_the_helper() {
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "pcm": "AAAB", "rate": 22050 })), Some(json!({ "cmd": "play", "id": "s1", "pcm": "AAAB", "rate": 22050.0 })));
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "pcm": "AAAB" })).unwrap()["rate"], json!(44100.0), "Fish's rate by default");
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "stop": true })), Some(json!({ "cmd": "play_stop" })));
+        assert_eq!(play_cmd(&json!({ "paused": true })), Some(json!({ "cmd": "play_pause", "on": true })));
+        assert_eq!(play_cmd(&json!({ "volume": 3.0 })), Some(json!({ "cmd": "play_volume", "v": 1.0 })));
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "end": true })), None, "the end needs nothing");
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "feel": "happy", "at": 3 })), None);
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "pcm": "AAAB", "rate": 1.0 })).unwrap()["rate"], json!(44100.0), "a rate out of range");
+    }
+    #[test]
+    fn the_spectrum_is_24_bands_between_0_and_1() {
+        let b: Vec<f64> = (0..24).map(|i| i as f64 / 10.0 - 0.5).collect();
+        let p = bands_push(&json!({ "type": "bands", "b": b })).unwrap();
+        let out = p["bands"].as_array().unwrap();
+        assert_eq!(out.len(), 24);
+        assert!(out.iter().all(|v| (0.0..=1.0).contains(&v.as_f64().unwrap())));
+        assert_eq!(bands_push(&json!({ "b": [0.1, 0.2] })), None, "only 24");
+        assert_eq!(bands_push(&json!({ "b": vec![json!("x"); 24] })), None);
     }
 }

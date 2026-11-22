@@ -38,7 +38,8 @@ assert.ok(jobKinds('send an agent to tidy my desktop').includes('agents'));
 assert.ok(!jobKinds('what is an agent?').includes('agents'));
 
 // Tools that mean a job is under way
-assert.equal(kindOfTool('run_command'), 'code');
+assert.equal(kindOfTool('write_file'), 'code');
+assert.equal(kindOfTool('run_command'), null, 'no shell tool');
 assert.equal(kindOfTool('act_in_app'), 'computer');
 assert.equal(kindOfTool('web_search'), 'web');
 assert.equal(kindOfTool('remember_commitment'), null);

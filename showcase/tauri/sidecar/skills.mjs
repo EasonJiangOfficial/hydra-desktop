@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { redactKeys } from './diagnostics.mjs';
 import { BLOCK, checkFetch, checkSkill } from './safety.mjs';
-import { roamiesRoot } from './store.mjs';
+import { binFolder, onRestore, roamiesRoot, toBin } from './store.mjs';
 
 export const SKILLS_DIR = path.join(roamiesRoot(), 'Skills');
 export const MAX_SKILLS = 60, MAX_STEPS = 6000, MAX_DESC = 200;
@@ -59,6 +59,13 @@ export function readSkill(name) {
   try { return { slug, path: fileOf(slug), ...parseSkillFile(readFileSync(fileOf(slug), 'utf8'), slug) }; } catch { return null; }
 }
 
+/** Whether a skill by that name is there in any form (its folder), even one whose SKILL.md doesn't read: saving over
+ *  it would replace what's there, a hand-edited file included. */
+export function skillExists(name) {
+  const slug = slugOf(name);
+  return !!slug && existsSync(path.join(SKILLS_DIR, slug));
+}
+
 /** Creates or replaces a skill. Throws (with a reason fit to pass on) when it's empty, too big, unsafe or one too many. */
 export async function saveSkill({ name, description, steps }) {
   const slug = slugOf(name);
@@ -84,9 +91,29 @@ export async function saveSkill({ name, description, steps }) {
 export async function deleteSkill(name) {
   const s = readSkill(name);
   if (!s) return null;
-  await fs.rm(path.dirname(s.path), { recursive: true, force: true });
+  // Moved to Recently deleted, not erased, so it can be put back.
+  const id = await toBin('skill', s.name, { slug: s.slug, name: s.name });
+  await fs.mkdir(binFolder(id), { recursive: true, mode: 0o700 });
+  await fs.rename(path.dirname(s.path), path.join(binFolder(id), s.slug)).catch(async () => {
+    await fs.cp(path.dirname(s.path), path.join(binFolder(id), s.slug), { recursive: true });
+    await fs.rm(path.dirname(s.path), { recursive: true, force: true });
+  });
   return s;
 }
+onRestore('skill', async ({ id, data }) => {
+  const from = path.join(binFolder(id), data.slug), to = path.join(SKILLS_DIR, data.slug);
+  if (!existsSync(from)) throw new Error('Its folder is gone, so it can\'t be put back.');
+  if (existsSync(to)) throw new Error(`There's a skill called ${data.slug} now. Remove or rename it first.`);
+  // Screened again, every file: the rules may be stricter now than when it was saved (V9-11).
+  const files = (await fs.readdir(from, { recursive: true, withFileTypes: true })).filter((e) => e.isFile());
+  for (const e of files) {
+    const v = checkSkill(await fs.readFile(path.join(e.parentPath ?? e.path, e.name), 'utf8'));
+    if (v.level === BLOCK) throw new Error(`It can't come back: ${v.reason.replace(/^That skill can't be saved: /, '')}`);
+  }
+  await fs.mkdir(SKILLS_DIR, { recursive: true });
+  await fs.rename(from, to).catch(async () => { await fs.cp(from, to, { recursive: true }); });
+  return `Put back the skill ${data.slug}.`;
+});
 
 /** One line per skill, for the live state's memory section. */
 export const skillIndex = (list = listSkills()) => list.map((s) => `- ${s.slug}: ${s.description}`).join('\n');
@@ -132,7 +159,7 @@ export async function httpGet(url, { json = false, limit = MAX_SKILL_MD * 4, tim
   for (let hop = 0; hop < 4; hop++) {
     const v = await checkFetch(at);
     if (v.level === BLOCK) throw new Error(v.reason);
-    const res = await fetch(at, { redirect: 'manual', signal: AbortSignal.timeout(timeout), headers: { 'user-agent': 'Roamies', accept: json ? 'application/vnd.github+json' : 'text/plain, text/markdown, */*' } });
+    const res = await fetch(at, { redirect: 'manual', signal: AbortSignal.timeout(timeout), headers: { 'user-agent': 'Hydra-Desktop', accept: json ? 'application/vnd.github+json' : 'text/plain, text/markdown, */*' } });
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) { at = new URL(res.headers.get('location'), at).href; continue; }
     if (res.status === 404) throw new Error(`Nothing at ${at} (404).`);
     if (res.status === 403 || res.status === 429) throw new Error('GitHub is limiting requests right now; try again in a few minutes.');

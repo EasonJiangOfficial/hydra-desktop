@@ -99,7 +99,7 @@ export function createSecrets({ platform = process.platform, hands = '', dataDir
   }
 
   if (platform === 'linux') {
-    const attrs = (name) => ['service', 'com.kenkai.roamies', 'account', name];
+    const attrs = (name) => ['service', 'com.easonjiang.hydra', 'account', name];
     // secret-tool missing, or no keyring answering on the session bus: say which, so it can be fixed.
     const problem = (r) => {
       if (r.code === -1 && /ENOENT/.test(r.stderr)) return 'secret-tool isn\'t installed (it comes in libsecret-tools on Debian and Ubuntu, libsecret on Fedora and Arch)';
@@ -118,7 +118,7 @@ export function createSecrets({ platform = process.platform, hands = '', dataDir
       },
       async set(name, value) {
         check(name);
-        const r = await exec('secret-tool', ['store', '--label', `Roamies: ${name}`, ...attrs(name)], value);
+        const r = await exec('secret-tool', ['store', '--label', `Hydra: ${name}`, ...attrs(name)], value);
         if (r.code !== 0) throw new Error(problem(r));
       },
       async delete(name) {

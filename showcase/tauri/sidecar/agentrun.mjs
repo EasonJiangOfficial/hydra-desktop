@@ -64,14 +64,17 @@ export function trimRun(msgs, budgetChars) {
   return msgs.map((m, i) => (m.role === 'tool' && i > 1 && i < keep ? { ...m, content: m.content.map((r) => ({ ...r, content: short(r.content) })) } : m));
 }
 
+// Stopped (SIGTERM from the parent): say it isn't acting in an app any more before going.
+process.on('SIGTERM', () => { try { process.send?.({ t: 'ui', msg: { kind: 'hands', on: false } }); } catch {} setTimeout(() => process.exit(143), 50); });
 async function run({ agent: a, model: md, content }) {
   allow = a.allow !== false;
   route = md.route === 'claude-code' ? 'claude-code' : 'api';
   let result = null;
   const { tools: all } = createTools({
-    allowActions: () => allow, ui: () => {}, openUrl: () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: (ms) => new Date(ms).toLocaleString(),
+    // Only 'acting in an app' goes up, so the overlay turns click-through and ignores its Allow buttons meanwhile.
+    allowActions: () => allow, ui: (m) => { if (m?.kind === 'hands' && 'on' in m && process.send) process.send({ t: 'ui', msg: { kind: 'hands', on: !!m.on } }); }, openUrl: () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: (ms) => new Date(ms).toLocaleString(),
     commitmentsText: () => '', userName: a.userName || 'The user', workdir: a.dir, own: a.dir, pointScale: () => pointScale(md.model ?? ''),
-    ask: (opts, signal) => request({ t: 'ask', question: String(opts?.placeholder ?? '').slice(0, 300) }, signal).then((yes) => (yes ? 'yes' : null)),
+    ask: (opts, signal) => request({ t: 'ask', question: String(opts?.placeholder ?? ''), always: !!opts?.always }, signal).then((yes) => (yes ? 'yes' : null)),
     // web_search's side search runs on the same Anthropic sign-in as this agent; other providers use the keyless engines.
     sideSearch: async () => {
       if (md.provider !== 'anthropic') return null;

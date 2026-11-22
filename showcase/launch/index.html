@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hydra</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #FFFFFF; }
+  body { display: grid; place-items: center; }
+  .launch-loader { position: relative; }
+</style>
+</head>
+<body>
+<!-- Loading the Hydra window: the Hydra loading logo until Hydra's first page paints (WebKit keeps this page on screen
+     until then, and the navigation takes the loader with it). -->
+<div class="launch-loader" id="launch-loader"></div>
+<script src="hydra-loader.js"></script>
+<script>
+  window.mountHydraLoader(document.getElementById('launch-loader'), { size: 96, tone: 'ink', label: 'Loading' });
+  // Go on to Hydra once the loader has painted.
+  requestAnimationFrame(() => requestAnimationFrame(() => location.replace('https://hydra-olive-one.vercel.app/')));
+</script>
+</body>
+</html>

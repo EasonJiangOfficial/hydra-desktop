@@ -15,10 +15,12 @@ updates:
     ignore:
       # Bumped by hand with gg-core: it must match the Claude Code version gg-core pins (test/claudecode.test.mjs).
       - dependency-name: "@anthropic-ai/claude-agent-sdk"
+      # Hydra Desktop never pulls updates or code from the upstream author.
+      - dependency-name: "@kenkaiiii/*"
     groups:
       # The SDK must match the Claude Code version gg-core pins (test/claudecode.test.mjs): they move together.
       claude-code:
-        patterns: ["@anthropic-ai/claude-agent-sdk", "@kenkaiiii/*"]
+        patterns: ["@anthropic-ai/claude-agent-sdk"]
       minor-and-patch:
         update-types: ["minor", "patch"]
 

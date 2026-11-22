@@ -12,7 +12,13 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const SUBDIR = 'Roamies Sync';
+export const SUBDIR = 'Hydra Sync', OLD_SUBDIR = 'Roamies Sync';
+// The sync folder's own folder. One that's there already ("Roamies Sync", from before the rename) keeps its name: it is
+// shared with other Macs through iCloud or Dropbox, and renaming it on one would split them. Only a new one is "Hydra Sync".
+export function syncSub(dir) {
+  const old = path.join(dir, OLD_SUBDIR);
+  return existsSync(old) && !existsSync(path.join(dir, SUBDIR)) ? old : path.join(dir, SUBDIR);
+}
 export const HEADER = 'sync.json';
 export const KEY_NAME = 'sync-key'; // the secret store's name for this computer's copy of the key
 export const MIN_PASSPHRASE = 8;
@@ -45,7 +51,7 @@ export function unseal(key, box, aad) {
  */
 export async function prepareFolder(dir, passphrase) {
   if (String(passphrase ?? '').length < MIN_PASSPHRASE) return { error: `The passphrase needs at least ${MIN_PASSPHRASE} characters.` };
-  const sub = path.join(dir, SUBDIR), file = path.join(sub, HEADER);
+  const sub = syncSub(dir), file = path.join(sub, HEADER);
   await fs.mkdir(sub, { recursive: true });
   const read = async () => { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return null; } };
   let head = await read();
@@ -54,7 +60,7 @@ export async function prepareFolder(dir, passphrase) {
     const fresh = { version: 1, kdf: 'scrypt', salt: salt.toString('base64'), check: seal(key, CHECK, 'check') };
     try { await fs.writeFile(file, JSON.stringify(fresh), { flag: 'wx', mode: 0o600 }); return { key }; } catch { head = await read(); }
   }
-  if (head?.version !== 1 || head.kdf !== 'scrypt' || typeof head.salt !== 'string') return { error: 'The sync folder was set up by a newer Roamies, or its sync.json is damaged.' };
+  if (head?.version !== 1 || head.kdf !== 'scrypt' || typeof head.salt !== 'string') return { error: 'The sync folder was set up by a newer Hydra, or its sync.json is damaged.' };
   const key = deriveKey(passphrase, Buffer.from(head.salt, 'base64'));
   try { if (unseal(key, head.check, 'check') === CHECK) return { key }; } catch { /* wrong passphrase */ }
   return { error: "That isn't the passphrase this sync folder was set up with. Use the same one as on your other computer." };
@@ -184,7 +190,7 @@ export function checkFolder(raw, home = os.homedir()) {
 /** The other computers' files in the folder, decrypted and cleaned. Half-synced ones are skipped this time; ones that
  *  don't open with this key (another passphrase, or changed) are counted in out.unreadable. */
 export async function readRemotes(dir, device, key, now = Date.now()) {
-  const sub = path.join(dir, SUBDIR), out = [];
+  const sub = syncSub(dir), out = [];
   out.unreadable = 0;
   let names = [];
   try { names = await fs.readdir(sub); } catch { return out; }
@@ -208,7 +214,7 @@ export async function readRemotes(dir, device, key, now = Date.now()) {
 
 /** Writes this computer's file, encrypted: a temp file, then a rename, so another computer never reads half of it. */
 export async function writeOwn(dir, device, data, key) {
-  const sub = path.join(dir, SUBDIR);
+  const sub = syncSub(dir);
   await fs.mkdir(sub, { recursive: true });
   const file = path.join(sub, `${device}.json`), tmp = path.join(sub, `.${device}.${randomBytes(3).toString('hex')}.tmp`);
   await fs.writeFile(tmp, JSON.stringify({ version: 1, device, enc: seal(key, data, device) }), { mode: 0o600 });

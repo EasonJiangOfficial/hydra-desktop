@@ -1,14 +1,14 @@
 // The notch capsule: the agent comes out of the top of the screen (a Mac's camera notch, where there is one) instead
 // of popping up beside the cursor.
 // A black capsule pours out of the notch (it starts exactly the notch's size, so it reads as the notch itself
-// growing), spreads sideways with a little spring, and drops open when there's something to read. When the turn is
-// over it folds back the same way and disappears into the notch. Inside: a small live JARVIS globe (jarvis.js, the
+// growing), spreads sideways with an ease, and drops open when there's something to read. When the turn is
+// over it folds back the same way and disappears into the notch. Inside: a small live Hydra orb (hydra.js, the
 // same renderer as the sidekick), what it's doing, and the reply as it streams.
 // Two styles (R.notch.style): 'drop' (the default) is a capsule that pours out of the notch like water, a liquid
 // neck stretching and splitting off with a couple of droplets, floats just under the notch and plays with the cursor
 // (the lens watches it, a click folds the reply away or opens it again), then rises back and melts
 // into the notch the same way. 'spread' widens sideways out of the notch instead.
-// The lens shows whichever look is picked (JARVIS's globe, a person, or the Roamie blob). While it speaks, a true
+// The lens shows the Hydra orb. While it speaks, a true
 // waveform of its own voice (voice-out.js samples) runs in the status slot; while it listens, one that follows the mic.
 // Screens without a notch get the same capsule hanging from the top edge, with nothing to hide in at rest.
 // The overlay is click-through, so the host asks Roamie.notchHit(x, y) whether the cursor is over it.
@@ -21,9 +21,10 @@
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
   // ---------- look ----------
-  const INK = '#dcfff6', ACCENT = '#78ffe2';
-  // The LED levels JARVIS is drawn in (12-sidekick.js), level 0 never drawn here: the capsule is the dark.
-  const PAL = [null, 'rgb(14,92,96)', 'rgb(40,196,184)', 'rgb(120,255,226)', 'rgb(230,255,250)'];
+  // The capsule stays black (it is the notch growing), so its type is white and grays; no accent colour.
+  const INK = '#FFFFFF', ACCENT = '#FFFFFF';
+  // The levels the orb is drawn in, a gray ramp up to white; level 0 never drawn here: the capsule is the dark.
+  const PAL = [null, '#424245', '#6E6E73', '#A1A1A6', '#F5F5F7'];
   const L = PAL.length - 1;
   // Fillet where the capsule meets the top edge, flowing into the screen like the notch's own corners.
   const FILLET = 9;
@@ -34,7 +35,7 @@
   const DROP_ROW = 40, GAP = 15;
 
   const css = `
-.nc { --ink: ${INK}; --ink-2: rgba(220,255,246,.62); --ink-3: rgba(220,255,246,.38); --accent: ${ACCENT};
+.nc { --ink: ${INK}; --ink-2: rgba(255,255,255,.72); --ink-3: rgba(255,255,255,.5); --accent: ${ACCENT};
   --w: 180px; --h: 32px; --r: 0px; --f: ${FILLET}px;
   --y: 0px; --gl: .4; --gr: .4; --glow-a: #6fd6ff; --glow-b: #2a6bff;
   position: fixed; top: var(--y); left: 50%; z-index: 9; box-sizing: border-box; width: var(--w); height: var(--h);
@@ -42,10 +43,10 @@
   /* Centred by its left edge (the host sets it from var(--w)), never a percentage translate: WebKit freezes those at
      the size an animation started at, so it came out off-centre. Squash and hover scale are set by the frame loop for
      the same reason (no animation handed to the GPU). */ background: #000; color: var(--ink); border-radius: 0 0 var(--r) var(--r);
-  font: 400 12.5px/20px "Martian Mono", "Roamies Arabic", ui-monospace, Menlo, monospace;
+  font: 400 13px/20px system-ui, -apple-system, "Helvetica Neue", sans-serif;
   pointer-events: none; visibility: hidden; contain: layout style;
   transition: --w .46s cubic-bezier(.22, 1, .36, 1), --h .4s cubic-bezier(.22, 1, .36, 1), --r .4s cubic-bezier(.22, 1, .36, 1),
-    top .6s cubic-bezier(.3, 1.35, .5, 1), box-shadow .35s ease, --glow-a .6s ease, --glow-b .6s ease; }
+    top .6s cubic-bezier(.2, .8, .2, 1), box-shadow .2s ease, --glow-a .6s ease, --glow-b .6s ease; }
 /* The size is animated through these (not width and height), so what's sized from them (the card, the glow's outline)
    follows the shape frame by frame. */
 @property --w { syntax: '<length>'; inherits: true; initial-value: 180px; }
@@ -56,10 +57,10 @@
 /* Folding back: no spring, it should look like it's being drawn in. */
 .nc.closing { transition: --w .34s cubic-bezier(.55, 0, .75, .2) .12s, --h .3s cubic-bezier(.5, 0, .7, .3), --r .3s ease-in,
   top .42s cubic-bezier(.6, 0, .8, .35) .08s; }
-/* Drop: a floating pill, no fillets (the neck joins it to the notch instead), a shadow to lift it off the page. */
+/* Drop: a floating pill, no fillets (the neck joins it to the notch instead), a hairline to set it off the page. */
 .nc.drop::before, .nc.drop::after { display: none; }
 .nc.drop { background: #000; border-radius: var(--r); }
-.nc.drop.compact, .nc.drop.full { box-shadow: 0 12px 32px rgba(0, 0, 0, .34), 0 2px 6px rgba(0, 0, 0, .3), 0 0 0 1px rgba(120, 190, 255, .07); }
+.nc.drop.compact, .nc.drop.full { box-shadow: 0 0 0 1px rgba(255, 255, 255, .12); }
 .nc.drop.hot { cursor: pointer; }
 .nc.drop.full.hot { cursor: default; }
 /* Drop: the name on the left glow, the globe in the middle like a camera lens, the status on the right glow. */
@@ -71,18 +72,17 @@
    text keeps its final width, so it doesn't re-wrap while the card grows. */
 .nc.drop .nc-body { --cw: var(--w); top: 0; left: calc(50% - var(--cw) / 2); right: auto; width: var(--cw); padding: 14px 20px 16px;
   height: var(--row); overflow: hidden; box-sizing: border-box; opacity: 0;
-  background: #000; border-radius: 22px; pointer-events: none;
-  box-shadow: 0 14px 36px rgba(0, 0, 0, .34), 0 2px 6px rgba(0, 0, 0, .3), 0 0 0 1px rgba(120, 190, 255, .07), inset 0 1px 0 rgba(255, 255, 255, .06);
+  background: #FFFFFF; border-radius: 12px; pointer-events: none; box-shadow: inset 0 0 0 1px #D2D2D7;
+  --ink: #1D1D1F; --ink-2: #424245; --ink-3: #6E6E73; --accent: #1D1D1F; --on-accent: #FFFFFF; --line: #D2D2D7; --thumb: #D2D2D7;
   transition: opacity .12s ease .2s, --cw .32s cubic-bezier(.4, 0, .2, 1), height .3s cubic-bezier(.4, 0, .2, 1), top .32s cubic-bezier(.4, 0, .2, 1); }
 .nc.drop.full .nc-body { --cw: var(--bw, 440px); top: calc(var(--row) + 8px); height: var(--bh, auto); opacity: 1; pointer-events: auto;
-  transition: opacity .1s ease, --cw .44s cubic-bezier(.22, 1, .36, 1), height .4s cubic-bezier(.22, 1, .36, 1), top .52s cubic-bezier(.3, 1.25, .5, 1); }
+  transition: opacity .1s ease, --cw .44s cubic-bezier(.22, 1, .36, 1), height .4s cubic-bezier(.22, 1, .36, 1), top .52s cubic-bezier(.2, .8, .2, 1); }
 @property --cw { syntax: '<length>'; inherits: false; initial-value: 0px; }
 .nc.drop .nc-text { width: calc(var(--bw, 440px) - 40px + var(--sb)); }
 /* The pill (its black, glow and contents) stays above the card while it slides out from under it. */
 .nc.drop .nc-skin, .nc.drop .nc-row { z-index: 1; }
 .nc.drop .nc-skin { background: #000; }
-.nc.drop .nc-globe { width: 30px; height: 30px; border-radius: 50%; background: radial-gradient(circle, #0b1626 0, #000 72%);
-  box-shadow: 0 0 0 2px #070a12, 0 0 0 3.5px rgba(255, 255, 255, .08), inset 0 0 6px #000; }
+.nc.drop .nc-globe { width: 30px; height: 30px; border-radius: 50%; background: #000; box-shadow: 0 0 0 1px rgba(255, 255, 255, .12); }
 
 /* The concave corners either side, so the capsule flows out of the top edge instead of sitting under it. */
 .nc::before, .nc::after { content: ""; position: absolute; top: 0; width: var(--f); height: var(--f); pointer-events: none; }
@@ -108,10 +108,7 @@
     radial-gradient(circle at 100% 0, #000 calc(var(--r) - .5px), transparent var(--r)) var(--f) 100% / var(--r) var(--r) no-repeat,
     radial-gradient(circle at 0 0, #000 calc(var(--r) - .5px), transparent var(--r)) calc(100% - var(--f)) 100% / var(--r) var(--r) no-repeat; }
 .nc:not(.drop) .nc-row, .nc:not(.drop) .nc-body { z-index: 2; }
-.nc.drop .nc-skin::after { content: ""; position: absolute; inset: 0; border-radius: inherit;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, .08), rgba(255, 255, 255, 0) 45%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07); }
-.nc-glow { position: absolute; top: calc(var(--row) * -.55); height: calc(var(--row) * 2.1); width: calc(var(--row) * 3.2); border-radius: 50%;
+.nc-glow { display: none; position: absolute; top: calc(var(--row) * -.55); height: calc(var(--row) * 2.1); width: calc(var(--row) * 3.2); border-radius: 50%;
   background: radial-gradient(closest-side, color-mix(in srgb, var(--glow-a) 70%, #fff), var(--glow-a) 22%,
     color-mix(in srgb, var(--glow-b) 70%, transparent) 50%, transparent 100%);
   filter: blur(9px); --k: var(--gl); opacity: calc(.3 + var(--k) * .7); transform: scale(calc(.85 + var(--k) * .25)); }
@@ -127,8 +124,8 @@
 .nc[data-mode="error"] { --glow-a: #ffcf86; --glow-b: #ff6a2f; }
 @property --glow-a { syntax: '<color>'; inherits: true; initial-value: #6fd6ff; }
 @property --glow-b { syntax: '<color>'; inherits: true; initial-value: #2a6bff; }
-.nc-mark { flex: none; color: #fff; font: 800 15px/1 "Doto", "Martian Mono", "Roamies Arabic", ui-monospace, monospace;
-  letter-spacing: .02em; text-shadow: 0 0 10px rgba(0, 30, 90, .55); white-space: nowrap; }
+.nc-mark { flex: none; color: #fff; font: 500 13px/1 system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  letter-spacing: -.01em; white-space: nowrap; }
 .nc:not(.drop) .nc-globe { order: -1; }
 .nc:not(.drop) .nc-status { margin-left: auto; }
 .nc-row { position: absolute; left: 0; right: 0; top: 0; height: var(--row); display: flex; align-items: center; gap: 8px;
@@ -138,11 +135,12 @@
 /* desktop.html pins every canvas to the page's top-left (the sidekick's stage): not these. */
 .nc canvas { position: static; left: auto; top: auto; transform: none; will-change: auto; cursor: inherit; touch-action: auto; }
 .nc-globe { flex: none; width: 28px; height: 28px; image-rendering: pixelated; }
-.nc-status { flex: none; display: flex; align-items: center; gap: 8px; color: var(--ink); text-shadow: 0 0 10px rgba(0, 30, 90, .55); white-space: nowrap; max-width: 300px;
+.nc-status { flex: none; display: flex; align-items: center; gap: 8px; color: var(--ink); white-space: nowrap; max-width: 300px;
   overflow: hidden; text-overflow: ellipsis; }
 .nc.full .nc-status { max-width: none; }
 .nc-label { display: inline-block; overflow: hidden; text-overflow: ellipsis; will-change: transform, opacity;
-  font-size: 11px; line-height: 1.3; letter-spacing: .04em; text-transform: uppercase; }
+  font-size: 12px; line-height: 1.3; }
+.nc-label::first-letter { text-transform: uppercase; }
 /* The waveform and the lens ease in when they appear. */
 @keyframes nc-in { from { opacity: 0; transform: scaleX(.3); } }
 .nc[data-mode="listen"] .nc-wave, .nc[data-mode="talk"] .nc-wave { animation: nc-in .32s cubic-bezier(.2, .8, .2, 1); }
@@ -163,7 +161,6 @@
 .nc-goo .g-notch { border-radius: 0 0 14px 14px; }
 .nc-goo .g-drop { border-radius: 50%; }
 .nc-goo .g-tongue { border-radius: 0 0 50% 50% / 0 0 16px 16px; }
-.nc[data-mode="error"] .nc-status { color: #ffcf8a; }
 .nc-body { position: absolute; left: 0; right: 0; top: var(--row); padding: 2px 20px 16px; box-sizing: border-box; opacity: 0;
   transition: opacity .2s ease .18s; }
 /* Words show the frame they arrive: no fade on the way in. */
@@ -175,22 +172,22 @@
    system draws it over the content (macOS's default) or beside it; the words keep the same width either way. */
 .nc-text { --sb: 12px; margin: 0 calc(-1 * var(--sb)) 0 0; padding-right: var(--sb); box-sizing: border-box; scrollbar-gutter: stable;
   max-height: ${MAX_BODY}px; overflow: hidden auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink);
-  scrollbar-width: thin; scrollbar-color: rgba(120,255,226,.35) transparent;
+  scrollbar-width: thin; scrollbar-color: var(--thumb, rgba(255,255,255,.3)) transparent;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%); }
 /* Long replies scroll (wheel or trackpad); the edges fade only where there's more to see. */
 .nc-text::-webkit-scrollbar { width: 6px; }
-.nc-text::-webkit-scrollbar-thumb { background: rgba(120,255,226,.35); border-radius: 3px; }
+.nc-text::-webkit-scrollbar-thumb { background: var(--thumb, rgba(255,255,255,.3)); border-radius: 3px; }
 .nc-text::-webkit-scrollbar-track { background: transparent; }
 .nc-text.top { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 14px), transparent 100%); }
 .nc-text.end { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px); }
 .nc-text.short, .nc-text.top.end { -webkit-mask-image: none; }
 .nc-heard { color: var(--ink-3); }
 /* Each line is its own paragraph with its own direction (Arabic and Hebrew run right to left, in the Arabic font). */
-.nc-line:dir(rtl) { font-family: "Roamies Arabic RTL", "Martian Mono", "Roamies Arabic", ui-monospace, Menlo, monospace; }
+.nc-line:dir(rtl) { font-family: system-ui, -apple-system, "Helvetica Neue", sans-serif; }
 .nc-choices { display: flex; gap: 8px; margin-top: 12px; }
-.nc-choices button { font: inherit; letter-spacing: inherit; border-radius: 999px; padding: 4px 14px; cursor: pointer;
-  border: 1px solid rgba(120,255,226,.45); background: transparent; color: var(--ink); }
-.nc-choices button:first-child { background: var(--accent); border-color: var(--accent); color: #000; }
+.nc-choices button { font: inherit; font-weight: 500; letter-spacing: inherit; border-radius: 8px; padding: 4px 14px; cursor: pointer;
+  border: 1px solid var(--line, rgba(255,255,255,.3)); background: transparent; color: var(--ink); transition: background-color .2s ease; }
+.nc-choices button:first-child { background: var(--accent); border-color: var(--accent); color: var(--on-accent, #000); }
 .nc-choices button.sel { outline: 2px solid var(--ink); outline-offset: 2px; }
 .nc-choices button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .nc-keys { align-self: center; margin-left: auto; color: var(--ink-3); }
@@ -220,7 +217,7 @@
   sr.setAttribute('role', 'status');
   const announce = (t) => { sr.textContent = ''; setTimeout(() => { sr.textContent = String(t ?? '').replace(/\*\*|__|`|^#+\s*/gm, ''); }, 60); };
   el.innerHTML = '<div class="nc-skin" aria-hidden="true"><i class="nc-glow l"></i><i class="nc-glow r"></i></div>'
-    + '<div class="nc-row"><span class="nc-mark">JARVIS</span><canvas class="nc-globe" aria-hidden="true"></canvas>'
+    + '<div class="nc-row"><span class="nc-mark">Hydra</span><canvas class="nc-globe" aria-hidden="true"></canvas>'
     + '<div class="nc-status"><canvas class="nc-wave" aria-hidden="true"></canvas><span class="nc-label"></span></div></div>'
     + '<div class="nc-body"><p class="nc-text"></p><div class="nc-choices" hidden></div><div class="nc-rate" hidden></div></div>';
   // The goo: blurred, then its alpha thresholded, so shapes that touch melt into one (metaballs). The notch, a tongue,
@@ -349,7 +346,7 @@
   };
 
   // ---------- state ----------
-  const st = { mode: null, open: false, text: '', heard: '', mic: 0, lingerAt: 0, linger: 0, speech: null, prompt: null, hover: false, closeT: 0, folded: false, px: null, py: null, g: 0.4, look: 'jarvis', liq: null, follow: true };
+  const st = { mode: null, open: false, text: '', heard: '', mic: 0, lingerAt: 0, linger: 0, speech: null, prompt: null, hover: false, closeT: 0, folded: false, px: null, py: null, g: 0.4, look: 'hydra', liq: null, follow: true };
   let raf = 0, last = 0;
   const jst = { t: 0, dt: 0.016, mode: null, act: null, actA: 0, open: 1, look: [0, 0], sq: 0, wide: 0, dizzy: 0, happy: 0, sleepy: 0, voice: null, heard: 0 };
 
@@ -504,10 +501,8 @@
     jst.mouth = playing ? (jst.voice > 0.35 ? 'talk2' : jst.voice > 0.08 ? 'talk1' : null) : st.mode === 'error' ? 'frown' : null;
     jst.brow = st.mode === 'think' || st.mode === 'tool' ? 'raised' : null;
     const k = { put, L, th: () => 0 };
-    const person = R.people?.[st.look];
-    // The lens shows whoever was picked: JARVIS's globe, a person (head and shoulders), or the Roamie's blob.
-    if (person) person.body(k, CELLS / 2 - 0.5, CELLS / 2 + 3, 10, jst);
-    else if (st.look === 'jarvis' || !st.look || !R.jarvis) R.jarvis?.body(k, CELLS / 2 - 0.5, CELLS / 2 - 0.5, 10.5, jst);
+    // The lens shows the Hydra orb (hydra.js), in cells.
+    if (R.hydra) R.hydra.body(k, CELLS / 2 - 0.5, CELLS / 2 - 0.5, 10.5, jst);
     else blob(put, jst);
     for (const [k, l] of buf) {
       gctx.fillStyle = PAL[clamp(l, 1, L)];
@@ -576,10 +571,9 @@
       wctx.lineTo(x0, y0);
     };
     wctx.lineCap = 'round'; wctx.lineJoin = 'round';
-    // An echo underneath, flipped and dim, then the glow, then a bright core.
-    path(-0.55); wctx.strokeStyle = 'rgba(70, 140, 255, .35)'; wctx.lineWidth = 1.2; wctx.shadowBlur = 0; wctx.stroke();
-    path(1); wctx.strokeStyle = 'rgba(80, 170, 255, .55)'; wctx.lineWidth = 3.2; wctx.shadowColor = '#3d8bff'; wctx.shadowBlur = 8; wctx.stroke();
-    path(1); wctx.strokeStyle = '#e9fbff'; wctx.lineWidth = 1.3; wctx.shadowBlur = 0; wctx.stroke();
+    // An echo underneath, flipped and dim, then the line itself. Flat white, no glow.
+    path(-0.55); wctx.strokeStyle = 'rgba(255, 255, 255, .3)'; wctx.lineWidth = 1.2; wctx.stroke();
+    path(1); wctx.strokeStyle = '#FFFFFF'; wctx.lineWidth = 1.5; wctx.stroke();
   };
 
   const frame = (now) => {
@@ -640,8 +634,9 @@
   };
   // [time, x, y]. Out: it stretches as it pulls away, pinches off, and the release bounces it wide, then settles.
   // In: it squashes, stretches up toward the notch as the neck takes it, and is drawn in.
-  const JELLY_OUT = [[0, 0.5, 0.6], [0.4, 0.9, 1.14], [0.62, 1.06, 0.9], [0.82, 0.985, 1.02], [1, 1, 1]];
-  const JELLY_IN = [[0, 1, 1], [0.2, 1.05, 0.9], [0.58, 0.86, 1.14], [1, 0.5, 0.6]];
+  // Eased straight through, no overshoot or wobble.
+  const JELLY_OUT = [[0, 0.5, 0.6], [1, 1, 1]];
+  const JELLY_IN = [[0, 1, 1], [1, 0.5, 0.6]];
   // cubic-bezier(.33, .1, .3, 1), the jelly's easing.
   const ease = (t) => {
     let u = t;
@@ -804,10 +799,10 @@
   R.notch = {
     enabled: false,
     get style() { return drop() ? 'drop' : 'spread'; },
-    // The name on the capsule: the look's own (JARVIS, Roamie, …).
-    set name(v) { $('.nc-mark').textContent = String(v || 'JARVIS'); if (st.open) apply(shape); },
-    // The look in the lens: 'jarvis', a person ('anime', 'sarah', 'adrian', 'rita', 'ultren', 'glayos'), or 'classic' (the Roamie blob).
-    set look(v) { st.look = String(v || 'jarvis'); jst.swing = null; },
+    // The name on the capsule: Hydra.
+    set name(v) { $('.nc-mark').textContent = String(v || 'Hydra'); if (st.open) apply(shape); },
+    // The look in the lens: always the Hydra orb.
+    set look(v) { st.look = 'hydra'; jst.swing = null; },
     set style(v) {
       const d = v === 'drop';
       if (d === drop()) return;

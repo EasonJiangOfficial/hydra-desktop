@@ -1,7 +1,7 @@
 // Tool schemas every provider accepts. Run: npm test
 import assert from 'node:assert/strict';
 import { resolveToolSchema } from '@kenkaiiii/gg-ai';
-import { createTools, shellFor } from '../tools.mjs';
+import { createTools } from '../tools.mjs';
 import { LIMITS } from '../draw.mjs';
 import { leanTools } from '../lean.mjs';
 
@@ -137,27 +137,38 @@ if (process.platform === 'darwin') {
   assert.equal((await launch('/no/such/launcher', [])).err.code, 'ENOENT');
   console.log('launch tests: passed');
 }
-// Regression: on Windows a command with quotes in it (node -e "…") reached cmd with Node's \" escapes and broke.
+// Sixth review, owner decision D1: the agent has no shell. run_command isn't a tool, no tool tells the model to use one,
+// and a call to it by name (a model that remembers it, or text in a page) gets "Unknown tool" from both loops.
 {
-  const cmd = `node -e "require('fs').writeFileSync('a b.txt', 'x')"`;
-  assert.deepEqual(shellFor(cmd, 'win32'), ['cmd.exe', ['/d', '/s', '/c', `"${cmd}"`], { windowsVerbatimArguments: true }], 'cmd gets the command as is');
-  assert.deepEqual(shellFor(cmd, 'darwin', {}), ['/bin/zsh', ['-lc', cmd], {}]);
-  assert.deepEqual(shellFor(cmd, 'linux', {}), ['/bin/bash', ['-lc', cmd], {}]);
-  assert.equal(shellFor('ls', 'linux', { SHELL: '/usr/bin/fish' })[0], '/usr/bin/fish', 'their own shell where set');
-  console.log('run_command shell tests: passed');
+  assert.equal(tools.find((t) => t.name === 'run_command'), undefined, 'no run_command tool');
+  for (const t of tools) assert.ok(!/run_command/.test(t.description ?? ''), `${t.name}'s description names no shell tool`);
+  const { unknownToolMessage } = await import('@kenkaiiii/gg-agent');
+  assert.match(unknownToolMessage('run_command', tools.map((t) => t.name)), /^Unknown tool: run_command\b/, 'the API loop');
+  // The Claude Code loop: our tools through the bridge (Claude Code's own Bash is never given).
+  const { createToolBridge } = await import('../claudecode.mjs');
+  const bridge = createToolBridge({ tools, signal: null, onEvent: () => {} });
+  const sent = [];
+  const transport = { send: async (m) => { sent.push(m); }, start: async () => {} };
+  await bridge.config.instance.connect(transport);
+  transport.onmessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'run_command', arguments: { command: 'id' } } });
+  for (let i = 0; i < 50 && !sent.length; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(sent[0]?.result?.isError, true, 'the call fails');
+  assert.match(JSON.stringify(sent[0].result.content), /Unknown tool: run_command/, 'as an unknown tool');
+  assert.ok(!bridge.allowedTools().some((n) => /run_command|Bash/.test(n)));
+  console.log('no shell tool: passed');
 }
 
-// install_skill always asks, even with Skip Allow prompts on, says where the skill comes from, and a no installs nothing.
+// install_skill always asks, says where the skill comes from, and a no installs nothing.
 {
   const asks = [];
   const fake = { slug: 'zz-test-skill', name: 'zz test skill', description: 'Only for this test', text: '---\nname: zz test skill\n---\nx', files: [], skipped: 0, from: 'github.com/o/r/zz' };
-  const { tools: t } = createTools({ allowActions: false, ui: () => {}, ask: async (q) => { asks.push(q); return null; }, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', skipAllow: () => true,
+  const { tools: t } = createTools({ allowActions: false, ui: () => {}, ask: async (q) => { asks.push(q); return null; }, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
     skills: { changed: () => {}, fetch: async (src, { pick }) => (pick ? { skills: [fake] } : { choices: ['zz', 'yy'], from: 'github.com/o/r' }) } });
   const install = t.find((x) => x.name === 'install_skill');
   assert.match(await install.execute({ source: 'o/r' }), /github\.com\/o\/r has 2 skills: zz, yy\. Ask Test which/, 'several: asks which, installs nothing');
   assert.equal(asks.length, 0);
   await assert.rejects(install.execute({ source: 'o/r', skill: 'zz' }, {}), /Test said no, so nothing was installed/);
-  assert.equal(asks.length, 1, 'asked, Skip Allow or not');
+  assert.equal(asks.length, 1, 'asked');
   assert.match(asks[0].placeholder, /Install the skill "zz test skill" from github\.com\/o\/r\/zz\? Only for this test/);
   assert.deepEqual(asks[0].choices, ['Install', "Don't install"]);
   console.log('install_skill asks tests: passed');

@@ -7,7 +7,7 @@ const win = platformLine('win32', { arch: 'x64', release: '10.0.22631' });
 assert.match(win, /^Platform: Windows 11 on x64\./);
 assert.match(win, /Ctrl, not Cmd/, 'Windows keys, not Mac ones');
 assert.match(win, /Ctrl\+End and Ctrl\+Home/);
-assert.match(win, /cmd\.exe/, 'commands run in cmd, not a Unix shell');
+assert.ok(!/run_command|cmd\.exe/.test(win), 'no shell advice: the agent runs no commands (sixth review)');
 assert.ok(!/Cmd\+Down|BSD/.test(win), 'none of the Mac advice');
 assert.match(platformLine('win32', { release: '10.0.19045' }), /^Platform: Windows 10 /);
 const mac = platformLine('darwin', { macVersion: '15.1', arch: 'arm64' });
@@ -19,7 +19,7 @@ const x11 = platformLine('linux', { arch: 'x64', session: 'x11', desktop: 'XFCE'
 assert.match(x11, /^Platform: Linux \(Linux Mint 22\) on x64, the XFCE desktop on X11\./);
 assert.match(x11, /Ctrl, not Cmd/);
 assert.match(x11, /Ctrl\+End and Ctrl\+Home/);
-assert.match(x11, /bash with the GNU tools/);
+assert.ok(!/run_command|GNU/.test(x11), 'no shell advice');
 assert.ok(!/Cmd\+Down|BSD|cmd\.exe|Wayland/.test(x11), 'none of the Mac or Windows advice, and no Wayland limits on X11');
 const wl = platformLine('linux', { arch: 'arm64', session: 'wayland', desktop: 'ubuntu:GNOME', distro: 'Ubuntu 26.04 LTS' });
 assert.match(wl, /^Platform: Linux \(Ubuntu 26\.04 LTS\) on Arm, the GNOME desktop on Wayland\./, 'the desktop is the last part of XDG_CURRENT_DESKTOP');

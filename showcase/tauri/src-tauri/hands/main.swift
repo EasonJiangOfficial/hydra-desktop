@@ -9,6 +9,7 @@
 //   roamies-hands ui front|app:<name>          the window's buttons, fields, etc. with ids
 //   roamies-hands act <json>                   {"app":"Brave","steps":[{"do":"focus","id":3},{"do":"type","text":"hi"}]}
 //   roamies-hands trusted [--prompt]           Accessibility permission status
+//   roamies-hands manage <json>                {"do":"quit|force_quit|hide|activate|close|minimize|arrange","app":"Notes","window":12,"layout":"left","confirmed":false}
 //   roamies-hands locate-control <target> <id>  where one control (from `ui`) is on screen, for pointing
 //   roamies-hands screencheck                  takes (and deletes) one test screenshot: {"seen": true|false}
 //   roamies-hands guide accessibility|screen [<Roamies.app>] [--preview]  drag-me-in panel under System Settings (until stdin closes)
@@ -34,7 +35,7 @@ let me = ProcessInfo.processInfo.processIdentifier
 let myParent = getppid()
 // Never point at Roamies itself (its overlay windows cover every screen).
 func isRoamies(_ pid: pid_t) -> Bool {
-    pid == me || pid == myParent || NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.kenkai.roamies"
+    pid == me || pid == myParent || NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.easonjiang.hydra"
 }
 
 // ---------- windows ----------
@@ -123,6 +124,117 @@ func resolveWin(_ target: String) -> Win? {
 }
 
 func winInfo(_ w: Win) -> [String: Any] { ["id": w.id, "app": w.app, "title": w.title, "bounds": [Int(w.x), Int(w.y), Int(w.w), Int(w.h)]] }
+/// winInfo plus what the window shows (its file, its address): for every result that carries the window's text or picture.
+func winShows(_ w: Win) -> [String: Any] { winInfo(w).merging(shows(w)) { a, _ in a } }
+/// The file a window's document is (AXDocument, a file URL), as a path; nil for none.
+func documentPath(_ win: AXUIElement) -> String? {
+    guard let d = str(win, "AXDocument") ?? (attr(win, "AXDocument") as? URL)?.absoluteString, let u = URL(string: d), u.isFileURL else { return nil }
+    return u.path
+}
+/// A browser window's address: on the window (Safari) or on the web area inside it (Chromium browsers).
+func browserURL(_ win: AXUIElement) -> String? {
+    if let u = str(win, "AXURL") ?? (attr(win, "AXURL") as? URL)?.absoluteString { return u }
+    var queue: [AXUIElement] = [win], seen = 0
+    while !queue.isEmpty, seen < 400 {
+        let el = queue.removeFirst(); seen += 1
+        if str(el, kAXRoleAttribute) == "AXWebArea", let u = (attr(el, "AXURL") as? URL)?.absoluteString ?? str(el, "AXURL") { return u }
+        if let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf: kids.prefix(40)) }
+    }
+    return nil
+}
+/// What a window shows that the sidecar checks like a file read before any of it reaches the model: its document's
+/// file ("document") and, in a browser, its address ("url": a file:// page is a file).
+func shows(_ w: Win) -> [String: Any] {
+    let ax = AXUIElementCreateApplication(w.pid)
+    AXUIElementSetMessagingTimeout(ax, 0.25)
+    guard let win = axWindow(ax, w) else { return [:] }
+    var o: [String: Any] = [:]
+    if let d = documentPath(win) { o["document"] = d }
+    if BROWSERS.contains(w.app), let u = browserURL(win) { o["url"] = u }
+    return o
+}
+/// The files open in the plan's window and in its app's focused window (keys go there): typing, keys and saving in
+/// either can change that file (editors autosave), so each needs the user's yes before a step acts there.
+func openDocuments(_ app: AXUIElement, _ w: Win) -> [String] {
+    var out: [String] = []
+    for win in [axWindow(app, w), attr(app, kAXFocusedWindowAttribute).map { $0 as! AXUIElement }].compactMap({ $0 }) {
+        if let d = documentPath(win), !out.contains(d) { out.append(d) }
+    }
+    return out
+}
+/// A save chord that opens a Save panel (where any folder can be picked): Save As (cmd+shift+s, cmd+opt+shift+s),
+/// or cmd+s in a window with no file yet.
+func saveOpensPanel(_ combo: String, hasDocument: Bool) -> Bool {
+    guard let (flags, key) = parseKey(combo), key == 1, flags.contains(.maskCommand), !flags.contains(.maskControl) else { return false }
+    return flags.contains(.maskShift) || !hasDocument
+}
+/// Sandboxed apps' Save and Open panels are drawn by this system service, not by the app.
+let PANEL_SERVICE = "com.apple.appkit.xpc.openAndSavePanelService"
+/// Whether what a window or sheet holds is a file panel (Save, Open, Export, Choose, a browser's upload): the panel's
+/// name field or file browser by id, a column browser, or the panel's own controls beside Cancel.
+func looksLikeFilePanel(ids: [String], roles: [String], titles: [String]) -> Bool {
+    if ids.contains(where: { $0 == "saveAsNameTextField" || $0.hasPrefix("NSSavePanel") || $0.hasPrefix("NSOpenPanel") || $0.hasPrefix("NSNavBrowser") || $0.hasPrefix("FINav") }) { return true }
+    let t = Set(titles.map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) })
+    guard t.contains("cancel") else { return false }
+    if roles.contains("AXBrowser") { return true }
+    let bits: Set<String> = ["new folder", "hide extension", "show options", "hide options", "options", "where:", "tags:", "save as:", "date modified", "favorites", "recents", "locations", "go to folder", "show hidden files"]
+    return !t.isDisjoint(with: bits)
+}
+/// Whether a Save, Open or other file panel is up in the app: the panel service's window on screen, or a sheet or the
+/// focused window holding one. In one, any file in any folder can be picked or made (eighth review V8-3, V8-4), so a
+/// step there needs the owner's yes, with every step shown.
+func filePanelShown(_ app: AXUIElement) -> Bool {
+    if windows().contains(where: { NSRunningApplication(processIdentifier: $0.pid)?.bundleIdentifier == PANEL_SERVICE }) { return true }
+    guard let f = attr(app, kAXFocusedWindowAttribute) else { return false }
+    let win = f as! AXUIElement
+    let roots = (attr(win, kAXChildrenAttribute) as? [AXUIElement] ?? []).filter { str($0, kAXRoleAttribute) == "AXSheet" } + [win]
+    for r in roots {
+        var ids: [String] = [], roles: [String] = [], titles: [String] = []
+        var queue = [r], seen = 0
+        while !queue.isEmpty, seen < 400 {
+            let e = queue.removeFirst(); seen += 1
+            let v = attrs(e, [kAXRoleAttribute, "AXIdentifier", kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute, kAXChildrenAttribute])
+            let role = (v[0] as? String) ?? ""
+            roles.append(role)
+            if let i = v[1] as? String { ids.append(i) }
+            for x in v[2...4] { if let t = x as? String, !t.isEmpty, t.count <= 40 { titles.append(t) } }
+            if role == "AXWebArea" { continue } // a page's own words say nothing about a panel
+            if let kids = v[5] as? [AXUIElement] { queue.append(contentsOf: kids.prefix(60)) }
+        }
+        if looksLikeFilePanel(ids: ids, roles: roles, titles: titles) { return true }
+    }
+    return false
+}
+/// The user's yes covers this plan only in the app it was asked about (wholeOk "plan" and planApp, any case).
+func planApproved(_ plan: [String: Any], app: String) -> Bool {
+    guard ((plan["wholeOk"] as? [String]) ?? []).contains("plan"), let asked = plan["planApp"] as? String else { return false }
+    return asked.trimmingCharacters(in: .whitespaces).lowercased() == app.trimmingCharacters(in: .whitespaces).lowercased()
+}
+/// A plan as the user reads it before saying yes: the app and every step, with all the text it types (never cut).
+func planText(_ app: String, _ steps: [[String: Any]]) -> String {
+    func q(_ v: Any?) -> String { "\"\((v as? String) ?? "")\"" }
+    func n(_ v: Any?) -> String { (v as? NSNumber).map { "\($0)" } ?? "?" }
+    let lines = steps.enumerated().map { (i, s) -> String in
+        let d = s["do"] as? String ?? ""
+        let t: String
+        switch d {
+        case "click_text": t = "click \(q(s["text"]))" + ((s["near"] as? String).map { " near \(q($0))" } ?? "")
+        case "click", "focus": t = "\(d) control \(n(s["id"]))" + ((s["shown"] as? String).map { " (\(q($0)))" } ?? "")
+        case "fill": t = "fill \(q(s["field"])) with \(q(s["text"]))"
+        case "set": t = "set control \(n(s["id"])) to \(q(s["text"]))"
+        case "type": t = "type \(q(s["text"]))"
+        case "choose": t = "choose \(q(s["option"]))"
+        case "key": t = "press \((s["key"] as? String) ?? "")"
+        case "click_at": t = "click at \(n(s["x"])), \(n(s["y"]))"
+        default: t = d
+        }
+        return "\(i + 1). \(t)"
+    }
+    return "In \(app), every step I'd take:\n" + lines.joined(separator: "\n")
+}
+/// Finder: clicks and keys there rename, move, open and delete files, so a plan in it is asked about as a whole.
+let FINDER = "com.apple.finder"
+func isFinder(_ pid: pid_t?) -> Bool { pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier } == FINDER }
 
 func run(_ path: String, _ args: [String]) -> Int32 {
     let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
@@ -368,8 +480,115 @@ func pressText(_ e: AXUIElement) -> Bool {
 // Clicks that delete, pay, send or sign out (in English and other common languages) run only when the sidecar
 // has asked the user ("confirmed").
 // Kept in sync with RISKY_CLICK in sidecar/safety.mjs.
-let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃"#, options: .caseInsensitive)
+let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|quit anyway|quit|replace|trash|empty (the )?bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃"#, options: .caseInsensitive)
 func risky(_ s: String) -> Bool { RISKY.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+
+/// Key chords that quit, delete or send: what it does, or nil. Read by parseKey, exactly as pressKey presses them.
+/// Any chord with cmd and q; cmd with delete or forward delete; cmd+return; cmd+shift+d (Mail's Send).
+/// Kept in sync with riskyKey in sidecar/safety.mjs. Return with or without other modifiers: sendChecks.
+func riskyKey(_ combo: String) -> String? {
+    guard let (flags, key) = parseKey(combo), flags.contains(.maskCommand) else { return nil }
+    switch key {
+    case 12: return "quits the app" // q
+    case 51, 117: return flags.contains(.maskShift) ? "empties the Trash" : flags.contains(.maskAlternate) ? "deletes at once" : "moves to the Trash"
+    case 36: return "can send a message or form" // return, enter
+    case 2 where flags.contains(.maskShift): return "can send (Mail)" // d
+    case 49: return "opens Spotlight, which can start any app or file" // space (ninth review V9-7)
+    default: return nil
+    }
+}
+/// Chat and mail apps: Return there sends, even outside a field the helper can see.
+let MESSENGERS: Set<String> = ["Messages", "Slack", "WhatsApp", "Mail", "Discord", "Telegram", "Signal", "Microsoft Teams", "Teams", "Messenger",
+    "Microsoft Outlook", "Outlook", "Spark", "Superhuman", "Beeper", "ChatGPT", "Claude", "WeChat", "LINE", "Skype", "zoom.us", "Zoom", "Webex",
+    "Cisco Webex Meetings", "Thunderbird", "Mimestream", "Google Chat", "Element", "Viber", "KakaoTalk", "Facebook Messenger", "Airmail", "Canary Mail", "Postbox"]
+/// Whether Return (or a typed line break) in this focused field could send or submit something. Inverted list: any
+/// single-line field of any app could submit a form or a dialog, unless it is a search, address or find field; a
+/// multi-line box could send when it sits in web content (chat boxes in browsers and Electron apps) or in a chat app.
+func sendField(app: String, role: String?, subrole: String?, label: String, inWeb: Bool) -> Bool {
+    // Only a real search field, or a native address or search bar, is let off; a chat box whose placeholder names a
+    // channel ("Message #find-a-buddy") is not.
+    if role == "AXSearchField" || subrole == "AXSearchField" { return false }
+    if !inWeb, ["AXTextField", "AXComboBox"].contains(role ?? ""), label.range(of: #"(?i)\b(search|address|url|go to)\b"#, options: .regularExpression) != nil { return false }
+    // Focus the helper can't see (Electron apps often): could submit.
+    guard let role else { return true }
+    switch role {
+    case "AXTextField", "AXComboBox", "AXSecureTextField": return true
+    case "AXTextArea": return inWeb || MESSENGERS.contains(app)
+    // Any field in a browser's or a chat app's web content (contenteditable shows as a group) may submit.
+    // A contenteditable box in web content (Notion, Linear, Figma, any browser or Electron app) may submit.
+    case "AXGroup": return inWeb || MESSENGERS.contains(app)
+    default: return MESSENGERS.contains(app)
+    }
+}
+/// A line break in any form: LF, CR (and CR LF, one Character in Swift), NEL, line and paragraph separators, ETX.
+func hasLineBreak(_ s: String) -> Bool { s.unicodeScalars.contains { [0x0A, 0x0D, 0x85, 0x2028, 0x2029, 0x03].contains($0.value) } }
+/// The labels and reasons Return (or space, or a typed line break) in the front window would need a yes for: the
+/// window's or sheet's default button when it deletes, sends or pays; a focused risky button; a field that could send.
+/// target: the field the step acts on (set, fill), else whatever has keyboard focus.
+func sendChecks(_ app: AXUIElement, appName: String, returnKey: Bool, target: AXUIElement? = nil) -> [(label: String, why: String)] {
+    var out: [(label: String, why: String)] = []
+    if returnKey, let b = defaultButtonTitle(app), risky(b) { out.append((b, "Return would press \"\(b)\" in \(appName).")) }
+    let f = target ?? focusedEl(app)
+    let role = f.map { axRole($0) }
+    if let f, ["AXButton", "AXLink", "AXMenuItem", "AXRadioButton", "AXCheckBox", "AXPopUpButton"].contains(role ?? "") {
+        let l = str(f, kAXTitleAttribute) ?? str(f, kAXDescriptionAttribute) ?? ""
+        if risky(l) { out.append((l, "That presses \"\(l)\" in \(appName).")) }
+    }
+    if returnKey {
+        var inWeb = false, up = f
+        for _ in 0 ..< 40 { guard let e = up else { break }; if axRole(e) == "AXWebArea" { inWeb = true; break }; up = attr(e, kAXParentAttribute).map { $0 as! AXUIElement } }
+        let label = f.map { el in [kAXDescriptionAttribute, kAXTitleAttribute, kAXPlaceholderValueAttribute].compactMap { str(el, $0) }.joined(separator: " ") } ?? ""
+        if sendField(app: appName, role: role, subrole: f.flatMap { str($0, kAXSubroleAttribute) }, label: label, inWeb: inWeb) {
+            // What would be sent or run, in full (eighth review V8-13): never a password field's.
+            let secure = f.map { axRole($0) == "AXSecureTextField" || str($0, kAXSubroleAttribute) == "AXSecureTextField" } ?? false
+            let held = secure ? nil : f.flatMap { attr($0, kAXValueAttribute) as? String }.flatMap { $0.isEmpty ? nil : $0 }
+            out.append(("send", sendWhy(appName, held: held)))
+        }
+    }
+    return out
+}
+/// Why Return in a field needs a yes, with all the text it holds (what would be sent or run), never cut (D4).
+func sendWhy(_ appName: String, held: String?) -> String {
+    "Return in this \(appName) field could send or submit it." + (held.map { " It holds, in full: \"\($0)\"" } ?? "")
+}
+/// A risky button on a sheet of the focused window ("Don't Save", "Delete"…): what Cmd+D may press. nil when none.
+func sheetRiskyButton(_ app: AXUIElement) -> String? {
+    guard let f = attr(app, kAXFocusedWindowAttribute) else { return nil }
+    let win = f as! AXUIElement
+    for sheet in (attr(win, kAXChildrenAttribute) as? [AXUIElement] ?? []) where str(sheet, kAXRoleAttribute) == "AXSheet" {
+        for b in (attr(sheet, kAXChildrenAttribute) as? [AXUIElement] ?? []) where str(b, kAXRoleAttribute) == "AXButton" {
+            if let t = str(b, kAXTitleAttribute), risky(t) { return t }
+        }
+    }
+    return nil
+}
+/// A yes covers only what was asked about: the same words, compared without case or outer spaces.
+func sameYes(_ s: [String: Any], _ label: String) -> Bool {
+    (s["confirmed"] as? Bool) == true && ((s["confirmedLabel"] as? String) ?? "").lowercased().trimmingCharacters(in: .whitespaces) == label.lowercased().trimmingCharacters(in: .whitespaces)
+}
+/// The words on what sits under a screen point: its title, description or value, and its parent's when it is only the
+/// text or picture inside a button.
+func wordsAt(_ p: CGPoint) -> String {
+    var hit: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &hit) == .success, var e = hit else { return "" }
+    var out: [String] = []
+    for _ in 0 ..< 2 {
+        for a in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] { if let t = attr(e, a) as? String, !t.isEmpty, t.count <= 60 { out.append(t) } }
+        guard ["AXStaticText", "AXImage", "AXUnknown"].contains(str(e, kAXRoleAttribute) ?? ""), let up = attr(e, kAXParentAttribute) else { break }
+        e = up as! AXUIElement
+    }
+    return out.joined(separator: " | ")
+}
+/// The default button's title (the one Return presses) on an app's focused window or a sheet on it.
+func defaultButtonTitle(_ app: AXUIElement) -> String? {
+    guard let f = attr(app, kAXFocusedWindowAttribute) else { return nil }
+    let win = f as! AXUIElement
+    let sheets = (attr(win, kAXChildrenAttribute) as? [AXUIElement] ?? []).filter { str($0, kAXRoleAttribute) == "AXSheet" }
+    for w in sheets + [win] {
+        if let b = attr(w, kAXDefaultButtonAttribute) { let el = b as! AXUIElement; return str(el, kAXTitleAttribute) ?? str(el, kAXDescriptionAttribute) }
+    }
+    return nil
+}
 
 /// Text fields inside web pages (browsers, Electron apps) ignore a value set through accessibility:
 /// the page never hears about it and submits an empty field. Those need real keystrokes.
@@ -1100,10 +1319,12 @@ func shortcutRoute(item: MenuShortcut, appInFront: Bool, trustMenu: Bool) -> Sho
 /// Cmd shortcuts in the background: press the app's menu item that has that shortcut (keys sent to a background
 /// app don't reach its menus, so Cmd+S typed the line but never saved). press: false only looks, so an item that
 /// could be pressed still reads .pressed.
+/// The one-character key names, by key code (for matching a menu item's shortcut).
+var KEY_CHARS: [CGKeyCode: String] { Dictionary(KEYS.filter { $0.key.count == 1 }.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a }) } // computed: KEYS is set up further down the file
 func pressMenuShortcut(_ app: AXUIElement, _ combo: String, press: Bool = true) -> MenuShortcut {
-    let parts = combo.lowercased().replacingOccurrences(of: " ", with: "").split(separator: "+").map(String.init)
-    guard let key = parts.last, key.count == 1, parts.contains(where: { ["cmd", "command", "meta", "super"].contains($0) }) else { return .notFound }
-    let shift = parts.contains("shift"), opt = parts.contains { ["opt", "option", "alt"].contains($0) }, ctrl = parts.contains { ["ctrl", "control"].contains($0) }
+    // Read by parseKey, like every other key route: a chord it can't read (meta+q, two keys) presses nothing.
+    guard let (flags, code) = parseKey(combo), flags.contains(.maskCommand), let key = KEY_CHARS[code] else { return .notFound }
+    let shift = flags.contains(.maskShift), opt = flags.contains(.maskAlternate), ctrl = flags.contains(.maskControl)
     let want = (shift ? 1 : 0) | (opt ? 2 : 0) | (ctrl ? 4 : 0)
     guard let bar = attr(app, kAXMenuBarAttribute) else { return .notFound }
     var stack: [(AXUIElement, Int)] = [(bar as! AXUIElement, 0)]
@@ -1150,9 +1371,11 @@ let KEY_ALIASES: [String: String] = ["*": "shift+8", "multiply": "shift+8", "tim
     // Mac text has no Cmd/Ctrl+End: the end and start of a document are Cmd+Down and Cmd+Up.
     "cmd+end": "cmd+down", "cmd+home": "cmd+up", "ctrl+end": "cmd+down", "ctrl+home": "cmd+up", "command+end": "cmd+down", "command+home": "cmd+up"]
 /// "cmd+a", "shift+tab", "return", "*", "cmd+end".
-func pressKey(_ combo: String) -> Bool {
+/// How pressKey reads a chord: its modifiers (anywhere in it) and its one other key. nil when it has no other key, two
+/// of them, or one it doesn't know: then nothing is pressed. riskyKey reads chords through this same function.
+func parseKey(_ combo: String) -> (flags: CGEventFlags, key: CGKeyCode)? {
     var flags: CGEventFlags = []
-    var key: CGKeyCode?
+    var keys: [String] = []
     var c = combo.lowercased().trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " ", with: "")
     if let a = KEY_ALIASES[c] { c = a }
     // "+" alone, or "cmd++": the last + is the key itself.
@@ -1165,10 +1388,14 @@ func pressKey(_ combo: String) -> Bool {
         case "ctrl", "control": flags.insert(.maskControl)
         case "opt", "option", "alt": flags.insert(.maskAlternate)
         case "shift": flags.insert(.maskShift)
-        default: key = KEYS[part]
+        default: keys.append(part)
         }
     }
-    guard let k = key else { return false }
+    guard keys.count == 1, let k = KEYS[keys[0]] else { return nil }
+    return (flags, k)
+}
+func pressKey(_ combo: String) -> Bool {
+    guard let (flags, k) = parseKey(combo) else { return false }
     let d = CGEvent(keyboardEventSource: src, virtualKey: k, keyDown: true)!, u = CGEvent(keyboardEventSource: src, virtualKey: k, keyDown: false)!
     d.flags = flags; u.flags = flags
     send(d); send(u)
@@ -1200,11 +1427,35 @@ let HANDS_OFF: [String: String] = [
     "com.1password.1password": "1Password", "com.agilebits.onepassword7": "1Password", "com.bitwarden.desktop": "Bitwarden",
     "com.apple.dt.Xcode": "Xcode", "com.apple.Console": "Console", "com.apple.ActivityMonitor": "Activity Monitor",
     "com.apple.DiskUtility": "Disk Utility", "com.apple.MigrateAssistant": "Migration Assistant", "com.apple.installer": "Installer",
+    // Editors with a built-in terminal: typing there could run commands past every check.
+    "com.microsoft.VSCode": "VS Code", "com.microsoft.VSCodeInsiders": "VS Code", "com.todesktop.230313mzl4w4u92": "Cursor", "dev.zed.Zed": "Zed",
+    "dev.zed.Zed-Preview": "Zed", "com.exafunction.windsurf": "Windsurf", "com.vscodium": "VSCodium", "com.google.antigravity": "Antigravity",
+    // Apps that build and run code or commands from what is typed or clicked (eighth review V8-2, V8-13).
+    "com.apple.shortcuts": "Shortcuts", "com.apple.PlaygroundsMac": "Swift Playgrounds", "com.apple.Playgrounds": "Swift Playgrounds",
+    "com.sublimetext.4": "Sublime Text", "com.sublimetext.3": "Sublime Text", "com.panic.Nova": "Nova", "com.barebones.bbedit": "BBEdit",
+    "com.macromates.TextMate": "TextMate", "com.macromates.TextMate.preview": "TextMate", "org.vim.MacVim": "MacVim", "org.gnu.Emacs": "Emacs",
+    "org.gnu.Aquamacs": "Aquamacs", "com.runningwithcrayons.Alfred": "Alfred", "com.runningwithcrayons.Alfred-Preferences": "Alfred",
+    "com.raycast.macos": "Raycast", "dev.warp.Warp-Preview": "Warp", "dev.commandline.waveterm": "Wave", "com.apple.dt.Instruments": "Instruments",
+    // Ninth review V9-7: more apps that run what is typed, and agent apps (a prompt there can make another agent run commands).
+    "com.apple.Spotlight": "Spotlight", "org.python.IDLE": "IDLE", "org.rstudio.RStudio": "RStudio", "com.rstudio.desktop": "RStudio",
+    "org.blenderfoundation.blender": "Blender", "org.hammerspoon.Hammerspoon": "Hammerspoon", "com.hegenberg.BetterTouchTool": "BetterTouchTool",
+    "com.krill.CodeRunner": "CodeRunner", "com.docker.docker": "Docker Desktop", "com.anthropic.claudefordesktop": "Claude", "com.openai.chat": "ChatGPT",
+    "com.openai.codex": "Codex", "com.posit.positron": "Positron", "com.electron.lens": "Lens", "com.utmapp.UTM": "UTM",
 ]
+// Families of them, by the start of the bundle id: JetBrains IDEs, Android Studio, Eclipse, MATLAB, Keyboard Maestro,
+// Script Debugger, Termius.
+let HANDS_OFF_PREFIXES: [(String, String)] = [("com.jetbrains.", "a JetBrains IDE"), ("com.google.android.studio", "Android Studio"), ("org.eclipse.", "Eclipse"),
+    ("com.mathworks.", "MATLAB"), ("com.stairways.keyboardmaestro", "Keyboard Maestro"), ("com.latenightsw.ScriptDebugger", "Script Debugger"), ("com.termius", "Termius")]
+func handsOffId(_ id: String) -> String? {
+    if let n = HANDS_OFF[id] { return n }
+    return HANDS_OFF_PREFIXES.first { id.hasPrefix($0.0) }?.1
+}
 
 func handsOff(_ pid: pid_t) -> String? {
     guard let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return nil }
-    return HANDS_OFF[id]
+    // JetBrains IDEs (IntelliJ, PyCharm, WebStorm…) all have a terminal.
+    if id.hasPrefix("com.jetbrains.") { return NSRunningApplication(processIdentifier: pid)?.localizedName ?? "a JetBrains IDE" }
+    return handsOffId(id)
 }
 
 // ---------- permission guide ----------
@@ -1216,8 +1467,9 @@ enum Pal {
     static func c(_ hex: Int) -> NSColor {
         NSColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
     }
-    static let bg = c(0x051214), panel = c(0x071a1c), ink = c(0xe8fffa), ink2 = c(0xb4d8d1)
-    static let line = c(0x1d4a48), lineHi = c(0x2f7c74), lineHot = c(0x4fbfa9), accent = c(0x78ffe2)
+    // Hydra's design language: white, ink and grays, hairlines, no accent colour.
+    static let bg = c(0xFFFFFF), panel = c(0xFFFFFF), ink = c(0x1D1D1F), ink2 = c(0x424245)
+    static let line = c(0xE5E5EA), lineHi = c(0xD2D2D7), lineHot = c(0xA1A1A6), accent = c(0x1D1D1F)
 }
 
 /// The onboarding's pixel frame: corners cut in two steps of `s` points (same polygon as .px in onboarding.css).
@@ -1262,7 +1514,7 @@ final class DragPill: NSView, NSDraggingSource {
         super.init(frame: frame)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("Roamies app. Drag into the list above.")
+        setAccessibilityLabel("Hydra app. Drag into the list above.")
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
     required init?(coder: NSCoder) { nil }
@@ -1275,7 +1527,7 @@ final class DragPill: NSView, NSDraggingSource {
         drawFrame(bounds, frame: hot || dragging ? Pal.accent : Pal.lineHot, fill: Pal.bg)
         let side = bounds.height - 16
         icon.draw(in: NSRect(x: 10, y: 8, width: side, height: side), from: .zero, operation: .sourceOver, fraction: dragging ? 0.35 : 1, respectFlipped: true, hints: nil)
-        let label = NSAttributedString(string: "Roamies", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), .foregroundColor: Pal.ink])
+        let label = NSAttributedString(string: "Hydra", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), .foregroundColor: Pal.ink])
         let sz = label.size()
         label.draw(at: NSPoint(x: 10 + side + 8, y: (bounds.height - sz.height) / 2))
     }
@@ -1347,8 +1599,8 @@ final class Guide: NSObject {
         title.stringValue = hasPill ? "Drag me into the list above." : "Add me to the list above."
         body.stringValue = kind == "screen"
             ? "Use Screen & System Audio Recording, not the audio-only list."
-            : hasPill ? "Already there? Just switch me on." : "Press + under the list and pick Roamies."
-        panel.setAccessibilityLabel("Roamies permission guide")
+            : hasPill ? "Already there? Just switch me on." : "Press + under the list and pick Hydra."
+        panel.setAccessibilityLabel("Hydra permission guide")
     }
 
     /// The biggest System Settings window, in AppKit coordinates (origin bottom-left of the main screen).
@@ -1437,13 +1689,148 @@ func runGuide(_ rest: [String]) -> Never {
 // The user's own API keys (Fish Audio) live in their login keychain: encrypted at rest, locked with their Mac
 // login, and readable without a prompt only by this signed helper. A secret comes in on stdin and goes out on
 // stdout, never in arguments (other processes can read those).
-let secretService = "com.kenkai.roamies"
+let secretService = "com.easonjiang.hydra"
 func secretName(_ i: Int) -> String {
     guard args.count > i, args[i].range(of: "^[a-z0-9-]{1,40}$", options: .regularExpression) != nil else { fail("bad secret name") }
     return args[i]
 }
 func secretQuery(_ name: String) -> [String: Any] {
     [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: secretService, kSecAttrAccount as String: name]
+}
+
+// ---------- managing apps and windows (Hydra: "open apps, close things") ----------
+// Quit, force quit, hide, switch to an app; close, minimise or arrange a window. Quitting an app with unsaved work,
+// closing an unsaved window and force quitting always need the user's yes first ("confirmed", given by the sidecar
+// after asking); without it the answer is {"ok":false,"needsConfirm":true,"why":…}. Never Hydra itself or the system.
+let SYSTEM_APPS: Set<String> = ["com.apple.finder", "com.apple.dock", "com.apple.systemuiserver", "com.apple.loginwindow", "com.apple.WindowManager", "com.apple.controlcenter", "com.apple.notificationcenterui"]
+
+/// Whether a window has unsaved changes: macOS marks it on the window (AXEdited) or on its close button.
+func edited(_ win: AXUIElement) -> Bool {
+    if (attr(win, kAXEditedAttribute) as? Bool) == true { return true }
+    if let close = attr(win, kAXCloseButtonAttribute) { return (attr(close as! AXUIElement, kAXEditedAttribute) as? Bool) == true }
+    return false
+}
+
+/// Where a window goes for a layout, in the global top-left coordinates AX uses. visible: the screen's usable area
+/// (no menu bar or Dock), also top-left.
+func layoutRect(_ layout: String, visible v: CGRect, current: CGRect) -> CGRect? {
+    let half = v.width / 2, halfH = v.height / 2
+    switch layout {
+    case "left": return CGRect(x: v.minX, y: v.minY, width: half, height: v.height)
+    case "right": return CGRect(x: v.minX + half, y: v.minY, width: v.width - half, height: v.height)
+    case "top": return CGRect(x: v.minX, y: v.minY, width: v.width, height: halfH)
+    case "bottom": return CGRect(x: v.minX, y: v.minY + halfH, width: v.width, height: v.height - halfH)
+    case "full", "maximize", "maximise": return v
+    case "center", "centre":
+        let w = min(current.width, v.width), h = min(current.height, v.height)
+        return CGRect(x: v.midX - w / 2, y: v.midY - h / 2, width: w, height: h)
+    default: return nil
+    }
+}
+
+/// The usable area of the screen a window is mostly on, top-left global coordinates.
+func visibleArea(for r: CGRect) -> CGRect {
+    let primaryH = NSScreen.screens.first?.frame.height ?? 0
+    let flip = { (f: CGRect) in CGRect(x: f.minX, y: primaryH - f.maxY, width: f.width, height: f.height) }
+    let best = NSScreen.screens.max { flip($0.frame).intersection(r).area < flip($1.frame).intersection(r).area } ?? NSScreen.main
+    return best.map { flip($0.visibleFrame) } ?? r
+}
+extension CGRect { var area: CGFloat { isNull ? 0 : width * height } }
+
+func setFrame(_ win: AXUIElement, _ r: CGRect) -> Bool {
+    var p = r.origin, z = r.size
+    guard let pv = AXValueCreate(.cgPoint, &p), let zv = AXValueCreate(.cgSize, &z) else { return false }
+    // Size, then position, then size again: some apps clamp the size to the screen the window is still on.
+    _ = AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, zv)
+    let a = AXUIElementSetAttributeValue(win, kAXPositionAttribute as CFString, pv)
+    let b = AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, zv)
+    return a == .success || b == .success
+}
+
+/// Why a quit can't be proved safe, or nil when every window was checked and none is edited. Browsers and Electron apps
+/// never mark unsaved work (a half-written form, a draft), and windows on other Spaces or in full screen aren't in the
+/// accessibility list, so those ask.
+func quitUnproved(name: String, bundle: URL?, listed: Int, unlisted: Int, editedCount: Int) -> String? {
+    if editedCount > 0 { return "\(name) has \(editedCount) window\(editedCount == 1 ? "" : "s") with unsaved changes." }
+    if BROWSERS.contains(name) || bundle.map({ FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path) }) == true {
+        return "\(name) doesn't tell other apps about unsaved work, so I can't check it."
+    }
+    if listed == 0 { return "I can't see any \(name) windows to check for unsaved work." }
+    if unlisted > 0 { return "\(name) has windows I can't check (on another Space or in full screen)." }
+    return nil
+}
+/// An app's ordinary windows the window server knows about, on every Space.
+func allWindowCount(_ pid: pid_t) -> Int {
+    let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    return list.filter { w in
+        guard (w[kCGWindowOwnerPID as String] as? pid_t) == pid, (w[kCGWindowLayer as String] as? Int) == 0, (w[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+              let b = w[kCGWindowBounds as String] as? [String: Any], (b["Width"] as? Double ?? 0) >= 100, (b["Height"] as? Double ?? 0) >= 100 else { return false }
+        return !((w[kCGWindowName as String] as? String) ?? "").isEmpty
+    }.count
+}
+
+func manage(_ spec: [String: Any]) -> Never {
+    let what = spec["do"] as? String ?? ""
+    let confirmed = spec["confirmed"] as? Bool == true
+    let appName = (spec["app"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+    let all = windows()
+    var target: Win? = nil
+    if let id = spec["window"] as? Int { target = all.first { $0.id == id }; if target == nil { fail("No window with id \(id) (it may have closed). Call list_windows again.") } }
+    let running: NSRunningApplication? = {
+        if let t = target { return NSRunningApplication(processIdentifier: t.pid) }
+        if !appName.isEmpty {
+            let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+            return apps.first { ($0.localizedName ?? "").lowercased() == appName.lowercased() } ?? apps.first { appMatches($0.localizedName ?? "", appName) }
+        }
+        return NSWorkspace.shared.frontmostApplication
+    }()
+    guard let app = running else { fail(appName.isEmpty ? "No app is in front." : "\(appName) isn't open.") }
+    let name = app.localizedName ?? appName
+    if isRoamies(app.processIdentifier) { fail("That's Hydra itself.") }
+    if SYSTEM_APPS.contains(app.bundleIdentifier ?? "") && ["quit", "force_quit"].contains(what) { fail("\(name) is part of macOS; it isn't quit this way.") }
+    let ax = AXUIElementCreateApplication(app.processIdentifier)
+    let axWins = attr(ax, kAXWindowsAttribute) as? [AXUIElement] ?? []
+    func window() -> AXUIElement? {
+        if let t = target { return axWindow(ax, t) }
+        if let f = attr(ax, kAXFocusedWindowAttribute) { return (f as! AXUIElement) }
+        return axWins.first
+    }
+    func needYes(_ why: String) -> Never { out(["ok": false, "needsConfirm": true, "why": why, "app": name]) }
+    switch what {
+    case "quit":
+        let unsaved = axWins.filter(edited).count
+        if !confirmed, let why = quitUnproved(name: name, bundle: app.bundleURL, listed: axWins.count, unlisted: max(0, allWindowCount(app.processIdentifier) - axWins.count), editedCount: unsaved) { needYes(why) }
+        // A polite quit: the app still asks about anything unsaved itself.
+        out(["ok": app.terminate(), "done": "asked \(name) to quit", "unsaved": unsaved])
+    case "force_quit":
+        if !confirmed { needYes("Force quitting \(name) loses anything unsaved.") }
+        out(["ok": app.forceTerminate(), "done": "force quit \(name)"])
+    case "hide":
+        out(["ok": app.hide(), "done": "hid \(name)"])
+    case "activate":
+        app.unhide()
+        let ok = app.activate(options: [.activateAllWindows])
+        out(["ok": ok, "done": "switched to \(name)"])
+    case "close":
+        guard let w = window() else { fail("\(name) has no window open.") }
+        if edited(w) && !confirmed { needYes("That \(name) window has unsaved changes.") }
+        guard let b = attr(w, kAXCloseButtonAttribute) else { fail("That window can't be closed this way.") }
+        let r = AXUIElementPerformAction(b as! AXUIElement, kAXPressAction as CFString)
+        out(["ok": r == .success, "done": "closed a \(name) window"])
+    case "minimize", "minimise":
+        guard let w = window() else { fail("\(name) has no window open.") }
+        let r = AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        out(["ok": r == .success, "done": "minimised a \(name) window"])
+    case "arrange":
+        guard let w = window(), let cur = frame(w) else { fail("\(name) has no window open.") }
+        let layout = (spec["layout"] as? String ?? "").lowercased()
+        guard let r = layoutRect(layout, visible: visibleArea(for: cur), current: cur) else { fail("Layouts: left, right, top, bottom, full, center.") }
+        app.unhide(); _ = app.activate(options: [])
+        AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        out(["ok": setFrame(w, r), "done": "put the \(name) window \(layout == "full" || layout == "maximize" ? "full screen size" : "on the \(layout)")", "bounds": [Int(r.minX), Int(r.minY), Int(r.width), Int(r.height)]])
+    default:
+        fail("unknown manage step \(what)")
+    }
 }
 
 // ---------- commands ----------
@@ -1468,6 +1855,12 @@ case "--self-test":
     // Regression: CapCut's Scale box is invisible to accessibility, so typing after clicking it was refused every time.
     check("typing after a click in an app that hides its fields", mayType(editable: false, focusRole: "AXWindow", clickedSpot: true))
     check("no typing in such an app without a click first", !mayType(editable: false, focusRole: "AXWindow", clickedSpot: false))
+    let vis = CGRect(x: 0, y: 25, width: 1440, height: 850), cur = CGRect(x: 100, y: 100, width: 800, height: 600)
+    check("arrange left is the left half of the usable area", layoutRect("left", visible: vis, current: cur) == CGRect(x: 0, y: 25, width: 720, height: 850))
+    check("arrange right is the right half", layoutRect("right", visible: vis, current: cur) == CGRect(x: 720, y: 25, width: 720, height: 850))
+    check("arrange full fills the usable area", layoutRect("full", visible: vis, current: cur) == vis)
+    check("arrange center keeps the size and centres it", layoutRect("center", visible: vis, current: cur) == CGRect(x: 320, y: 150, width: 800, height: 600))
+    check("an unknown layout is refused", layoutRect("diagonal", visible: vis, current: cur) == nil)
     check("no typing on a web page outside a field, even after a click", !mayType(editable: false, focusRole: "AXWebArea", clickedSpot: true))
     check("typing in a real text field", mayType(editable: true, focusRole: "AXTextField", clickedSpot: false))
     // Regression: click_text "Speed" (a tab CapCut hides from accessibility) clicked a clip named "MTLSVideoP:speed.mp4".
@@ -1526,6 +1919,85 @@ case "--self-test":
     check("the plan's window gone: that app's front window", currentWindow([pw(9, 7), pw(5, 1), pw(4, 1)], pinned: pw(2, 1))?.id == 5)
     check("the plan's window gone and none left: nothing", currentWindow([], pinned: pw(2, 1)) == nil)
     check("another app's windows are never taken", currentWindow([pw(9, 7), pw(8, 7)], pinned: pw(2, 1)) == nil)
+    // Security review F2/F5: more risky labels, risky chords, and quits that can't be proved safe.
+    for l in ["Don't Save", "Don’t Save", "Move to Trash", "Force Quit", "Close Without Saving", "Submit", "Confirm", "Overwrite"] { check("\"\(l)\" needs a yes", risky(l)) }
+    for l in ["Save", "Cancel", "OK", "Keep Both", "Open"] { check("\"\(l)\" is a normal click", !risky(l)) }
+    for k in ["cmd+q", "Command+Q", "cmd+delete", "cmd+backspace", "cmd+opt+delete", "cmd+shift+delete", "cmd+option+shift+delete"] { check("\(k) needs a yes", riskyKey(k) != nil) }
+    for k in ["cmd+s", "cmd+w", "delete", "return", "cmd+a", "cmd+z", "cmd+shift+s", "shift+return"] { check("\(k) is a normal key", riskyKey(k) == nil) }
+    // Seventh review F1: Save As, or cmd+s with no file yet, opens a Save panel (any folder): it asks; cmd+s on a file
+    // doesn't open one (the file itself is asked about before any step acts in its window).
+    for k in ["cmd+shift+s", "shift+cmd+s", "cmd+opt+shift+s", "S+CMD+SHIFT"] { check("\(k) opens a Save panel", saveOpensPanel(k, hasDocument: true)) }
+    check("cmd+s with no file opens a Save panel", saveOpensPanel("cmd+s", hasDocument: false))
+    check("cmd+s on a file saves it in place", !saveOpensPanel("cmd+s", hasDocument: true))
+    for k in ["s", "shift+s", "cmd+a", "ctrl+s", "cmd+ctrl+s"] { check("\(k) is not a save", !saveOpensPanel(k, hasDocument: false)) }
+    // Review M1/M2: the aliases pressKey reads, any cmd+q chord, and sending by keyboard.
+    for k in ["cmd+back", "cmd+opt+back", "command+del", "cmd+forwarddelete", "cmd+shift+q", "cmd+opt+shift+q", "ctrl+cmd+q", "cmd+return", "cmd+enter", "cmd+shift+d"] { check("\(k) needs a yes", riskyKey(k) != nil) }
+    // Review B1: any order, as pressKey reads it.
+    for k in ["q+cmd", "delete+cmd", "return+cmd", "cmd+q+shift", "cmd+delete+opt", "shift+q+cmd", "opt+cmd+delete", "d+shift+cmd", "enter+cmd", "backspace+opt+cmd", "back+cmd", "CMD+Q", "cmd+ q"] { check("\(k) needs a yes", riskyKey(k) != nil) }
+    check("every order of cmd, opt, shift and delete needs a yes", [["cmd", "opt", "shift", "delete"]].flatMap { p in (0 ..< 24).map { n -> String in var a = p, out: [String] = [], x = n; for i in stride(from: 4, to: 0, by: -1) { out.append(a.remove(at: x % i)); x /= i }; return out.joined(separator: "+") } }.allSatisfy { riskyKey($0) != nil })
+    check("a chord with two keys presses nothing", parseKey("cmd+a+q") == nil && parseKey("meta+q") == nil && parseKey("cmd") == nil)
+    check("pressKey and riskyKey read the same key", parseKey("q+cmd")?.key == 12 && parseKey("q+cmd")?.flags.contains(.maskCommand) == true)
+    check("Return in a Slack text box could send", sendField(app: "Slack", role: "AXTextArea", subrole: nil, label: "", inWeb: true))
+    check("Return in a Messages field could send", sendField(app: "Messages", role: "AXTextArea", subrole: nil, label: "", inWeb: false))
+    check("Return in a web form field could send", sendField(app: "Google Chrome", role: "AXTextField", subrole: nil, label: "Email", inWeb: true))
+    check("Return in a chat box on a web page could send", sendField(app: "Arc", role: "AXTextArea", subrole: nil, label: "Message ChatGPT", inWeb: true))
+    check("Return in any app's single-line field could submit", sendField(app: "SomeNewApp", role: "AXTextField", subrole: nil, label: "Name", inWeb: false))
+    check("Return in ChatGPT, Claude, WeChat or Zoom with focus unknown could send", ["ChatGPT", "Claude", "WeChat", "zoom.us"].allSatisfy { sendField(app: $0, role: nil, subrole: nil, label: "", inWeb: false) })
+    check("Return in a TextEdit document is just a new line", !sendField(app: "TextEdit", role: "AXTextArea", subrole: nil, label: "", inWeb: false))
+    check("Return in a search field is a search", !sendField(app: "Finder", role: "AXTextField", subrole: "AXSearchField", label: "", inWeb: false))
+    check("Return in the address bar opens a page", !sendField(app: "Safari", role: "AXTextField", subrole: nil, label: "Smart Search Field address", inWeb: false))
+    check("Return on a web page outside a field isn't a send", !sendField(app: "Safari", role: "AXWebArea", subrole: nil, label: "", inWeb: true))
+    // Third review: B2 every line break form; m2 a chat box named after a channel, unseen focus, contenteditable.
+    for t in ["a\nb", "a\rb", "a\r\nb", "a\u{2028}b", "a\u{2029}b", "a\u{85}b", "a\u{3}b"] { check("\(t.unicodeScalars.map { String($0.value, radix: 16) }) is a line break", hasLineBreak(t)) }
+    check("plain text has no line break", !hasLineBreak("hello there"))
+    check("a Slack box \"Message #find-a-buddy\" could send", sendField(app: "Slack", role: "AXTextArea", subrole: nil, label: "Message #find-a-buddy", inWeb: true))
+    check("a web chat box mentioning search could send", sendField(app: "Google Chrome", role: "AXTextField", subrole: nil, label: "Search or ask anything", inWeb: true))
+    check("focus the helper can't see could submit", sendField(app: "SomeElectronApp", role: nil, subrole: nil, label: "", inWeb: false))
+    check("a contenteditable box in a browser could send", sendField(app: "Safari", role: "AXGroup", subrole: nil, label: "", inWeb: true))
+    check("a contenteditable box in Notion or Linear could send", sendField(app: "Notion", role: "AXGroup", subrole: nil, label: "", inWeb: true) && sendField(app: "Linear", role: "AXGroup", subrole: nil, label: "", inWeb: true))
+    check("ctrl+j, ctrl+m and ctrl+o read as keys the helper presses", ["ctrl+j", "ctrl+m", "ctrl+o"].allSatisfy { parseKey($0) != nil })
+    check("VS Code and Cursor are hands-off", HANDS_OFF["com.microsoft.VSCode"] != nil && HANDS_OFF["com.todesktop.230313mzl4w4u92"] != nil)
+    // Eighth review V8-2: apps that run what they're given are hands-off.
+    for id in ["com.apple.shortcuts", "com.sublimetext.4", "com.panic.Nova", "com.barebones.bbedit", "com.macromates.TextMate", "org.vim.MacVim", "org.gnu.Emacs", "com.runningwithcrayons.Alfred", "com.raycast.macos", "dev.warp.Warp-Preview", "dev.commandline.waveterm", "com.apple.PlaygroundsMac"] {
+        check("\(id) is hands-off", HANDS_OFF[id] != nil)
+    }
+    // V9-7: more apps that run what is typed, and families of them by bundle id; cmd+space (Spotlight) needs a yes.
+    for id in ["com.apple.Spotlight", "com.google.android.studio", "com.google.android.studio-EAP", "org.eclipse.platform.ide", "org.python.IDLE", "org.rstudio.RStudio", "com.mathworks.matlab", "org.blenderfoundation.blender", "org.hammerspoon.Hammerspoon", "com.stairways.keyboardmaestro.editor", "com.hegenberg.BetterTouchTool", "com.krill.CodeRunner", "com.latenightsw.ScriptDebugger8", "com.termius-dmg.mac", "com.docker.docker", "com.anthropic.claudefordesktop", "com.openai.chat"] {
+        check("\(id) is hands-off", handsOffId(id) != nil)
+    }
+    check("TextEdit isn't hands-off", handsOffId("com.apple.TextEdit") == nil)
+    for k in ["cmd+space", "space+cmd", "cmd+opt+space"] { check("\(k) needs a yes", riskyKey(k) != nil) }
+    // V8-13: the question shows the whole command or message Return would send.
+    let longCmd = "> rm -rf ~/Documents/x " + String(repeating: "and more ", count: 60)
+    check("a Return question holds the field's whole text", sendWhy("Alfred", held: longCmd).hasSuffix("\"\(longCmd)\""))
+    // V8-3, V8-4: a file panel is recognised, an ordinary window isn't.
+    check("a Save sheet's name field is a file panel", looksLikeFilePanel(ids: ["saveAsNameTextField"], roles: ["AXSheet", "AXTextField"], titles: ["Save"]))
+    check("an Open panel's browser is a file panel", looksLikeFilePanel(ids: [], roles: ["AXSheet", "AXBrowser"], titles: ["Cancel", "Open"]))
+    check("an upload panel in list view is a file panel", looksLikeFilePanel(ids: [], roles: ["AXWindow", "AXOutline"], titles: ["Cancel", "Upload", "Date Modified", "Favorites"]))
+    check("a plain dialog with Cancel isn't", !looksLikeFilePanel(ids: [], roles: ["AXSheet", "AXButton"], titles: ["Cancel", "Delete"]))
+    check("a Finder window without Cancel isn't", !looksLikeFilePanel(ids: [], roles: ["AXWindow", "AXOutline"], titles: ["Favorites", "Recents", "Date Modified"]))
+    // B3: menu shortcuts read through parseKey: meta/super chords press nothing anywhere.
+    check("meta+q and super+shift+d press nothing", parseKey("meta+q") == nil && parseKey("super+shift+d") == nil && parseKey("meta+shift+d") == nil)
+    check("the menu route reads q from cmd+q", parseKey("cmd+q").map { KEY_CHARS[$0.key] } == "q")
+    // Review M6: a yes covers the words asked about, not what is there now.
+    check("a yes for Delete covers Delete", sameYes(["confirmed": true, "confirmedLabel": "Delete"], " delete "))
+    // Owner's rule: a plan runs only with a yes for it, in the app that was named; the question holds every step whole.
+    check("a plan with no yes doesn't run", !planApproved(["steps": []], app: "TextEdit"))
+    check("a yes for the plan in TextEdit covers TextEdit", planApproved(["wholeOk": ["plan"], "planApp": "textedit"], app: "TextEdit"))
+    check("a yes in Safari doesn't cover TextEdit", !planApproved(["wholeOk": ["plan"], "planApp": "Safari"], app: "TextEdit"))
+    check("a yes for a file panel isn't a yes for the plan", !planApproved(["wholeOk": ["panel"], "planApp": "TextEdit"], app: "TextEdit"))
+    let longText = String(repeating: "word ", count: 400) + "END"
+    let pt = planText("TextEdit", [["do": "type", "text": longText], ["do": "key", "key": "cmd+s"], ["do": "click_text", "text": "Save"]])
+    check("the plan question names the app and every step, typed text whole", pt.hasPrefix("In TextEdit") && pt.contains(longText) && pt.contains("2. press cmd+s") && pt.contains("3. click \"Save\""))
+    check("a yes for Delete draft doesn't cover Delete account", !sameYes(["confirmed": true, "confirmedLabel": "Delete draft"], "Delete account"))
+    check("no yes covers nothing", !sameYes([:], "Delete"))
+    for l in ["Quit", "Quit Anyway", "Replace", "Trash", "Empty Bin", "Shut Down", "Restart", "Post", "Reply", "Tweet"] { check("\"\(l)\" needs a yes", risky(l)) }
+    check("\"Close\" is a normal click", !risky("Close"))
+    check("quit asks when no windows are listed", quitUnproved(name: "Notes", bundle: nil, listed: 0, unlisted: 0, editedCount: 0) != nil)
+    check("quit asks when windows sit on another Space", quitUnproved(name: "Notes", bundle: nil, listed: 1, unlisted: 1, editedCount: 0) != nil)
+    check("quit asks for a browser", quitUnproved(name: "Google Chrome", bundle: nil, listed: 2, unlisted: 0, editedCount: 0) != nil)
+    check("quit asks for an edited window", quitUnproved(name: "TextEdit", bundle: nil, listed: 1, unlisted: 0, editedCount: 1) != nil)
+    check("quit goes ahead when every window was checked and is clean", quitUnproved(name: "TextEdit", bundle: nil, listed: 1, unlisted: 0, editedCount: 0) == nil)
     exit(bad == 0 ? 0 : 1)
 
 case "trusted":
@@ -1553,18 +2025,8 @@ case "front":
         let win = w as! AXUIElement
         if let t = str(win, kAXTitleAttribute) { title = t }
         // Browsers put the address on the window (Safari) or on the web area inside it (Chromium browsers).
-        if BROWSERS.contains(app.localizedName ?? "") {
-            var url = str(win, "AXURL") ?? (attr(win, "AXURL") as? URL)?.absoluteString
-            if url == nil {
-                var queue: [AXUIElement] = [win], seen = 0
-                while url == nil, !queue.isEmpty, seen < 400 {
-                    let el = queue.removeFirst(); seen += 1
-                    if str(el, kAXRoleAttribute) == "AXWebArea" { url = (attr(el, "AXURL") as? URL)?.absoluteString ?? str(el, "AXURL"); if url != nil { break } }
-                    if let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf: kids.prefix(40)) }
-                }
-            }
-            if let u = url { o["url"] = u }
-        }
+        if BROWSERS.contains(app.localizedName ?? ""), let u = browserURL(win) { o["url"] = u }
+        if let d = documentPath(win) { o["document"] = d }
     }
     if !title.isEmpty { o["title"] = title }
     out(o)
@@ -1604,17 +2066,19 @@ case "capture":
     if target == "screen" {
         // The main display without Roamies on it (shared/shot.swift); older macOS: screencapture, Roamies and all.
         let px = Shot.capture(nil, to: file, png: false, maxPx: maxPx)
-        if px == nil { guard run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file]) == 0 else { fail("Screen capture failed. Roamies may need Screen Recording permission.") } }
+        if px == nil { guard run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file]) == 0 else { fail("Screen capture failed. Hydra may need Screen Recording permission.") } }
         // Its bounds (points) let the caller map pixels back.
         let d = CGDisplayBounds(CGMainDisplayID())
         var o: [String: Any] = ["ok": true, "file": file, "what": "screen", "bounds": [Int(d.minX), Int(d.minY), Int(d.width), Int(d.height)]]
+        // Every window in the picture, with the file or address it shows, for the sidecar to check (V8-5).
+        o["shown"] = windows().prefix(60).map { winShows($0) }
         if let px = px ?? shrink() { o["pixels"] = px }
         makeThumb()
         out(o)
     }
     guard let w = resolve(target) else { fail("No matching window is open\(target.hasPrefix("app:") ? " for \(target.dropFirst(4))" : "").") }
-    guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Roamies may need Screen Recording permission.") }
-    var o: [String: Any] = ["ok": true, "file": file, "window": winInfo(w)]
+    guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Hydra may need Screen Recording permission.") }
+    var o: [String: Any] = ["ok": true, "file": file, "window": winShows(w)]
     if let px = shrink() {
         o["pixels"] = px
         if let r = shotArea(w, windows(), px) { o["area"] = [Int(r.minX), Int(r.minY), Int(r.width), Int(r.height)] }
@@ -1630,17 +2094,17 @@ case "select":
     out(ok ? ["ok": true, "file": args[1]] : ["ok": false, "cancelled": true])
 
 case "ui":
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to read other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to read other apps.") }
     guard args.count >= 2, let w = resolve(args[1]) else { fail("No matching window is open.") }
     let uiApp = axApp(w)
     let items = walk(uiApp, w).map { $0.1 }
     // ui <target> controls: just the controls (to re-find ids before acting), without the page's text.
-    if args.count >= 3, args[2] == "controls" { out(["ok": true, "window": winInfo(w), "controls": items]) }
+    if args.count >= 3, args[2] == "controls" { out(["ok": true, "window": winShows(w), "controls": items]) }
     let scan = scanText(uiApp, w)
-    out(["ok": true, "window": winInfo(w), "controls": items, "texts": pageText(uiApp, w, cap: 5000, scan: scan), "elsewhere": offscreenText(uiApp, w, cap: 4000, scan: scan), "note": items.isEmpty ? "This app shares no controls. Use a screenshot plus click at coordinates instead." : ""])
+    out(["ok": true, "window": winShows(w), "controls": items, "texts": pageText(uiApp, w, cap: 5000, scan: scan), "elsewhere": offscreenText(uiApp, w, cap: 4000, scan: scan), "note": items.isEmpty ? "This app shares no controls. Use a screenshot plus click at coordinates instead." : ""])
 
 case "locate-control":
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to read other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to read other apps.") }
     guard args.count >= 3, let w = resolve(args[1]), let id = Int(args[2]) else { fail("usage: locate-control <target> <id>") }
     let items = walk(axApp(w), w)
     guard id >= 1, id <= items.count else { fail("No control \(id) in \(w.app). Read the window again.") }
@@ -1672,7 +2136,7 @@ case "ocr-find":
 case "find-text":
     // Looks through every window of the app ("app:X"), or every window on screen ("screen"), front to back,
     // because the text is often in a window that isn't the frontmost one.
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to read other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to read other apps.") }
     guard args.count >= 3 else { fail("usage: find-text <target> <text>") }
     let t = args[1]
     var wins: [Win]
@@ -1700,7 +2164,7 @@ case "find-text":
     out(["ok": true, "matches": Array(ordered)])
 
 case "act":
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to control other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to control other apps.") }
     guard args.count >= 2, let data = args[1].data(using: .utf8),
           let plan = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           let steps = plan["steps"] as? [[String: Any]] else { fail("bad plan") }
@@ -1709,6 +2173,12 @@ case "act":
     var switched = false
     if let name = handsOff(w.pid) {
         fail("Blocked for safety: I can point at things in \(name), but I never type or click in it. Show the user where to click instead.")
+    }
+    // Owner's rule (DESIGN.md "Mac actions"): nothing is clicked, typed or pressed, and the app isn't even brought
+    // forward, until the user said yes to the whole plan (every step shown in full) in this very app. The sidecar asks;
+    // this is the backstop for any caller that didn't, or for a plan that would now land in another app.
+    if !planApproved(plan, app: w.app) {
+        out(["ok": false, "needsConfirm": true, "step": 0, "whole": "plan", "app": w.app, "label": "plan", "why": planText(w.app, steps), "done": [String]()])
     }
     // Bring the target app forward so keystrokes land there, not in Roamies (in background mode it stays behind).
     let app = axApp(w)
@@ -1726,6 +2196,13 @@ case "act":
     }
     var controls = walk(app, w)
     var done: [String] = []
+    // Files the user said yes to acting in (the sidecar checked each against its write rules first).
+    let docOk = Set((plan["docOk"] as? [String]) ?? [])
+    // What the user said yes to as a whole plan, having seen every step: a file panel, Finder.
+    let wholeOk = Set((plan["wholeOk"] as? [String]) ?? [])
+    if !wholeOk.contains("finder"), isFinder(w.pid) {
+        out(["ok": false, "needsConfirm": true, "step": 0, "whole": "finder", "app": w.app, "label": "finder", "why": "In Finder, clicks and keys can rename, move, open or delete files.", "done": [String]()])
+    }
     progress(["ev": "start", "window": winInfo(w), "steps": steps.count])
     // What a step is about to touch (global points) and what it types. Password fields only send dots.
     func emitStep(_ i: Int, _ what: String, _ e: AXUIElement?, at: CGPoint? = nil, label: String = "", text: String? = nil) {
@@ -1798,6 +2275,16 @@ case "act":
             let other = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
             out(["ok": false, "error": "Step \(i + 1): \(other) is in front instead of \(w.app), so I stopped before typing into the wrong app.", "done": done])
         }
+        // A window with a file open: anything done there can change that file, so stop and ask (with its path) first.
+        if what != "wait", let d = openDocuments(app, w).first(where: { !docOk.contains($0) }) {
+            out(["ok": false, "needsConfirm": true, "step": i, "document": d, "app": w.app, "label": "document", "why": "\(w.app) has \(d) open: what I type or save there goes into that file.", "done": done])
+        }
+        if what != "wait", !wholeOk.contains("finder"), isFinder(frontPid()) {
+            out(["ok": false, "needsConfirm": true, "step": i, "whole": "finder", "app": "Finder", "label": "finder", "why": "Finder came to the front: clicks and keys there can rename, move, open or delete files.", "done": done])
+        }
+        if what != "wait", !wholeOk.contains("panel"), filePanelShown(app) {
+            out(["ok": false, "needsConfirm": true, "step": i, "whole": "panel", "app": w.app, "label": "panel", "why": "A Save or Open panel is up in \(w.app): in it any file in any folder can be picked, uploaded or made.", "done": done])
+        }
         if what == "click_at", let x = s["x"] as? Double, let y = s["y"] as? Double {
             let gx = (s["global"] as? Bool ?? false) ? x : w.x + x, gy = (s["global"] as? Bool ?? false) ? y : w.y + y
             if let under = windows().first(where: { CGRect(x: $0.x, y: $0.y, width: $0.w, height: $0.h).contains(CGPoint(x: gx, y: gy)) }), let name = handsOff(under.pid) {
@@ -1808,8 +2295,12 @@ case "act":
         case "focus", "click", "set", "press_button":
             guard let (e, info) = el(s) else { out(["ok": false, "error": "Step \(i + 1): no control with id \(s["id"] ?? "?"). Call read_window again.", "done": done]) }
             emitStep(i, what, e, label: (info["label"] as? String) ?? "", text: what == "set" ? s["text"] as? String : nil)
-            if (what == "click" || what == "press_button"), risky((info["label"] as? String) ?? ""), (s["confirmed"] as? Bool) != true {
-                out(["ok": false, "error": "Stopped before clicking \"\(info["label"] ?? "")\": it could delete, pay, send or sign out, and the user hasn't said yes to that. Tell them, and let them click it themselves.", "done": done])
+            if (what == "click" || what == "press_button"), case let l = (info["label"] as? String) ?? "", risky(l), !sameYes(s, l) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
+            }
+            if what == "set", let text = s["text"] as? String, hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: e), !needs.isEmpty,
+               case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": "A line break acts as Return. " + needs.map(\.why).joined(separator: " "), "done": done])
             }
             if what == "set", let text = s["text"] as? String {
                 // Native fields take the value directly; web page fields need real keystrokes or the page never sees it.
@@ -1862,8 +2353,8 @@ case "act":
             guard !q.isEmpty, let (e, info) = hit else {
                 out(["ok": false, "error": "Step \(i + 1): no visible text \"\(s["text"] ?? "")\" in \(w.app). Check the exact words with a screenshot or read_window.", "done": done])
             }
-            if risky((info["text"] as? String) ?? q), (s["confirmed"] as? Bool) != true {
-                out(["ok": false, "error": "Stopped before clicking \"\(info["text"] ?? q)\": it could delete, pay, send or sign out, and the user hasn't said yes to that. Tell them, and let them click it themselves.", "done": done])
+            if case let l = (info["text"] as? String) ?? q, risky(l), !sameYes(s, l) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
             }
             emitStep(i, "click_text", e, label: (info["text"] as? String) ?? q)
             if !pressText(e) {
@@ -1886,6 +2377,11 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): the cursor isn't in a text field, so typing would go nowhere. \(tip)", "done": done])
             }
             let text = s["text"] as? String ?? "", into = focusedEl(app), before = into.flatMap { str($0, kAXValueAttribute) }
+            // A typed line break acts as Return: in a chat, mail or web form field that can send.
+            if hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: into), !needs.isEmpty,
+               case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": "A line break acts as Return. " + needs.map(\.why).joined(separator: " "), "done": done])
+            }
             emitStep(i, "type", into, text: text)
             typeText(text)
             // Typing the app dropped (some ignore keys sent in the background) must stop here: a following
@@ -1919,6 +2415,12 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): no text field called \"\(name)\" here. Check its label with read_window.", "done": done])
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
+            // A line break in the text acts as Return in the field it goes into (checked on that field, not on what had
+            // focus before): its form's default button, a send box, a dialog's risky default.
+            if hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: e), !needs.isEmpty,
+               case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": "A line break acts as Return. " + needs.map(\.why).joined(separator: " "), "done": done])
+            }
             emitStep(i, "fill", e, label: label, text: text)
             let isDate = ["AXDateField", "AXTimeField", "AXDateTimeArea"].contains(axRole(e))
             func took(_ r: (ok: Bool, shows: String)) -> Bool {
@@ -1966,8 +2468,8 @@ case "act":
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
             emitStep(i, "choose", e, label: label, text: option)
-            if risky(option), (s["confirmed"] as? Bool) != true {
-                out(["ok": false, "error": "Stopped before choosing \"\(option)\": it could delete, pay, send or sign out, and the user hasn't said yes to that.", "done": done])
+            if risky(option), !sameYes(s, option) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": option, "why": "Choose \"\(option)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
             }
             activate(e)
             Thread.sleep(forTimeInterval: 0.35)
@@ -2046,8 +2548,34 @@ case "act":
             done.append("scrolled \(dir)")
             controls = walk(app, w)
         case "key":
-            emitStep(i, "key", nil, label: s["key"] as? String ?? "")
             let combo = (s["key"] as? String ?? "").lowercased().replacingOccurrences(of: " ", with: "")
+            // Everything this key could do that needs a yes, asked once: the chord itself (cmd+q…), and for Return or
+            // Enter with any modifiers (or space on a button) the default button, a focused risky button and a field
+            // that could send. The yes names all of it; if any of it changed by now, it asks again.
+            // One parser for every key route: a chord parseKey can't read (meta+q, two keys) is refused here, before the
+            // menu route or the keyboard could press anything.
+            guard let pk = parseKey(combo) else { out(["ok": false, "error": "Step \(i + 1): unknown key \(s["key"] ?? "") (use cmd, ctrl, opt, shift and one key)", "done": done]) }
+            var needs: [(label: String, why: String)] = []
+            if let does = riskyKey(combo) { needs.append((s["key"] as? String ?? "", "Pressing \(s["key"] ?? "") \(does).")) }
+            // Return is also ctrl+j, ctrl+m and ctrl+o in terminals and many editors.
+            let isReturn = pk.key == 36 || (pk.flags.contains(.maskControl) && [38, 46, 31].contains(pk.key))
+            if isReturn || pk.key == 49 { needs += sendChecks(app, appName: w.app, returnKey: isReturn) }
+            // A plain key (or shift+key) outside a text field is an app's shortcut, not typing: web mail and other apps
+            // delete, archive or send on one key ("#", "e"). Arrows, tab, escape, page keys and space are left alone.
+            if !isReturn, pk.flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]), ![36, 48, 49, 51, 53, 115, 116, 117, 119, 121, 123, 124, 125, 126].contains(pk.key),
+               !isEditable(focusedEl(app)) {
+                needs.append((s["key"] as? String ?? "", "\(s["key"] ?? "") outside a text field is a shortcut in \(w.app) (it may delete, archive or send)."))
+            }
+            // Save As, or saving a document with no file yet, opens a panel where any folder can be picked.
+            if saveOpensPanel(combo, hasDocument: !openDocuments(app, w).isEmpty) { needs.append((s["key"] as? String ?? "", "Pressing \(s["key"] ?? "") opens a Save panel in \(w.app): it can make a new file in any folder.")) }
+            // Cmd+D picks "Don't Save" (or "Delete") in a save or delete sheet.
+            if pk.key == 2, pk.flags.contains(.maskCommand), let b = sheetRiskyButton(app) { needs.append((b, "Cmd+D would press \"\(b)\" in \(w.app).")) }
+            // Delete or forward delete outside a text field deletes what's selected (mail, photos, files, list rows).
+            if pk.key == 51 || pk.key == 117, !isEditable(focusedEl(app)) { needs.append(("delete selection", "Delete here would delete what's selected in \(w.app).")) }
+            if !needs.isEmpty, case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": needs.map(\.why).joined(separator: " "), "done": done])
+            }
+            emitStep(i, "key", nil, label: s["key"] as? String ?? "")
             // Cmd+S in the background: its menu item is greyed out while the app is behind, so ask the app to save
             // its front document directly (no dialog for one that already has a file; a new one still needs the cursor).
             if inBackground, ["cmd+s", "command+s"].contains(combo), saveInBackground(w) { done.append("pressed \(s["key"]!) (saved)"); break }
@@ -2070,6 +2598,13 @@ case "act":
             // Points relative to the window's top-left, or global screen points when "global" is set.
             guard let x = s["x"] as? Double, let y = s["y"] as? Double else { out(["ok": false, "error": "Step \(i + 1): click_at needs x and y", "done": done]) }
             let global = s["global"] as? Bool ?? false
+            let spot = global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)
+            // Clicking by position skips the label check, so look at what is under the spot.
+            let under = wordsAt(spot)
+            // A yes covers the words that were under the spot when it was asked; if they changed, ask again.
+            if risky(under), !sameYes(s, under) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": under, "why": "That spot is \"\(under.split(separator: "|").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? under)\" in \(w.app): it could delete, pay, send, quit or sign out.", "done": done])
+            }
             emitStep(i, "click_at", nil, at: global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y))
             click(global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)); done.append("clicked at \(Int(x)),\(Int(y))")
             clickedSpot = true
@@ -2139,12 +2674,17 @@ case "act":
         let w2 = (switched ? windows().first { $0.id == w.id } : nil) ?? resolve(target) ?? w
         let app2 = w2.pid == w.pid ? app : axApp(w2)
         let now = settle(app2, w2).map { $0.1 }
-        out(["ok": true, "done": done, "window": winInfo(w2), "controls": now, "texts": pageText(app2, w2, cap: 2000)])
+        out(["ok": true, "done": done, "window": winShows(w2), "controls": now, "texts": pageText(app2, w2, cap: 2000)])
     }
-    out(["ok": true, "done": done, "window": winInfo(w)])
+    out(["ok": true, "done": done, "window": winShows(w)])
 
 case "guide":
     runGuide(Array(args.dropFirst()))
+
+case "manage":
+    guard args.count > 1, let data = args[1].data(using: .utf8), let spec = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { fail("manage needs a JSON step") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to manage apps and windows.") }
+    manage(spec)
 
 case "secret-get":
     var q = secretQuery(secretName(1))
@@ -2165,7 +2705,7 @@ case "secret-set":
     if st == errSecItemNotFound {
         var add = secretQuery(name)
         add[kSecValueData as String] = data
-        add[kSecAttrLabel as String] = "Roamies (\(name))"
+        add[kSecAttrLabel as String] = "Hydra (\(name))"
         st = SecItemAdd(add as CFDictionary, nil)
     }
     guard st == errSecSuccess else { fail("keychain save failed (\(st))") }

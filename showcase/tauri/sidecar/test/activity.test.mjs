@@ -3,7 +3,7 @@ import { createActivity, describe } from '../activity.mjs';
 
 // Plain words, and never a path, command or search text.
 assert.deepEqual(describe('read_file', { path: '/Users/ken/Secret Plans/notes.md' }), ['Reading notes.md', 'Read notes.md']);
-assert.deepEqual(describe('run_command', { command: 'rm -rf ~/x' }), ['Running a command', 'Ran a command']);
+assert.equal(describe('run_command', { command: 'rm -rf ~/x' }), null, 'no shell tool (sixth review), so no line for one');
 assert.deepEqual(describe('web_fetch', { url: 'https://www.example.com/a?token=1' }), ['Opening example.com', 'Read example.com']);
 assert.deepEqual(describe('search_files', { pattern: 'password' }), ['Searching your files', 'Searched your files']);
 assert.deepEqual(describe('take_screenshot', { target: 'screen' }), ['Looking at your screen', 'Looked at your screen']);

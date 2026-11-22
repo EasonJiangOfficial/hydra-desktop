@@ -121,7 +121,10 @@ for (const side of ['right', 'left']) {
   assert.match(tagBox, /b\?\.tagSpot\);\s*if \(b\) b\.tagSpot = g\.spot;/, 'and remembers its spot on the bubble');
   const over = src.slice(src.indexOf('over: (ctx, env) => {'), src.indexOf('return self;'));
   const at = (s) => { const i = over.indexOf(s); assert.ok(i > 0, `over draws ${s}`); return i; };
-  assert.ok(at('drawTag(ctx, tool)') < at('if (b) { drawBubble(ctx, b)'), 'the open bubble is drawn over the tag');
-  assert.ok(at('drawTag(ctx, tool)') < at('for (const bb of dying) { drawBubble(ctx, bb)'), 'and so is a bubble fading out');
+  assert.ok(at('drawTag(ctx, tool)') < at('if (shown(b)) { drawBubble(ctx, b)'), 'the open bubble is drawn over the tag');
+  assert.ok(at('drawTag(ctx, tool)') < at('for (const bb of dying) if (shown(bb)) { drawBubble(ctx, bb)'), 'and so is a bubble fading out');
+  // Attached to the Hydra window: no reply, thinking or listening bubble on the desktop; a question to answer still shows.
+  assert.match(src, /const shown = \(bb\) => !!bb && \(!R\.orbAttached \|\| \(!!bb\.input && !bb\.input\.listen\)\);/);
+  assert.match(src, /const hitBubble = \(bb, x, y\) => shown\(bb\) &&/, 'a hidden bubble takes no clicks');
 }
 console.log('tag place tests: passed');

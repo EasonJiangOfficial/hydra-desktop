@@ -1,13 +1,13 @@
 // The user's pen on Windows: while the talk keys are held, the voice helper follows the cursor and sends its trail
 // here (voice "ink" messages, in global screen points; voice-win/src/ink.rs). Drawn like voice/ink.swift draws it
-// on macOS: teal with a dark edge and a soft glow, dimmer until it snaps shut round something (then a glow pulse and
-// a tick), and lines that never close fade. The picture sent with what was said is the helper's own capture, with
+// on macOS: ink with a thin white halo so it reads on dark and light apps, dimmer until it snaps shut round something
+// (then a tick), and lines that never close fade. The picture sent with what was said is the helper's own capture, with
 // the strokes drawn into it; this canvas is left out of captures like the rest of the overlay.
 (() => {
   const R = window.Roamie;
   if (!R || typeof document === 'undefined') return;
-  // The pen's colours and size, the same as ink.js and voice/ink.swift.
-  const ACC = '#78ffe2', EDGE = 'rgba(3,39,34,0.6)', RADIUS = 2.8;
+  // The pen's colours and size: ink #1D1D1F about 2.5 px over a wider white halo. Flat, no glow.
+  const ACC = '#1D1D1F', EDGE = 'rgba(255,255,255,0.9)', RADIUS = 1.25;
   const reducedMQ = matchMedia('(prefers-reduced-motion: reduce)');
   const loc = (x, y) => [x - (R.origin?.x ?? 0), y - (R.origin?.y ?? 0)];
   let cv = null, ctx = null, raf = 0, cur = null;
@@ -43,26 +43,19 @@
     let moving = false;
     for (let i = strokes.length - 1; i >= 0; i--) {
       const s = strokes[i];
-      let a = s.closed ? 1 : 0.55;
+      let a = s.closed ? 1 : 0.8;
       if (s.fadeAt != null) {
         const k = (t - s.fadeAt) / s.fadeMs;
         if (k >= 1) { strokes.splice(i, 1); continue; }
         if (k > 0) a *= 1 - k;
         moving = true;
       }
-      let glow = 6;
-      if (s.pulseAt != null) {
-        const k = (t - s.pulseAt) / 320;
-        if (k < 1) { glow = 6 + 10 * (k < 0.5 ? k * 2 : 2 - k * 2); moving = true; } else s.pulseAt = null;
-      }
       ctx.globalAlpha = a;
       path(s.pts);
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = EDGE; ctx.lineWidth = RADIUS * 2 + 2.5; ctx.stroke();
-      ctx.shadowColor = 'rgba(120,255,226,0.75)'; ctx.shadowBlur = glow;
+      ctx.strokeStyle = EDGE; ctx.lineWidth = RADIUS * 2 + 3; ctx.stroke();
       ctx.strokeStyle = ACC; ctx.lineWidth = RADIUS * 2; ctx.stroke();
     }
-    ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
     raf = moving ? requestAnimationFrame(paint) : 0;
   }
   const redraw = () => { if (!raf) raf = requestAnimationFrame(paint); };
@@ -75,7 +68,6 @@
       // Closed into the loop that starts at `from`; what came before it (the run-up) goes.
       cur.pts = cur.pts.slice(m.from); cur.pts.push(cur.pts[0]);
       cur.closed = true;
-      if (!reducedMQ.matches) cur.pulseAt = performance.now();
       R.sfx?.play('tick');
       cur = null;
     } else if (m.ev === 'drop' && cur) { fade(cur, 350); cur = null; }

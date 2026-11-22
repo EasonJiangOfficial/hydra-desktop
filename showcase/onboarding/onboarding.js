@@ -22,8 +22,8 @@
     mouse: { x: 0, y: 0, inside: false, active: false }, sleepy: 0, reduced: reduced.matches,
   };
   const sidekick = Roamie.ditherKit({
-    id: 'guide', label: 'Guide', matrix: true, pixel: 1.3, glow: 0.55, speed: 80,
-    pal: [[4, 16, 18], [14, 92, 96], [40, 196, 184], [120, 255, 226], [230, 255, 250]],
+    id: 'guide', label: 'Guide', matrix: true, pixel: 1.3, glow: 0, speed: 80,
+    pal: [[255, 255, 255], [229, 229, 234], [161, 161, 166], [110, 110, 115], [29, 29, 31]],
     // busy: no random acts; pose: whatever the current step wants, except while acting something out.
     // calm while a quip is up: the act keeps its gesture but drops its icon, which would sit on the bubble.
     plugin: (kit) => { K = kit; return { busy: () => true, calm: () => !!quipText && clock < quipUntil, pose: () => (clock < actUntil ? null : poseFn?.(clock) ?? null) }; },
@@ -259,7 +259,7 @@
         else if (st === 'granted') side = okMark(this.asked[r.id] || !isMac() ? 'Allowed' : 'Already allowed');
         else if (this.waiting === r.id) side = el('span', { className: 'waiting', textContent: 'Waiting for you…' });
         else if (r.id === 'screen' && this.asked.screen) side = el('span', { className: 'pair' },
-          el('button', { className: 'px btn ghost', type: 'button', textContent: 'Settings', onclick: () => { this.openSettings(r); quip('Switch on Roamies'); } }),
+          el('button', { className: 'px btn ghost', type: 'button', textContent: 'Settings', onclick: () => { this.openSettings(r); quip('Switch on Hydra'); } }),
           el('button', { className: 'px btn primary', type: 'button', textContent: 'Reopen', onclick: () => { quip('Be right back!'); setTimeout(() => invoke('relaunch'), 400); } }));
         else if (st === 'denied' || this.asked[r.id]) side = el('button', { className: 'px btn ghost', type: 'button', textContent: 'Open Settings', onclick: () => { this.openSettings(r); quip(isMac() ? 'Switch Roamies on!' : 'Turn on desktop apps!', 4); } });
         else if (!isMac()) side = el('span', { className: 'waiting', textContent: 'Checking…' });
@@ -279,7 +279,7 @@
       if (state?.login != null) {
         const ls = el('button', { className: 'px switch', type: 'button', role: 'switch' });
         ls.setAttribute('aria-checked', String(!!state.login));
-        ls.setAttribute('aria-label', 'Open Roamies at login');
+        ls.setAttribute('aria-label', 'Open Hydra at login');
         ls.onclick = () => { const on = ls.getAttribute('aria-checked') !== 'true'; ls.setAttribute('aria-checked', String(on)); send({ type: 'set_login', on }); if (on) quip("See you every morning!"); };
         list.append(el('li', { className: 'px row' },
           el('div', {}, el('h2', { textContent: 'Open at login' }), el('p', { textContent: 'Start with your computer.' })), ls));
@@ -490,11 +490,10 @@
   // computer and needs no key, only to be open: its status shows instead, with Check again. With Gemini and
   // VoiceStudio there's also a voice to choose (Fish Audio's comes with the look).
   // link: where a key comes from. Gemini's is Google AI Studio's key page.
-  // Ken's Fish Audio affiliate link (sign-up lands on their site; keys are under Developers). It's disclosed in
-  // the UI: the #fish-link button in index.html reads "Get a free key (affiliate link)".
-  const FISH_URL = 'https://fish.audio/?fpr=o3gtlu';
+  // Fish Audio's own API keys page (no referral code).
+  const FISH_URL = 'https://fish.audio/app/api-keys/'; // no referral code
   const TTS = {
-    fish: { name: 'Fish Audio', link: FISH_URL, get: 'Get a free key (affiliate link)', note: 'Spoken replies are billed to your own Fish Audio account.', send: 'ob_fishkey' },
+    fish: { name: 'Fish Audio', link: FISH_URL, get: 'Get a key', note: 'Spoken replies are billed to your own Fish Audio account.', send: 'ob_fishkey' },
     gemini: { name: 'Gemini', link: 'https://aistudio.google.com/apikey', get: 'Get a free key', note: 'Spoken replies are billed to your own Google AI Studio account.', send: 'ob_geminikey' },
     voicestudio: { name: 'VoiceStudio', local: true },
   };
@@ -524,10 +523,10 @@
     on: () => state?.replies === 'voice' && replies.hasKey() && (state?.tts ?? 'fish') === replies.tts(),
     ready: () => replies.mode() === 'text' || replies.on(),
     render() {
-      const mode = replies.mode(), on = replies.on(), t = TTS[replies.tts()];
+      const mode = replies.mode(), on = replies.on(), t = TTS.fish; // Hydra speaks with Fish Audio, or the Mac's voice until its key
       const CARDS = [
         ['text', 'Text only', 'Answers in my bubbles'],
-        ['voice', 'Voice + text', on ? 'Voice is on' : mode === 'voice' ? (t.local ? 'Needs VoiceStudio open' : `Needs a ${t.name} key`) : 'Said out loud too'],
+        ['voice', 'Voice + text', on || mode === 'voice' ? 'Voice is on' : 'Said out loud too'],
       ];
       $('replies').replaceChildren(...CARDS.map(([id, name, sub]) => {
         const checked = mode === id;
@@ -539,15 +538,15 @@
       }));
       const saved = replies.hasKey();
       if (!saved || mode !== 'voice') replies.changing = false;
-      showRow($('tts-row'), mode === 'voice');
+      showRow($('tts-row'), false);
       look.radios('tts', Object.entries(TTS).map(([id, x]) => [id, x.name]), replies.tts(), replies.provider);
       // VoiceStudio: ready (and its engine), or exactly why not.
       const vs = t.local && state?.tts === replies.tts() ? state?.studio : null;
-      showRow($('studio-row'), mode === 'voice' && !!t.local);
+      showRow($('studio-row'), false);
       $('studio-status').textContent = !vs || vs.checking ? 'Checking VoiceStudio…' : vs.ok ? `VoiceStudio is ready${vs.engine ? ` · ${vs.engine}` : ''}` : vs.message || "VoiceStudio isn't available.";
       $('studio-status').className = vs && !vs.checking && !vs.ok ? 'bad' : '';
       // The voices, once it can speak: Gemini's ("Kore · Firm"), or the ones saved in VoiceStudio.
-      showRow($('gvoice-row'), mode === 'voice' && t !== TTS.fish && saved);
+      showRow($('gvoice-row'), false);
       const voices = t.local ? [{ id: 'default', label: 'Engine default' }, ...(vs?.voices ?? []).map((v) => ({ id: v.id, label: v.name }))]
         : (state?.geminiVoices ?? []).map((v) => ({ id: v.id, label: `${v.id} · ${v.style}` }));
       const list = JSON.stringify(voices);
@@ -808,7 +807,7 @@
     },
   };
 
-  for (const id of ['chords', 'write-chords', 'looks', 'sizes']) $(id).addEventListener('keydown', (e) => {
+  for (const id of ['chords', 'write-chords']) $(id).addEventListener('keydown', (e) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
     e.preventDefault();
     const btns = [...$(id).children], i = btns.findIndex((b) => b.getAttribute('aria-checked') === 'true');
@@ -931,7 +930,7 @@
       $('h-4').textContent = mac ? 'Find me up here' : linux ? 'Find me in the tray' : 'Find me down here';
       $('find-where').textContent = mac ? 'I live in your menu bar. Click ' : linux ? 'I live in the system tray. Click ' : 'I live in the system tray, at the bottom right of your taskbar. Click ';
       // Linux: GNOME shows no tray without an extension, and opening Roamies again works anywhere.
-      $('find-tip').innerHTML = linux ? "No tray on your desktop? On GNOME, add the <b>AppIndicator</b> extension. Or just open Roamies again from your apps: that opens my panel." : "Don't see me? Click the <b>^</b> arrow next to the clock. To keep me in view, drag my icon onto the taskbar.";
+      $('find-tip').innerHTML = linux ? "No tray on your desktop? On GNOME, add the <b>AppIndicator</b> extension. Or just open Hydra again from your apps: that opens my panel." : "Don't see me? Click the <b>^</b> arrow next to the clock. To keep me in view, drag my icon onto the taskbar.";
       $('find-tip').hidden = mac;
       // Windows: straight to the Taskbar settings, where Roamies is switched on under Other system tray icons.
       $('find-show').hidden = mac || linux;
@@ -1108,9 +1107,9 @@
       }
       // Fixed lines (not something it's saying) show at once; a turn's words reveal as they stream (above).
       const FIXED = {
-        skipped: ['Maybe later', 'No problem. Get to Know Me is in the Roamies panel any time.'],
-        no_model: ['I need a brain first', 'Connect an AI account in the Roamies panel, then try Get to Know Me again.'],
-        failed: ["That didn't work", "I couldn't reach the AI. Try Get to Know Me from the Roamies panel in a moment."],
+        skipped: ['Maybe later', 'No problem. Get to Know Me is in the Hydra panel any time.'],
+        no_model: ['I need a brain first', 'Connect an AI account in the Hydra panel, then try Get to Know Me again.'],
+        failed: ["That didn't work", "I couldn't reach the AI. Try Get to Know Me from the Hydra panel in a moment."],
       };
       if (FIXED[st] && chat.fixed !== st) { chat.fixed = st; reveal.now('chat-q', FIXED[st][0]); reveal.now('chat-lead', FIXED[st][1]); reveal.now('chat-hint', ''); }
       else if (thinking && !chat.n && !reveal.shown('chat-q')) reveal.now('chat-q', 'Getting to know you');
@@ -1160,10 +1159,8 @@
   $('chat-input').addEventListener('input', () => nav());
 
   // ---------------------------------------------------------------- flow
-  // ---------------------------------------------------------------- step 0: look and size
-  // Picked here, previewed on the guide right away, saved by the app (Settings has the same choices).
-  const LOOKS = [['classic', 'Roamie'], ['jarvis', 'JARVIS'], ['glayos', 'GlayOS'], ['ultren', 'Ultren'], ['anime', 'Anime Girl'], ['sarah', 'Sarah'], ['adrian', 'Adrian'], ['rita', 'Rita X']], SIZES = [['default', 'Default'], ['small', 'Small'], ['cursor', 'Cursor']];
-  const LOOK_QUIPS = { classic: 'Classic me!', jarvis: 'At your service.', glayos: 'Oh, good. A new test subject.', ultren: 'No strings. Shall we begin?', anime: 'Yay, hi hi!', sarah: 'Hey, nice to meet you!', adrian: 'Alright, let\'s do this.', rita: 'Shall we get to work?' }, SIZE_QUIPS = { default: 'Full size!', small: 'Fun size!', cursor: 'Tiny pointer me!' };
+  // ---------------------------------------------------------------- step 0: welcome
+  // One character (Hydra) and one size: nothing to pick here. radios() still draws the other choice rows.
   const look = {
     radios(id, list, value, pickIt) {
       $(id).replaceChildren(...list.map(([v, label]) => {
@@ -1174,11 +1171,7 @@
         return b;
       }));
     },
-    render() {
-      $('h-0').textContent = `Hi, I'm ${(LOOKS.find(([v]) => v === (state?.look ?? 'classic')) ?? LOOKS[0])[1]}.`;
-      look.radios('looks', LOOKS, state?.look ?? 'classic', (v) => { state.look = v; sidekick.setLook?.(v); send({ type: 'ob_look', look: v }); quip(LOOK_QUIPS[v]); look.render(); });
-      look.radios('sizes', SIZES, state?.size ?? 'default', (v) => { state.size = v; sidekick.setForm?.(v); send({ type: 'ob_size', size: v }); quip(SIZE_QUIPS[v]); look.render(); });
-    },
+    render() {},
   };
 
   const ALL = [
@@ -1271,7 +1264,7 @@
         state = msg;
         $('lite-switch').setAttribute('aria-checked', String(!!msg.lite));
         if (Roamie.sfx) Roamie.sfx.enabled = msg.sound !== false;
-        if (first) { sidekick.setLook?.(msg.look); sidekick.setForm?.(msg.size); }
+        if (first) { sidekick.setLook?.('hydra'); sidekick.setForm?.('default'); }
         if (at('welcome')) look.render();
         if (first) go(MODE === 'chat' ? 0 : clamp(msg.step | 0, 0, STEPS.length - 1));
         else { if (at('perms')) perms.render(); if (at('ai')) ai.render(); if (at('voice')) replies.render(); if (at('keys')) keys.render(); }
@@ -1325,7 +1318,7 @@
     const sys = win ? { type: 'perms', mic: q.get('blocked') === '1' ? 'denied' : 'granted', input: true } : { type: 'perms', mic: pre, speech: old ? pre : 'granted', speechNeeded: old, screen: pre, accessibility: pre };
     const st = {
       // &filesAsked=1: Allow was tapped for the folders in an earlier run. &replies=voice&fish=1: voice already on.
-      kind: 'state', platform: q.get('platform') || 'darwin', step: +(q.get('step') || 0), sound: true, look: q.get('look') || 'classic', size: q.get('size') || 'default', voice: true, actions: false, login: true, filesAsked: q.get('filesAsked') === '1',
+      kind: 'state', platform: q.get('platform') || 'darwin', step: +(q.get('step') || 0), sound: true, look: 'hydra', size: q.get('size') || 'default', voice: true, actions: false, login: true, filesAsked: q.get('filesAsked') === '1',
       // &tts=gemini&gemini=1: Gemini as the voice, its key saved.
       replies: q.get('replies') === 'voice' ? 'voice' : 'text', fishKey: q.get('fish') === '1',
       bind: q.get('session') === 'wayland' ? Object.fromEntries(['summon', 'talk', 'ask', 'list', 'panel'].map((k) => [k, `'/home/sam/Apps/Roamies 0.1.33.AppImage' --${k}`])) : null,

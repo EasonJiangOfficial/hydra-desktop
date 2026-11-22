@@ -298,16 +298,12 @@ console.log('speaker beat variety: passed');
   assert.equal(r.beat(), true);
   assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, rate: 24000, pcm: clip.pcm });
 }
-{ // Every look's voice has every beat recorded, in both paid models (re-run beats/make.mjs after changing BEATS).
-  const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
+{ // Only Hydra's voice may ship beats (beats/make.mjs records them once a Fish Audio key exists); no other character's.
   const { DEFAULT_VOICE } = await import('../fish.mjs');
-  const voices = [DEFAULT_VOICE, ...[...side.matchAll(/\['\w+', '[^']+', '([0-9a-f]{32})'\]/g)].map((m) => m[1])];
-  const get = bundledBeats();
-  for (const v of voices) for (const m of FISH_MODELS) {
-    const set = get(v, m);
-    assert.ok(set, `beats for ${v} on ${m}`);
-    for (const b of BEATS) assert.ok(set.get(b)?.pcm.length > 1000, `"${b}" in ${v} on ${m}`);
-  }
+  const index = JSON.parse(readFileSync(new URL('../beats/index.json', import.meta.url), 'utf8'));
+  for (const k of Object.keys(index.sets)) assert.ok(k.startsWith(`${DEFAULT_VOICE}:`), `${k} is Hydra's voice`);
+  const set = bundledBeats()(DEFAULT_VOICE, FISH_MODELS[0]);
+  if (set) for (const b of BEATS) assert.ok(set.get(b)?.pcm.length > 1000, `"${b}" on ${FISH_MODELS[0]}`);
 }
 console.log('bundled beats: passed');
 

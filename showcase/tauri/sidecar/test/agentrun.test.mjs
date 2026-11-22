@@ -22,6 +22,7 @@ const mgr = createAgents({
   fork, root: agentsRoot(), userName: 'Ken', home: tmp, runner: fileURLToPath(new URL('../agentrun.mjs', import.meta.url)), safety: { checkRead, checkWrite, checkOpen },
   config: { model: async () => ({ provider: 'anthropic', model: 'fake', route: 'api' }), creds: async () => ({}), allowActions: () => true, image: () => null, open: async () => {}, reveal: async () => {} },
   ui: ({ e }) => {
+    if (!e) return; // hands on/off for the overlay
     events.push(e);
     // The yes from the row's Allow button.
     if (e.type === 'ask') setTimeout(() => mgr.answer(e.agent.id, true), 50);
@@ -39,28 +40,28 @@ const end = await done;
 const log = fs.readFileSync(process.env.FAKE_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 
 assert.equal(end.type, 'done', `${end.agent.reason}\n${JSON.stringify(log, null, 1)}`);
-assert.deepEqual(log.filter((l) => l.isError), [], 'every tool call worked');
-assert.equal(a.dir, path.join(tmp, 'data', 'Roamies', 'Agents', a.folder), 'its folder is under ROAMIES_DATA_DIR');
+assert.deepEqual(log.filter((l) => l.isError).map((l) => [l.name, /^Unknown tool: run_command\b/.test(l.result)]), [['run_command', true]], 'every tool call worked but the shell, which is gone');
+assert.equal(a.dir, path.join(tmp, 'data', 'HydraAgent', 'Agents', a.folder), 'its folder is under ROAMIES_DATA_DIR');
 // What the model was given: its brief, only its tools, a prompt about its folder.
 assert.match(log[0].prompt, /Brief from Ken:\nMake a landing page for Woof Co\./);
-assert.deepEqual([...log[0].tools].sort(), ['finish', 'list_files', 'plan', 'read_file', 'run_command', 'search_files', 'web_fetch', 'web_search', 'write_file']);
+assert.deepEqual([...log[0].tools].sort(), ['finish', 'list_files', 'plan', 'read_file', 'search_files', 'web_fetch', 'web_search', 'write_file']);
 assert.ok(log[0].system.includes(`Your folder is ${a.dir}.`));
-// It asked once (the command), not for overwriting its own file.
+// Every write asked (owner's rule, DESIGN.md "Mac actions"; overwriting its own file too: binding D2, eighth review
+// V8-10), each with the whole real path: the new page, then overwriting it, then the script.
 const asks = events.filter((e) => e.type === 'ask');
-assert.equal(asks.length, 1);
-assert.match(asks[0].agent.ask.question, /^Run `node -e "require\('fs'\)\.writeFileSync\('work\/scratch/);
+assert.deepEqual(asks.map((e) => e.agent.ask.question), [`Create ${path.join(a.dir, 'files', 'index.html')}?`, `Overwrite ${path.join(a.dir, 'files', 'index.html')}?`, `Create ${path.join(a.dir, 'work', 'build.sh')}?`]);
 assert.ok(events.some((e) => e.type === 'update' && e.agent.step === 'Writing the page'), 'its progress line reached the row');
 // The folder: what it made, its scratch, its record.
 assert.equal(fs.readFileSync(path.join(a.dir, 'files', 'index.html'), 'utf8'), '<h1>Woof Co</h1>');
-assert.ok(fs.existsSync(path.join(a.dir, 'work', 'scratch.txt')), 'run_command ran in its folder');
+assert.ok(fs.existsSync(path.join(a.dir, 'work', 'build.sh')), 'written in its folder after the yes');
 assert.ok(fs.statSync(path.join(a.dir, 'inputs')).isDirectory());
 assert.deepEqual(end.agent.result.files, [{ name: 'index.html', rel: 'files/index.html', what: 'the page', dir: false }]);
 assert.equal(end.agent.result.outcome, 'Made a one-page site for Woof Co.');
 assert.match(fs.readFileSync(path.join(a.dir, 'history.md'), 'utf8'), /^## Run 1 · \d{4}-\d\d-\d\d \d\d:\d\d · done\nAsked: Make a landing page for Woof Co\.\nOutcome: Made a one-page site for Woof Co\.\nFiles: files\/index\.html \(the page\)\n/);
 const state = JSON.parse(fs.readFileSync(path.join(a.dir, '.agent.json'), 'utf8'));
 assert.equal(state.state, 'done');
-assert.deepEqual(state.tokens, { in: 500, out: 50 });
-assert.equal(state.turns, 5);
+assert.deepEqual(state.tokens, { in: 600, out: 60 });
+assert.equal(state.turns, 6);
 assert.match(fs.readFileSync(path.join(agentsRoot(), 'Agents', 'index.md'), 'utf8'), / · Dog brand landing page · .+ · asked: Make a landing page for Woof Co\. · done: Made a one-page site for Woof Co\.\n$/);
 assert.ok(!fs.existsSync(path.join(tmp, 'work')), 'nothing landed in the home folder');
 assert.deepEqual(mgr.news().map((n) => [n.id, n.kind]), [[a.id, 'done']], 'its result is news for the chat');

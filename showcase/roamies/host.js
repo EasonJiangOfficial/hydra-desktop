@@ -27,6 +27,10 @@
   window.__roamieBuddy = (m) => { Roamie.wake?.(); Roamie.buddy.onEvent?.(m); };
   // handsBusy: Roamies is acting in another app (it may take the real cursor), so clicks always go through.
   let hot = null, cursor = null, handsBusy = false;
+  // Who is acting in an app right now: 'chat' and each background agent by id. A set, not a count, so an agent that
+  // is stopped mid-act (its parent says so) or a sidecar restart (hands_reset) can't leave the overlay stuck.
+  const handsOn = new Set();
+  Object.defineProperty(Roamie, 'handsBusy', { get: () => handsBusy, configurable: true });
   // Linux ("x11" or "wayland", set by the shell): clicks are let through by region instead (below).
   const LINUX = !!window.ROAMIE_LINUX;
   const setHot = (h) => { if (!LINUX && h !== hot) { hot = h; invoke('set_hot', { hot: h }).catch(() => { hot = null; }); } };
@@ -83,8 +87,8 @@
   const field = document.createElement('input');
   Object.assign(field.style, { position: 'fixed', left: '0', top: '0', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' });
   // Its name is its look's (the sidecar's LOOKS).
-  const NAMES = { classic: 'Roamie', jarvis: 'JARVIS', glayos: 'GlayOS', ultren: 'Ultren', anime: 'Anime Girl', sarah: 'Sarah', adrian: 'Adrian', rita: 'Rita X' };
-  field.setAttribute('aria-label', 'Message for Roamie');
+  const NAMES = { hydra: 'Hydra' };
+  field.setAttribute('aria-label', 'Message for Hydra');
   field.autocomplete = 'off'; field.spellcheck = false;
   document.addEventListener('DOMContentLoaded', () => document.body.appendChild(field));
   if (document.body) document.body.appendChild(field);
@@ -168,6 +172,8 @@
   // waveTurn: a spoken question whose "thinking" shows as dots beside the cursor (macOS), so the Sidekick
   // shows no thought cloud of its own. research: this turn's answer broke down into points, so it goes on the card.
   let hearing = false; // a voice take is open (the mic is on), so Esc can cancel it
+  // toolsRan: this request did something (a tool ran), so its end is a finished task: one 'done' chime, not one per tool.
+  let toolsRan = false;
   let waveTurn = false, research = false, heardText = false, spoken = '', fromWeb = false, listenTake = 0;
   // agentish: they asked for an agent, so the agents' corner hatches one instead of the thought cloud.
   let agentish = false;
@@ -285,6 +291,7 @@
         // Nor is it still working in another app, even if that work's end was missed.
         a.hand?.end();
         responding = true;
+        toolsRan = false;
         a.working?.(true);
         Roamie.voiceOut?.warm?.();
         heard = null;
@@ -347,8 +354,9 @@
       }
       case 'tool':
         if (listen?.open) break;
-        // Tools with nothing to show (listing commitments) don't interrupt the bubble.
+        // Tools with nothing to show (listing commitments) don't interrupt the bubble, nor earn the end's chime.
         if (!e.anim) break;
+        toolsRan = true; // a tool visual shows (the notch's line or the task tag), so the end chimes once
         if (notchOn()) {
           if (e.anim.tool === 'web') { fromWeb = true; if (research) { research = 'looking'; panel()?.status(webStatus(e.anim)); break; } }
           N().tool(toolWords(e.anim));
@@ -403,6 +411,8 @@
         break;
       case 'done':
         responding = false;
+        if (toolsRan && !e.stopped) Roamie.sfx?.play('done');
+        toolsRan = false;
         a.working?.(false);
         if (agentish) { agentish = false; Roamie.agentHome?.hatchOff(); }
         if (research) panel()?.end(fromWeb ? 'From the web' : 'Answer');
@@ -416,6 +426,7 @@
       case 'error':
         dropAutoListen();
         responding = false;
+        toolsRan = false;
         a.working?.(false);
         if (agentish) { agentish = false; Roamie.agentHome?.hatchOff(); }
         if (research) panel()?.fail(e.message);
@@ -431,7 +442,43 @@
   }
 
   // ---------- voice (⌃⌥) ----------
+  // ---------- the bridge to the main window: the web app's orb mirrors this one (hydra.rs, docs/BRIDGE.md) ----------
+  const ORB_PX = { small: 40, default: 48, large: 64 };
+  // Attached (the default): the orb lives in the Hydra window (the web app draws it from the bridge), so none floats
+  // on the desktop. Detached: the docked desktop orb. The sidecar says which (orb_mode); drawings still use this layer.
+  if (Roamie.orbAttached == null) Roamie.orbAttached = true;
+  let micLevel = 0, hearing2 = false, orbSent = '', orbAt = 0, wakePhrase = false;
+  // wake (docs/BRIDGE.md): 'phrase' while awake and idle with only the key phrase listening (no take is open, so
+  // nothing said is answered until "Hey Hydra"); 'off' in a real take, thinking, speaking, asleep or with the phrase off.
+  function orbNow() {
+    const speaking = !!Roamie.voiceOut?.playing(), out = speaking ? Roamie.voiceOut.level() : 0;
+    const state = Roamie.asleep ? 'Asleep' : speaking ? 'Speaking' : hearing2 ? 'Listening' : responding ? 'Thinking' : 'Listening';
+    const wake = !Roamie.asleep && wakePhrase && !speaking && !hearing2 && !responding ? 'phrase' : 'off';
+    return { state, wake, micLevel: hearing2 ? micLevel : 0, outputLevel: out, detached: !Roamie.orbAttached };
+  }
+  function pushOrb(force = false) {
+    const o = orbNow(), key = `${o.state}|${o.wake}|${o.micLevel.toFixed(2)}|${o.outputLevel.toFixed(2)}|${o.detached}`, now = performance.now();
+    if (!force && key === orbSent && now - orbAt < 2000) return;
+    orbSent = key; orbAt = now;
+    invoke('orb_state', { msg: o }).catch(() => {});
+  }
+  setInterval(pushOrb, 66);
+  // Asleep: a click on the orb wakes Hydra (it greets, then listens).
+  document.addEventListener('pointerdown', (e) => {
+    const a = getAgent();
+    if (!Roamie.asleep || Roamie.orbAttached || !a?.visible || !a.pos) return;
+    if (Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) < a.pos.r * 1.2) send({ type: 'agent_power', on: true, from: 'orb' });
+  }, true);
+  // Right-click on the floating orb: offer to attach it to the Hydra window.
+  document.addEventListener('contextmenu', (e) => {
+    const a = getAgent();
+    if (Roamie.orbAttached || !a?.visible || !a.pos || Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) > a.pos.r * 1.2) return;
+    e.preventDefault();
+    send({ type: 'menu', id: 'orb:offer' });
+  }, true);
+
   function onVoice(m) {
+    if (m.type === 'state') hearing2 = m.state === 'listening';
     // Windows: the pen trail while the talk keys are held (pen.js).
     if (m.type === 'ink') { Roamie.pen?.(m); return; }
     const a = getAgent();
@@ -464,7 +511,7 @@
       }
       listen = a.listen({ placeholder: m.mode === 'handsfree' ? 'Listening… tap again to send' : 'Listening…' });
     } else if (m.type === 'partial') { listen?.set(m.text); if (notchOn()) N().heard(m.text); }
-    else if (m.type === 'level') { listen?.level(m.v); if (notchOn()) N().level(m.v); }
+    else if (m.type === 'level') { micLevel = Number(m.v) || 0; listen?.level(m.v); if (notchOn()) N().level(m.v); }
     else if (m.type === 'state' && m.state === 'processing') listen?.processing();
     else if (m.type === 'final') {
       heardText = true;
@@ -508,15 +555,26 @@
   window.__roamieHost = (m) => {
     Roamie.wake?.(); // the frame loop naps while the sidekick is hidden
     if (m.kind === 'speech') { Roamie.voiceOut?.handle(m); return; } // plays on, even while it changes screens
+    if (m.kind === 'voice_pause') { Roamie.voiceOut?.pause?.(m.on); return; }
+    // The Mac's voice helper plays Hydra's voice (W5 contract 6): here it only keeps time, silently.
+    if (m.kind === 'voice_native') { Roamie.voiceOut?.setNative?.(m.on); return; }
     if (m.kind === 'volume') { Roamie.voiceOut?.setVolume(m.v); if (Roamie.sfx) Roamie.sfx.volume = m.v; return; }
     if (held) { held.q.push(m); return; }
     if (m.kind === 'notch') { if (Roamie.notch) { Roamie.notch.enabled = !!m.on; if (m.style) Roamie.notch.style = m.style; if (!m.on) Roamie.notch.close(); } return; }
     if (m.kind === 'sound') { if (Roamie.sfx) Roamie.sfx.enabled = m.on; return; }
-    if (m.kind === 'size') { for (const t of Roamie.tiles ?? []) t.creature.setForm?.(m.size); return; }
+    // Hydra asleep (5 minutes without talk, or the sleep word) or awake: the orb holds still and pale while asleep.
+    if (m.kind === 'orb_mode') { Roamie.orbAttached = !m.detached; pushOrb(true); return; }
+    if (m.kind === 'wake_phrase') { wakePhrase = !!m.on; pushOrb(true); return; }
+    // Its chimes play once: only in the overlay that holds Hydra (every overlay gets these messages).
+    if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound && getAgent()) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
+    // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
+    if (m.kind === 'listen_after') { if (getAgent()) Roamie.sfx?.play('hydra_wake'); waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
+    // The orb's size (outer edge, px). It never changes form: the size is the setting.
+    if (m.kind === 'size') { Roamie.orbPx = ORB_PX[m.size] ?? 48; for (const t of Roamie.tiles ?? []) t.creature.refit?.(); return; }
     if (m.kind === 'look') {
       for (const t of Roamie.tiles ?? []) t.creature.setLook?.(m.look);
-      field.setAttribute('aria-label', `Message for ${NAMES[m.look] ?? NAMES.classic}`);
-      if (Roamie.notch) { Roamie.notch.name = NAMES[m.look] ?? NAMES.classic; Roamie.notch.look = m.look; }
+      field.setAttribute('aria-label', 'Message for Hydra');
+      if (Roamie.notch) { Roamie.notch.name = 'Hydra'; Roamie.notch.look = 'hydra'; }
       return;
     }
     if (!getAgent()) return;
@@ -526,6 +584,7 @@
       Roamie.agentHome?.event(m.e, { from: a.visible ? [a.pos.x, a.pos.y] : cursor });
       return;
     }
+    if (m.kind === 'hands_reset') { handsOn.clear(); handsBusy = false; return; }
     if (m.kind === 'hands') {
       // on/off: it is acting in another app. In between: where each step lands (global screen points) and when a
       // step takes the real cursor; the Sidekick hops there in its cursor form instead of chasing the cursor.
@@ -535,7 +594,8 @@
         // A spot on another display isn't this overlay's to show.
         if (px >= 0 && py >= 0 && px <= innerWidth && py <= innerHeight) { hand?.begin(); hand?.at(px, py, { tap: !m.step.hover }); }
       } else if (m.borrow) hand?.begin();
-      else { handsBusy = !!m.on; if (handsBusy) setHot(false); else hand?.end(); }
+      // Counted: the chat and background agents can each be acting; clicks go through until every one is done.
+      else { const id = m.id ?? 'chat'; if (m.on) handsOn.add(id); else handsOn.delete(id); handsBusy = handsOn.size > 0; if (handsBusy) setHot(false); else hand?.end(); }
       return;
     }
     // Launch (and the relaunch after an update): the capsule says hi when it's on, else the Roamie waves by the cursor.
@@ -543,6 +603,8 @@
     if (m.kind === 'intro') { if (capR()) N().say(m.text); else getAgent().intro(m.x, m.text); return; }
     if (m.kind === 'esc') { onEsc(); return; }
     if (m.kind === 'summon') {
+      // Hydra's orb stays docked and on screen: the shortcut only brings it back if it isn't there (never to the cursor).
+      if (Roamie.hydra && !notchOn()) { const a = getAgent(); if (!a.visible) a.show({ summoned: true }); return; }
       // ⌃⌥S toggles; the menu's Show Sidekick only ever shows. With the capsule on, it's the capsule that comes out.
       if (notchOn()) {
         if (!N().active) N().hello();
@@ -603,8 +665,8 @@
   const ready = () => {
     const a = getAgent();
     if (!a) return setTimeout(ready, 150);
-    a.setAuto(true);
-    a.hide({ instant: true });
+    // Hydra: always on screen, docked (agent.js DOCKED); no hiding when idle.
+    if (Roamie.hydra) a.show(); else { a.setAuto(true); a.hide({ instant: true }); }
     send({ type: 'ui_ready' });
   };
   ready();

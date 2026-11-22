@@ -13,9 +13,8 @@ assert.equal(whatsNewOnStart({ seen: '0.1.36', version: '0.1.36', onboarded: tru
 assert.equal(whatsNewOnStart({ seen: '0.1.37', version: '0.1.36', onboarded: true }).open, false, 'a downgrade');
 assert.equal(whatsNewOnStart({ seen: '0.1.35', version: '0.0.0', onboarded: true }).open, false, 'no version (a dev run without one)');
 
-// The shipped file follows its rules (the commit command adds to it).
-const data = JSON.parse(fs.readFileSync(new URL('../../../panel/whatsnew.json', import.meta.url), 'utf8'));
-assert.deepEqual(checkWhatsNew(data), []);
+// Hydra Desktop ships no What's new page (Roamies' changelog was removed with its panel page).
+assert.ok(!fs.existsSync(new URL('../../../panel/whatsnew.json', import.meta.url)));
 // And the rules catch what they should.
 const one = (it, u = {}) => checkWhatsNew({ updates: [{ version: '0.1.0', date: '2026-01-01', items: [{ kind: 'new', title: 'Hi', text: 'Hello.', ...it }], ...u }] });
 assert.match(one({ kind: 'feature' })[0], /kind/);

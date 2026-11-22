@@ -2,13 +2,14 @@
 
 Effective date: 10 November 2026
 
-Roamies is an open-source desktop app made by an individual developer. This page says, in plain words, what
-data Roamies handles and where it goes.
+Hydra Desktop is a modified version of Roamies by Ken Kai (AGPL-3.0), built for one owner. This page says, in plain
+words, what data it handles and where it goes.
 
 ## The short version
 
-- The developer runs no servers and collects nothing from you.
-- There is no analytics or telemetry.
+- Nothing is collected: no analytics, no telemetry, no crash reporting.
+- No self-updater: the app never downloads code. New builds are installed by hand from a DMG.
+- Nothing is ever sent to the upstream author (Ken Kai) or his servers.
 - Data leaves your computer only to services you choose to use, listed below.
 
 ## What leaves your computer, and where it goes
@@ -21,10 +22,13 @@ key) receives:
   and the facts and commitments Roamies has saved in memory
 - screenshots or window text, when Roamies looks at your screen to answer
 
-**Fish Audio** or **Google** (Gemini), whichever you pick as the voice, receives the text of each reply to speak it, only if spoken replies are on. It uses your own key for that service (for Gemini, the Gemini key you added for the AI is used unless you save a separate one for the voice).
+**Fish Audio**, once you add its key, receives the text of each reply to speak it, only if spoken replies are on. Until then the Mac's own voice speaks, on the Mac. It uses your own key for that service (for Gemini, the Gemini key you added for the AI is used unless you save a separate one for the voice).
 
-**GitHub** is used to check for and download updates, and to download a skill when you ask Roamies to install one
-(the link you gave, or the page it found for it).
+**GitHub** is used only to download a skill when you ask Hydra to install one (the link you gave, or the page it
+found for it).
+
+**Hydra** (https://hydra-olive-one.vercel.app and its Supabase sign-in) is what the main window shows, as any browser
+would. When the Hydra agent API exists and the app is paired, the agent's Hydra tools talk to the address you set.
 
 **Hugging Face** is used once, on Windows and Linux, to download the speech model.
 
@@ -52,10 +56,13 @@ Each provider's own privacy policy applies to what is sent to it.
 - **Windows and Linux:** speech is turned into text on your computer (Parakeet).
 - The microphone is used only while you hold the talk keys (or, on Linux with Wayland, from your talk shortcut
   until you press it again or pause).
-- **Wake word (macOS, off by default):** when you turn it on, the microphone stays open so Roamies can hear
-  "Hey Roamies", and macOS shows its microphone dot the whole time. That audio is turned into text only on your Mac
+- **Awake (wake word, on by default):** the microphone stays open so Hydra can hear "Hey Hydra", and macOS shows its
+  microphone dot the whole time. That audio is turned into text only on your Mac
   (it never starts on a Mac that would need Apple's servers). Nothing is kept or sent anywhere until you say the phrase;
   the log notes only when it heard speech and how close that came to the phrase, never what was said.
+- **Asleep (after 5 minutes without talk, or the sleep word):** speech recognition stops and nothing is sent to the
+  cloud. The microphone stays open only for an on-device double-clap detector, which measures loudness and pitch of
+  the sound 100 times a second and keeps nothing.
 - **Memory sync (off by default):** if you choose a sync folder, Roamies writes your reminders, commitments and
   remembered facts to `Roamies Sync/<random id>.json` in it, so your other computer can read them. Everything in that
   folder is encrypted (AES-256-GCM) with a key made from a passphrase you type on each computer; the key is kept in
@@ -79,6 +86,7 @@ and stays on your computer:
 | `Data/usage.jsonl`       | token counts and timings only, never content                                       |
 | `Data/jobs.json`         | your scheduled jobs (never synced to another computer)                             |
 | `Data/mcp.json`          | your connections; their keys and tokens are kept with your other keys, not here   |
+| `Data/bin.json`, `Data/bin/` | Recently deleted: forgotten facts, dropped commitments, removed jobs, skills and connections, and files as they were before Roamies changed them; each kept 30 days so it can be put back, then erased (a removed connection's keys go then too) |
 | `Data/models/`           | the speech model, on Linux (on Windows it's in `%LOCALAPPDATA%\Roamies\models`)    |
 | `Skills/`                | the skills Roamies learned or you installed, one folder each with its `SKILL.md`   |
 | `Agents/`                | what background agents made                                                         |
@@ -101,6 +109,8 @@ Your Fish Audio key, your Gemini voice key and the keys for your connections are
 You can see what Roamies remembers on the panel's **Memory** page, and remove it with **Forget** or
 **Forget Everything**. Learned skills, connections and scheduled jobs are on the **Abilities** page, under its
 **Skills**, **Connections** and **Routines** tabs, each with **Remove**.
+What you remove, and a file as it was before Roamies wrote over it, waits 30 days on the **Memory** page's
+**Recently deleted** tab, where **Put back** undoes it; after that it's erased.
 
 ## Deleting everything
 
@@ -108,7 +118,7 @@ Follow the [Uninstall](README.md#uninstall) steps in the README.
 
 ## Children
 
-Roamies isn't made for children under 13 (or the minimum age in their country), and it doesn't ask about age.
+Hydra Desktop isn't made for children under 13 (or the minimum age in their country), and it doesn't ask about age.
 Parents should supervise any use by children.
 
 ## Changes
@@ -117,4 +127,4 @@ Changes to this notice are made in this file on GitHub, so its history shows wha
 
 ## Questions
 
-Email [ken@kenkais.com](mailto:ken@kenkais.com) or [open an issue](https://github.com/KenKaiii/Roamies/issues).
+Open an issue in https://github.com/EasonJiangOfficial/hydra-desktop (private).

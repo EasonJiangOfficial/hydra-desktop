@@ -4,7 +4,7 @@
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { AGENT_TYPES, RETURNS } from './agents.mjs';
-import { DIR, nextOccurrence, parseDue, parseRepeat, readJson, repeatLabel, writeJson } from './store.mjs';
+import { DIR, nextOccurrence, onRestore, parseDue, parseRepeat, readJson, repeatLabel, toBin, writeJson } from './store.mjs';
 
 const FILE = path.join(DIR, 'jobs.json');
 export const MAX_JOBS = 30;
@@ -80,9 +80,18 @@ export async function removeJob(id) {
   const all = load().jobs, i = all.findIndex((j) => j.id === String(id));
   if (i < 0) return null;
   const [j] = all.splice(i, 1);
+  await toBin('job', j.title, { ...j }); // Recently deleted: it can be put back
   await save();
   return j;
 }
+// Put back paused, so a job that was due meanwhile doesn't run the moment it's back; resume starts it again.
+onRestore('job', async ({ data }) => {
+  if (load().jobs.length >= MAX_JOBS) throw new Error(`There are already ${MAX_JOBS} scheduled jobs. Remove one first.`);
+  const j = { ...data, id: find(data.id) ? newId() : data.id, paused: true };
+  load().jobs.push(j);
+  await save();
+  return `Put back the job "${j.title}", paused: resume it to run it again.`;
+});
 
 export const getJob = (id) => copy(find(id));
 /** Soonest next run first; paused and finished one-offs last. */
