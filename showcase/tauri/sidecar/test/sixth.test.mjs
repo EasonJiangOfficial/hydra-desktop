@@ -86,7 +86,10 @@ assert.equal(lv(checkRead('~/.cargo/credentials.toml', HOME)), 'block', 'cargo\'
   for (const s of ['sk_live', 'KEY_SECRET', 'ED_SECRET', 'GH_SECRET', 'DOCKER_SECRET', 'SSHSECRET']) assert.ok(!out.includes(s), `${s} never comes back`);
   for (const d of ['~', HOME, '/Users', path.dirname(HOME), '~/Documents/proj/sub/keys', ...(process.platform === 'darwin' ? [`/System/Volumes/Data${HOME}`] : [])])
     await assert.rejects(search(d), /Blocked for safety/, `search ${d}`);
-  assert.ok(!(await search('~/.gg')).includes('GG_SECRET'), 'a folder with a key file in it: searched, the key file never');
+  // Seventh review F3: a hidden folder is searched only with a yes; even then its key file never comes back.
+  await assert.rejects(search('~/.gg'), /said no/, 'a hidden folder asks first');
+  const yes = createTools({ allowActions: () => true, ui: () => {}, ask: async () => 'Allow', openUrl: async () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME }).tools;
+  assert.ok(!(await yes.find((t) => t.name === 'search_files').execute({ pattern: 'SECRET', dir: '~/.gg' }, undefined)).includes('GG_SECRET'), 'a folder with a key file in it: searched, the key file never');
   await assert.rejects(tools.find((t) => t.name === 'read_file').execute({ path: '~/Documents/proj/sub/keys/id_rsa' }, undefined), /Blocked for safety/, 'read through a link');
 }
 // write_file writes where it checked, and a new file in Documents needs no yes; a dotfile asks with its full path.

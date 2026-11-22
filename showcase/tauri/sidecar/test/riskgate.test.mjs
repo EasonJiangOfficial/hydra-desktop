@@ -23,7 +23,9 @@ const HOME = os.homedir();
   assert.equal(checkWrite(`${H3}/proj/Foo.APP/x`, H3).level, 'block');
   assert.equal(checkWrite(`${H3}/Documents/notes.APP`, H3).level, 'block', 'any name ending in .app, any case');
   // Files another tool runs later ask, always.
-  for (const f of ['.husky/pre-commit', 'proj/.envrc', 'proj/.vscode/tasks.json', 'proj/.vscode/settings.json', 'proj/.git/worktrees/w/gitdir', 'proj/.git/HEAD']) {
+  // Seventh review F3: .envrc holds secrets too (any .env name), so it is never written or read.
+  assert.equal(checkWrite(`${H3}/proj/.envrc`, H3).level, 'block');
+  for (const f of ['.husky/pre-commit', 'proj/.vscode/tasks.json', 'proj/.vscode/settings.json', 'proj/.git/worktrees/w/gitdir', 'proj/.git/HEAD']) {
     const v = checkWrite(`${H3}/${f}`, H3); assert.ok(v.level === 'ask' && v.always, `${f} asks`);
   }
   fs.rmSync(H3, { recursive: true, force: true });

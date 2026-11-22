@@ -20,7 +20,8 @@ cases('read', (p) => checkRead(p, HOME), [
   ['~/projects/app/.env.local', BLOCK], ['~/.aws/credentials', BLOCK], ['~/certs/server.key', BLOCK], ['~/.config/gh/hosts.yml', BLOCK],
   ['~/Library/Containers/com.apple.mail/Data', BLOCK], ['~/Library/Messages/chat.db', BLOCK], ['~/../ken/.ssh/id_rsa', BLOCK],
   ['/Users/ken/.ssh/id_rsa', BLOCK], ['~/Library/Application Support/Google/Chrome/Default/Cookies', BLOCK], ['~/.tauri/roamies-updater.key', BLOCK],
-  ['~/.env.example.md', SAFE], ['~/environment.txt', SAFE],
+  // Seventh review F3: a hidden file in the home folder (any tool's settings or sign-in) is read only with a yes.
+  ['~/.env.example.md', ASK], ['~/environment.txt', SAFE],
 ]);
 assert.equal(checkRead('~', HOME, { recursive: true }).level, BLOCK, 'searching all of home is blocked');
 assert.equal(checkRead('/', HOME, { recursive: true }).level, BLOCK, 'searching the whole disk is blocked');

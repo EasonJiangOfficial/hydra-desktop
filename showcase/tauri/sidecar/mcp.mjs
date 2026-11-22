@@ -276,7 +276,8 @@ export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, ope
         try { parsed = JSON.parse(args || '{}'); } catch { throw new Error('args must be a JSON object in a string, like {"query": "x"}.'); }
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('args must be a JSON object, like {"query": "x"}.');
         const t = await mcp.tool(server, tool);
-        const v = checkCall({ name: tool, annotations: t.annotations });
+        // Its arguments too: a path in them is checked like read_file (a server's file tools read past every other rule).
+        const v = checkCall({ name: tool, annotations: t.annotations, args: parsed });
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
         if (v.level !== 'safe' && !(await confirm(`${server}: ${tool} ${JSON.stringify(parsed)}${v.reason ? ` ${v.reason}` : ''}`, ctx, v.always))) throw new Error(`${userName} said no, so ${tool} wasn't run.`);
         return t.execute(parsed, ctx);

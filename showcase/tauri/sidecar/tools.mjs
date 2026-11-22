@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, isRiskyClick, riskyKey, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkFetch, checkOpen, checkRead, checkTyped, checkWrite, isRiskyClick, riskyKey, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -33,13 +33,15 @@ export const run = (cmd, args, { onLine, ...opts } = {}) => new Promise((res) =>
 // search_files: every file under root it may read, walked here so it never goes into secrets, other apps' data or
 // symlinks (rg and grep -r would), then searched with rg or grep given those files by name. At most 20,000 files.
 const SKIP_DIRS = new Set(['node_modules', '.git']);
-export async function searchFiles(pattern, root, home, { max = 20_000 } = {}) {
+export async function searchFiles(pattern, root, home, { max = 20_000, asked = false } = {}) {
   const files = [], stack = [root];
   while (stack.length && files.length < max) {
     const dir = stack.pop();
     for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
       const p = path.join(dir, e.name);
-      if (e.isSymbolicLink() || checkRead(p, home).level !== SAFE) continue;
+      // Secrets never; hidden and app-data files only under a folder the user said yes to.
+      const lv = e.isSymbolicLink() ? BLOCK : checkRead(p, home).level;
+      if (lv === BLOCK || (lv === ASK && !asked)) continue;
       if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) stack.push(p); } else if (e.isFile()) files.push(p);
     }
   }
@@ -314,13 +316,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     }
     return res;
   }
-  async function readWindow(target = 'front') {
+  async function readWindow(target = 'front', ctx) {
     const t = String(target || 'front');
     const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
     const [res, all] = await read().catch(async (err) => {
       if (t === 'front' || !/No matching window/.test(String(err?.message ?? err)) || !(await launchApp(t, hands))) throw err;
       return read();
     });
+    await windowShows(res.window, ctx);
     lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
     const others = (all?.windows ?? []).filter((w) => w.app === res.window.app && w.id !== res.window.id).length;
     const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which draw with text also searches)` : ''}`;
@@ -335,14 +338,43 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal);
     return isYes(answer);
   }
+  // Real paths the user said yes to reading (a hidden or app-data file): not asked again in this session.
+  const readOk = new Set();
+  /** read_file, list_files and search_files: secrets never; a hidden or app-data file asks, naming its real path. */
+  async function readable(p, ctx, opts) {
+    const v = checkRead(p, HOME, opts);
+    const f = allowed(v);
+    if (v.level === ASK && !readOk.has(f)) {
+      if (!(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
+      readOk.add(f);
+    }
+    return f;
+  }
+  /** What a window shows (its document's file, or a browser's file:// page) is checked like read_file before any of
+   *  its text or picture reaches the model: a key file open in an editor or a browser is refused, a hidden one asks. */
+  async function windowShows(win, ctx) {
+    const files = [];
+    if (win?.document) files.push(String(win.document));
+    if (win?.url) { try { const u = new URL(String(win.url).replace(/^view-source:/i, '')); if (u.protocol === 'file:') files.push(decodeURIComponent(u.pathname)); } catch { /* not a URL */ } }
+    for (const f of files) {
+      const v = checkRead(f, HOME);
+      if (v.level === BLOCK) throw new Error(`Blocked for safety: ${win.app ?? 'that window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
+      if (v.level === ASK && !readOk.has(v.path)) {
+        if (!(await confirm(`${v.reason} (${win.app ?? 'A window'} has it open.)`, ctx))) throw new Error(`${userName} said no, so I didn't read what ${win.app ?? 'that window'} shows.`);
+        readOk.add(v.path);
+      }
+    }
+  }
 
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
-  async function handsShot(file, t) {
+  async function handsShot(file, t, ctx) {
     const spec = t === 'screen' || t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
     // Shot straight away, with nothing played on screen (the Roamie only shows a "looking" tag).
     // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
     // itself and says the final size; an older helper doesn't, so sips does it here.
     const res = await hands('capture', file, spec, '1568');
+    // The window in the picture (for the whole screen: the one in front) is checked like read_file first.
+    try { await windowShows(res.window ?? (spec === 'screen' ? await hands('front').catch(() => null) : null), ctx); } catch (e) { await fs.unlink(file).catch(() => {}); throw e; }
     const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
     const bounds = res.window?.bounds ?? res.bounds;
     // area: what the picture covers when it's more than the window (its child windows too); bounds still tell
@@ -363,7 +395,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // Windows without the helper (or when it fails on the whole screen): PowerShell's screenshot below.
     const viaHands = process.platform === 'darwin' || (process.platform === 'win32' && HANDS);
     const t = String(target || 'screen').trim();
-    const shot = viaHands ? await handsShot(file, t).catch((e) => { if (process.platform === 'win32' && t === 'screen') return null; throw e; }) : null;
+    const shot = viaHands ? await handsShot(file, t, ctx).catch((e) => { if (process.platform === 'win32' && t === 'screen') return null; throw e; }) : null;
     if (shot) return shot;
     if (process.platform === 'win32') {
       // DPI-aware (or scaled displays capture only the top-left part), shrunk to Claude's 1568 px cap, and the
@@ -790,7 +822,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         name: 'read_window',
         description: "List an app window's controls (id, role, label, value) and all its text, including what's scrolled out of view, so you can read a whole page without scrolling or a screenshot. Needed for act_in_app ids; not for marking or clicking by visible words (draw or click_text do that). target: 'front', an app name, or 'browser'.",
         parameters: z.object({ target: z.string().optional() }),
-        execute: async ({ target = 'front' }) => readWindow(target),
+        execute: async ({ target = 'front' }, ctx) => readWindow(target, ctx),
       },
       {
         name: 'act_in_app',
@@ -811,7 +843,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const asked = String(target || 'front');
           const steps = given.filter((s) => !['read_window', 'take_screenshot', 'screenshot'].includes(s.do));
           // Only reading steps (models sometimes send read_window here): read the window instead of failing the call.
-          if (!steps.length) return readWindow(asked);
+          if (!steps.length) return readWindow(asked, ctx);
           if (!allowActions()) throw new Error(actionsOff);
           if (steps.some((s) => CHANGING.has(s.do))) agentChangesScreen();
           // "Type a web address into the browser's bar and press Return" is just opening a link: do that directly
@@ -838,6 +870,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           // Delete, pay, send, sign out: ask first, whatever the request was. The helper refuses these clicks without it.
           const appName = sameApp && lastRead.app ? lastRead.app : asked;
           for (const s of mapped) {
+            // What it types is checked first: no file: or other odd links, no secret paths, hidden ones with a yes (F2).
+            const typed = ['type', 'fill', 'set'].includes(s.do) ? s.text : s.do === 'choose' ? s.option : null;
+            if (typed != null) {
+              const tv = checkTyped(typed, HOME);
+              if (tv.level === BLOCK) throw new Error(`Blocked for safety: ${tv.reason} Nothing ran.`);
+              if (tv.level === ASK && !(await confirm(tv.reason, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+            }
             const label = s.do === 'click_text' ? s.text : s.do === 'click' ? s.label : s.do === 'choose' ? s.option : null;
             // Every risky click asks on its own (owner: delete, send, pay, trash and quit always ask). The yes is for this
             // label: the helper checks what it really clicks against it and asks again if it differs.
@@ -862,6 +901,20 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             let r = await hands('act', JSON.stringify(plan)), before = [];
             while (r.needsConfirm && Number.isInteger(r.step) && r.step >= 0 && r.step < plan.steps.length) {
               before = [...before, ...(r.done ?? [])];
+              // The window has a file open: typing, keys and saving there write to that file (an editor autosaves), so
+              // it's judged as a write: a protected file never, any other only with a yes naming its real path (F1).
+              if (r.document) {
+                const v = checkWrite(String(r.document), HOME, { exists: true });
+                const where = r.app ?? (appName === 'front' ? 'the app in front' : appName);
+                if (v.level === BLOCK) throw new Error(`Blocked for safety: ${where} has ${r.document} open, and acting there could change it. ${v.reason}${before.length ? ` (done first: ${before.join(', ')})` : ''}`);
+                if (!(await confirm(`Change ${v.path} in ${where}? What I type or save there goes into that file.`, ctx))) {
+                  throw new Error(`${userName} said no, so I stopped before acting in ${v.path}${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                }
+                plan.docOk = [...(plan.docOk ?? []), String(r.document)];
+                plan.steps = plan.steps.slice(r.step);
+                r = await hands('act', JSON.stringify(plan));
+                continue;
+              }
               if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx))) {
                 throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
               }
@@ -878,7 +931,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             try { res = await act(); }
             catch (err) {
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
-              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { unconfirm(); res = await act(); return finish(res); }
+              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { unconfirm(); res = await act(); await windowShows(res.window, ctx); return finish(res); }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
               if (!plan.window || !/No matching window/.test(String(err?.message ?? err))) throw err;
               delete plan.window;
@@ -889,6 +942,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           } finally {
             if (lastShot && mapped.some((s) => s.do !== 'wait')) lastShot.used = true;
           }
+          await windowShows(res.window, ctx);
           return finish(res);
           function finish(res) {
             if (!res.controls) return `In ${res.window.app}: ${res.done.join(', ')}.`;
@@ -962,20 +1016,23 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     {
       name: 'read_file', description: 'Read a text file. Paths may start with ~. Files with passwords or keys (.ssh, .env, auth.json, keychains) are off limits.',
       parameters: z.object({ path: z.string() }),
-      execute: async ({ path: p }) => clip(await fs.readFile(allowed(checkRead(at(p), HOME)), 'utf8'), 60_000),
+      execute: async ({ path: p }, ctx) => clip(await fs.readFile(await readable(at(p), ctx), 'utf8'), 60_000),
     },
     {
       name: 'list_files', description: 'List the files and folders in a directory.',
       parameters: z.object({ dir: z.string() }),
-      execute: async ({ dir }) => {
-        const ents = await fs.readdir(allowed(checkRead(at(dir), HOME)), { withFileTypes: true });
+      execute: async ({ dir }, ctx) => {
+        const ents = await fs.readdir(await readable(at(dir), ctx), { withFileTypes: true });
         return ents.slice(0, 300).map((e) => (e.isDirectory() ? e.name + '/' : e.name)).join('\n') + (ents.length > 300 ? `\n…and ${ents.length - 300} more` : '');
       },
     },
     {
       name: 'search_files', description: 'Search file contents under a specific folder for a text pattern (regex). Not your whole home folder: that trips macOS privacy prompts. Files with passwords or keys and other apps\' data are never searched.',
       parameters: z.object({ pattern: z.string(), dir: z.string() }),
-      execute: async ({ pattern, dir }) => clip(await searchFiles(pattern, allowed(checkRead(at(dir), HOME, { recursive: true })), HOME) || 'No matches.', 12_000),
+      execute: async ({ pattern, dir }, ctx) => {
+        const root = await readable(at(dir), ctx, { recursive: true });
+        return clip(await searchFiles(pattern, root, HOME, { asked: checkRead(root, HOME).level === ASK }) || 'No matches.', 12_000);
+      },
     },
     {
       name: 'write_file', description: "Create or overwrite a text file (missing folders are made). A new file in ~/Desktop, ~/Documents or ~/Downloads needs no yes; anywhere else, overwriting, scripts and dotfiles ask the user first. Several files: one call each, in the same turn.",
@@ -1003,13 +1060,16 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     {
       name: 'open', description: 'Open a website, a file or folder, or an app by name (e.g. "Safari", "https://hydra-olive-one.vercel.app", "~/Documents"). Links open in the default browser; set app to open one in a particular browser or app (e.g. app "Safari" when the user says "in Safari").',
       parameters: z.object({ target: z.string(), app: z.string().optional() }),
-      execute: async ({ target, app }) => {
+      execute: async ({ target, app }, ctx) => {
         let t = String(target).trim();
         // A bare web address ("example.com", "www.bbc.co.uk/news") is a link, not an app name: it used to fail as
         // "Unable to find application named example.com" and cost a retry. App bundles ("Notes.app") stay apps.
         if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?$/i.test(t) && !/\.app$/i.test(t)) t = `https://${t}`;
         const isFile = /^[~/.]/.test(t) && await fs.stat(expand(t)).then((s) => s.isFile() && (s.mode & 0o111) !== 0, () => false);
-        allowed(checkOpen(t, HOME, { executable: isFile }));
+        // The app is checked too: never a shell, script host or interpreter; an unknown one asks (F5).
+        const ov = checkOpen(t, HOME, { executable: isFile, app: app ?? null });
+        allowed(ov);
+        if (ov.level === ASK && !(await confirm(ov.reason, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
         agentChangesScreen();
         // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
         const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);
@@ -1170,10 +1230,11 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const bad = list.map(screenSkill).filter(Boolean);
         if (bad.length) throw new Error(bad.join(' '));
         const replacing = list.filter((k) => readSkill(k.slug)).map((k) => k.slug);
-        const cut = (t, n) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+        // The whole question, never cut: each skill's description and the steps the agent will follow later (D4, F8).
+        const whole = (k) => `${k.description}${k.text ? `\n\nIts steps:\n${k.text}` : ''}`;
         const question = list.length === 1
-          ? `Install the skill "${list[0].name}" from ${list[0].from}? ${cut(list[0].description, 140)}${replacing.length ? ' It replaces the one you have.' : ''}`
-          : `Install ${list.length} skills from ${list[0].from.split('/').slice(0, 3).join('/')}: ${cut(list.map((k) => k.name).join(', '), 160)}?${replacing.length ? ` It replaces ${replacing.join(', ')}.` : ''}`;
+          ? `Install the skill "${list[0].name}" from ${list[0].from}? ${whole(list[0])}${replacing.length ? '\n\nIt replaces the one you have.' : ''}`
+          : `Install ${list.length} skills from ${list[0].from.split('/').slice(0, 3).join('/')}: ${list.map((k) => k.name).join(', ')}?${replacing.length ? ` It replaces ${replacing.join(', ')}.` : ''}\n\n${list.map((k) => `${k.name}: ${whole(k)}`).join('\n\n')}`;
         // Always asked: a skill is instructions the agent will follow later.
         if (!isYes(await ask({ placeholder: question, choices: ['Install', "Don't install"] }, ctx?.signal))) throw new Error(`${userName} said no, so nothing was installed.`);
         const done = [];

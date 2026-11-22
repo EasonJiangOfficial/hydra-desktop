@@ -349,6 +349,8 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
       }
       const v = safety.checkRead(String(item).replace(/^~(?=$|\/|\\)/, home), home);
       if (v.level === 'block') throw new Error(`Can't give it ${item}: ${v.reason}`);
+      // A hidden or app-data file would need the user's yes to read: never handed over unasked.
+      if (v.level !== 'safe') throw new Error(`Can't give it ${item}: it's a hidden or app-data file. Read it with read_file first (that asks ${userName}).`);
       const st = await fs.promises.stat(v.path).catch(() => null);
       if (!st?.isFile()) throw new Error(`${item} isn't a file. Give files, not folders (it can read a folder by its path in the brief).`);
       if (st.size > 50 << 20) throw new Error(`${item} is over 50 MB.`);
@@ -442,7 +444,10 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
       const ext = path.extname(f.name), stem = f.name.slice(0, f.name.length - ext.length);
       let dest = path.join(a.deliverTo, f.name);
       for (let i = 2; await exists(dest); i++) dest = path.join(a.deliverTo, `${stem} ${i}${ext}`);
-      if (safety.checkWrite(dest, home).level !== 'safe') { log('agent_deliver', { id: a.id, skipped: dest }); continue; }
+      // Every file a folder holds is checked where it would land, not only the folder's name (F12): one that would need
+      // a yes (a link file, a script, a dotfile) keeps the whole folder back.
+      const each = (await fs.promises.stat(f.path).catch(() => null))?.isDirectory() ? (await fs.promises.readdir(f.path, { recursive: true }).catch(() => [])).map((r) => path.join(dest, r)) : [];
+      if ([dest, ...each].some((d) => safety.checkWrite(d, home).level !== 'safe')) { log('agent_deliver', { id: a.id, skipped: dest }); continue; }
       try { await fs.promises.cp(f.path, dest, { recursive: true, errorOnExist: true, force: false }); a.delivered.push(dest); } catch (e) { log('agent_deliver', { id: a.id, error: String(e.message) }); }
     }
   }

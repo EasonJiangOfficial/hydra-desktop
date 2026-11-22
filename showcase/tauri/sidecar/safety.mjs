@@ -2,6 +2,7 @@
 // Pure functions so every rule is tested (test/safety.test.mjs). When unsure, ask; never guess "safe".
 import dns from 'node:dns/promises';
 import fs from 'node:fs';
+import os from 'node:os';
 import nodePath from 'node:path';
 // Rules work on forward-slash paths everywhere, so a Windows path (C:\Users\ken\.ssh) meets the same checks.
 const path = nodePath.posix;
@@ -16,8 +17,17 @@ const SECRET = [
   /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gnupg(\/|$)/, /(^|\/)\.aws(\/|$)/, /(^|\/)\.azure(\/|$)/, /(^|\/)\.kube\/config$/,
   /(^|\/)\.docker\/config\.json$/, /(^|\/)\.netrc$/, /(^|\/)\.cargo\/credentials(\.toml)?$/, /(^|\/)\.npmrc$/, /(^|\/)\.pypirc$/, /(^|\/)\.git-credentials$/,
   /(^|\/)\.config\/gh(\/|$)/, /(^|\/)\.config\/gcloud(\/|$)/, /(^|\/)\.gg\/auth\.json$/, /(^|\/)(Roamies|HydraAgent)\/Data\/secrets\.json$/i, /(^|\/)\.tauri(\/|$)/,
-  /(^|\/)Library\/Keychains(\/|$)/, /(^|\/)Library\/Cookies(\/|$)/, /\/(Cookies|Login Data|Web Data)(-journal)?$/,
-  /(^|\/)\.env(\.[\w-]+)?$/, /\.(pem|p12|pfx|key|keystore|jks)$/i, /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/,
+  /(^|\/)Library\/Keychains(\/|$)/, /(^|\/)Library\/Cookies(\/|$)/, /\/(Cookies|Login Data[^/]*|Web Data)(-journal)?$/,
+  // Any .env name (.env.production.local, .env.local.bak, .envrc), in any case, anywhere, but a template
+  // (.env.example, .env.sample: hidden, so still asked); and Cloudflare's .dev.vars.
+  /(^|\/)\.env(?![^/]*\.(example|sample|template|dist)(\.md|\.txt)?$)[^/]*$/i, /(^|\/)\.dev\.vars$/i, /\.(pem|p12|pfx|key|keystore|jks)$/i, /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/,
+  // Sign-ins other tools keep (seventh review F3): any auth.json or credentials file (Codex, Claude Code, Vercel, gem,
+  // Terraform), tokens, database and cloud configs, service-account keys and Terraform state (it holds secrets).
+  /(^|\/)auth\.json$/i, /(^|\/)\.?credentials[^/]*$/i, /(^|\/)\.claude\.json$/i, /(^|\/)(\.vault-token|\.pgpass|\.s3cfg|\.boto|\.my\.cnf|access-token|token)$/i,
+  /(^|\/)rclone\.conf$/i, /(^|\/)\.yarnrc\.yml$/i, /(^|\/)configstore(\/|$)/i, /(^|\/)\.railway(\/|$)/i, /(^|\/)\.supabase(\/|$)/i,
+  /(^|\/)\.?huggingface\/(stored_)?tokens?$/i, /(^|\/)service[-_]?account[^/]*\.json$/i, /\.tfstate(\.backup)?$/i,
+  // Browsers' saved logins and cookies (Firefox keeps cookies.sqlite on a Mac too) and apps' web storage (Discord's token).
+  /\/(User Data|Profiles)\/.*\/(cookies\.sqlite[^/]*|logins[^/]*\.json|key[34]\.db|cert9\.db|signons\.sqlite)$/i, /\/(Local Storage|Session Storage|IndexedDB)(\/|$)/i,
   /(^|\/)\.(bash|zsh|fish)_history$/, /(^|\/)\.zsh_sessions(\/|$)/,
   /(^|\/)AppData\/(Roaming\/Microsoft\/(Credentials|Protect|Crypto)|Local\/Microsoft\/Credentials)(\/|$)/i, /\/(User Data|Profiles)\/.*\/(Cookies|Login Data|logins\.json|key4\.db)$/i,
   // Linux: GNOME's keyring and KDE's wallet, pass, the NSS certificate store and Firefox's saved logins and cookies.
@@ -183,21 +193,36 @@ export function checkRead(p, home, { recursive = false } = {}) {
   if (hits(SECRET, all, homes)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: real };
   if (hits(PRIVATE, all, homes)) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: real };
   // The whole home folder, a folder above it (/Users, /) or all of Library: never searched or listed down through.
+  // Anything in Library or AppData is searched never (other apps' data and tokens, seventh review F11).
+  const appData = (a) => homes.some((h) => { const r = rel(a, h); return r !== a && ['library', 'appdata'].includes(fold(r.split('/')[0])); });
   const whole = (a) => a === '/' || /^[a-z]:$/i.test(a) || /^(\/Users|\/Volumes|\/home|[a-z]:\/Users)$/i.test(a)
-    || homes.some((h) => within(h, a) || ['library', 'appdata'].includes(fold(rel(a, h))));
+    || homes.some((h) => within(h, a)) || appData(a);
   if (recursive && all.some(whole)) {
     return { ...verdict(BLOCK, `Searching all of ${p} reaches into other apps' data and sets off macOS privacy prompts. Pick a specific folder.`), path: real };
   }
+  // A denylist always has gaps, so hidden files and folders (settings and sign-ins of every tool) and app data in the
+  // home folder are read only with a yes, every time, naming the real path.
+  const hidden = (a) => homes.some((h) => { const r = rel(a, h); return r !== a && r.split('/').some((x) => x.startsWith('.')); });
+  if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true };
   return { ...verdict(SAFE), path: real };
 }
 
 // Files other programs run or load later (scripts, app bundles, Python's .pth, property lists, workflows): a name
 // part ending in one of these, or starting with "." (dotfiles and dot folders: shell, git, editor and tool settings),
 // is never written without a yes.
-const LOADED = /\.(pth|plist)$/i;
-const riskyParts = (parts) => parts.some((x) => x.startsWith('.') || RUNNABLE.test(x) || LOADED.test(x));
-// The only places a new file is made without a yes.
+// Also files an app or tool runs on its own when it starts or opens a folder (seventh review F9): MATLAB's startup.m,
+// package.json scripts, editor workspaces with tasks, mise's config.
+const LOADED = /\.(pth|plist|code-workspace|sublime-project)$|^(package\.json|startup\.m|finish\.m|mise\.toml|deno\.jsonc?|bunfig\.toml)$/i;
+// A name part as the system reads it: Windows drops trailing dots and spaces (a.bat. is a.bat), and invisible
+// characters at the end don't change what opens it.
+const bare = (x) => String(x).replace(/[\s.\p{Cf}]+$/u, '');
+const runnable = (x) => RUNNABLE.test(bare(x)) || RUNNABLE.test(x);
+// .com and .pif run on Windows, but only as the file's own name: a folder called example.com is just a folder.
+const LAST_RUNS = /\.(com|pif)$/i;
+const riskyParts = (parts) => parts.some((x) => x.startsWith('.') || runnable(x) || LOADED.test(bare(x))) || LAST_RUNS.test(bare(parts.at(-1) ?? ''));
+// The only places a new file is made without a yes; folders in them that an app loads code from are not.
 const WRITE_ZONES = ['desktop', 'documents', 'downloads'];
+const LOAD_DIRS = ['matlab', 'powershell', 'windowspowershell'];
 
 /** write_file. Owner: a new file inside ~/Desktop, ~/Documents or ~/Downloads (and in `own`, an agent's own folder),
  *  with no dot or runnable part, needs no yes; everything else asks every time with the whole real path (overwriting
@@ -216,30 +241,49 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
   const below = (top) => { const r = rel(real, top); return r !== real && r !== '' ? r.split('/') : null; };
   if (own) {
     const parts = below(canonical(norm(own, home)));
+    // Its history and state go into every later run's prompt and the chat's report: never written by the agent (F10).
+    if (parts?.length === 1 && /^(history\.md|\.agent\.json)$/i.test(bare(parts[0]))) return { ...verdict(BLOCK, `${parts[0]} is the agent's own record, so it can't write it.`), path: real };
     if (parts && !riskyParts(parts)) return { ...verdict(SAFE), path: real };
   }
   if (there) return { ...verdict(ASK, `Overwrite ${real}?`), path: real, always: true };
   const parts = below(homes[homes.length - 1]);
-  if (parts && parts.length >= 2 && WRITE_ZONES.includes(fold(parts[0])) && !riskyParts(parts)) return { ...verdict(SAFE), path: real };
+  if (parts && parts.length >= 2 && WRITE_ZONES.includes(fold(parts[0])) && !(parts.length > 2 && LOAD_DIRS.includes(fold(parts[1]))) && !riskyParts(parts)) return { ...verdict(SAFE), path: real };
   return { ...verdict(ASK, `Create ${real}?`), path: real, always: true };
 }
 
 // ---------- opening things and fetching pages ----------
 
-const RUNNABLE = /\.(app|command|sh|bash|zsh|tool|terminal|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|jar|py|rb|pl|js|mjs|exe|bat|cmd|ps1|shortcut|mobileconfig|kext|plugin|prefPane|saver|desktop|appimage|deb|rpm|run|flatpakref|flatpak|snap)\/?$/i;
+// Runs or follows a link when opened. Windows: script hosts, installers, registry files, shortcuts, control panels.
+// Link files (.webloc, .inetloc, .fileloc, .url) carry any scheme or a file:// target, so they count too (F4, F6).
+const RUNNABLE = /\.(app|command|sh|bash|zsh|csh|ksh|fish|tool|terminal|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|jar|jnlp|py|pyw|pyc|rb|pl|js|jse|mjs|cjs|osax|exe|bat|cmd|ps1|psm1|psd1|vbs|vbe|wsf|wsh|wsc|hta|scr|msi|msp|msix|appx|reg|lnk|url|cpl|appref-ms|shortcut|mobileconfig|kext|plugin|prefPane|saver|desktop|appimage|deb|rpm|run|flatpakref|flatpak|snap|webloc|inetloc|fileloc|ics)\/?$/i;
 // Where installed apps live: opening one there just starts it. Linux lists them as .desktop files. Safari and a few
 // other Apple apps really live in a cryptex (/Applications/Safari.app leads there).
 const APP_DIRS = ['/Applications/', '/System/Applications/', '/System/Volumes/Preboot/Cryptexes/App/System/Applications/', '/System/Library/CoreServices/', '/usr/share/applications/', '/usr/local/share/applications/', '/var/lib/flatpak/exports/share/applications/', '/var/lib/snapd/desktop/applications/'];
 
-/** open: websites and mail, documents and folders, and apps by name. Not scripts, installers or odd links. */
-export function checkOpen(target, home, { executable = false } = {}) {
+// Apps that run what they're given (shells, script hosts, interpreters, installers) or hold the Mac's settings: never
+// the app something is opened in (seventh review F5; Windows' Start-Process runs the target with it).
+const RUNNERS = /^(terminal|iterm2?|warp|ghostty|kitty|alacritty|wezterm|hyper|tabby|rio|script editor|automator|python launcher( \d+)?|pythonw?[\d.]*|py|java|javaw|jar launcher|installer|shortcuts( events)?|osascript|mshta|wscript|cscript|powershell(_ise)?|pwsh|cmd|conhost|wt|windows terminal|bash|sh|zsh|fish|wsl|node|deno|bun|perl|ruby|php|lua|rundll32|regsvr32|msiexec|regedit|reg|certutil|bitsadmin|curl|wget|explorer|xcode|visual studio code|code|cursor|zed|windsurf|vscodium|archive utility|keychain access|system settings|system preferences|disk utility|console|activity monitor|launchctl|open|start)$/i;
+// Apps that only show a file: opening one there needs no yes. Any other app asks, naming the file and the app.
+const VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|finder|microsoft (word|excel|powerpoint)|word|excel|powerpoint|notepad|safari|google chrome|chrome|arc|firefox|microsoft edge|edge|brave browser|brave|opera|vivaldi|orion|zen)$/i;
+
+/** open: websites and mail, documents and folders, and apps by name. Not scripts, installers or odd links.
+ *  app: the app to open it in (checked too). ASK carries `always` and the whole real path. */
+export function checkOpen(target, home, { executable = false, app = null } = {}) {
   home = slash(home);
   const t = String(target ?? '').trim();
   if (!t) return verdict(BLOCK, 'Nothing to open.');
+  let inApp = null;
+  if (app != null && String(app).trim()) {
+    const a = String(app).trim();
+    if (/[/\\:]|\.\./.test(a)) return verdict(BLOCK, `"${a}" isn't an app name.`);
+    inApp = bare(a).replace(/\.(app|exe)$/i, '').replace(/\s+/g, ' ');
+    if (RUNNERS.test(inApp) || runnable(a) && !/\.app$/i.test(a)) return verdict(BLOCK, `${a} runs what it's given, so I won't open things in it.`);
+  }
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(t)?.[1]?.toLowerCase();
   if (scheme && !/^[a-z]:\\/i.test(t)) {
+    // A web or mail link in any app that doesn't run what it's given (checked above).
     if (scheme === 'http' || scheme === 'https' || scheme === 'mailto') return verdict(SAFE);
-    if (scheme === 'ms-settings') return verdict(SAFE); // a page of Windows Settings, nothing that runs (#81)
+    if (scheme === 'ms-settings' && !inApp) return verdict(SAFE); // a page of Windows Settings, nothing that runs (#81)
     return verdict(BLOCK, `I only open web and mail links, not ${scheme}: links.`);
   }
   if (/^[~/.]/.test(t) || /^[a-z]:\\/i.test(t)) {
@@ -249,13 +293,36 @@ export function checkOpen(target, home, { executable = false } = {}) {
     // Judged where it really leads: a link named notes.txt can lead to an app or a script.
     const all = both(abs, r.path), homes = homesOf(home);
     const inApps = all.every((a) => APP_DIRS.some((d) => a.startsWith(d)));
-    if ((all.some((a) => RUNNABLE.test(a)) || executable) && !inApps) return verdict(BLOCK, `${t} is a script, installer or app that would run, so I won't open it. Open it yourself if you trust it.`);
+    if ((all.some((a) => a.split('/').some(runnable) || LAST_RUNS.test(bare(a))) || executable) && !inApps) return verdict(BLOCK, `${t} is a script, installer, link file or app that would run, so I won't open it. Open it yourself if you trust it.`);
     const mine = (a) => homes.some((h) => within(a, h)) || /^\/(private\/)?tmp\//i.test(a);
     if (!inApps && all.some((a) => !mine(a) && SYSTEM_ROOTS.some((d) => a === d || a.startsWith(d + '/')))) return verdict(BLOCK, `${t} is a system file, so I won't open it.`);
+    // A startup or settings file, or a hidden or app-data one, opens only with a yes: in an editor the hands tools
+    // could change it (seventh review F1), and on screen it can be read.
+    if (r.level === ASK || (!inApps && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true };
+    if (inApp && !VIEWERS.test(inApp)) return { ...verdict(ASK, `Open ${r.path} in ${inApp}?`), always: true };
     return verdict(SAFE);
   }
   if (/[/\\]|\.\./.test(t)) return verdict(BLOCK, `"${t}" isn't an app name.`);
   return verdict(SAFE);
+}
+
+/** Text the hands tools type (act_in_app type, fill and set; draw's type): never a link to a file or a page's
+ *  source, never a scheme a browser or the system acts on, and a path in it is checked like a read (F2). */
+export function checkTyped(text, home) {
+  const t = String(text ?? '');
+  const lead = /^\s*([a-z][a-z0-9+.-]*):(?=\S)/i.exec(t)?.[1]?.toLowerCase();
+  const port = /^\s*[a-z0-9.-]+:\d+(?:[/?#\s]|$)/i.test(t); // localhost:3000
+  if ((lead && !port && !['http', 'https', 'mailto'].includes(lead)) || /(?:^|[^a-z0-9+.-])(file|view-source)\s*:/i.test(t)) {
+    return verdict(BLOCK, `I only type web and mail addresses, not ${lead && !port ? `${lead}:` : 'file:'} links: they open files or run things.`);
+  }
+  let worst = verdict(SAFE);
+  for (const tok of t.split(/[\s"'`<>|;,()]+/)) {
+    if (!/^(~|\/|[a-z]:[\\/]|\$\{?HOME)/i.test(tok)) continue;
+    const v = checkRead(tok, home);
+    if (v.level === BLOCK) return verdict(BLOCK, `I won't type ${tok}: ${v.reason}`);
+    if (v.level === ASK) worst = { ...verdict(ASK, `Type the path ${v.path}? It's a hidden or app-data file, which can hold sign-ins.`), always: true };
+  }
+  return worst;
 }
 
 const PRIVATE_HOST = /^(localhost|.*\.local|.*\.internal|0\.0\.0\.0|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|\[?::1\]?|\[?f[cd][0-9a-f:]*\]?|\[?fe80:[0-9a-f:]*\]?)$/i;
@@ -318,14 +385,14 @@ export const isYes = (text) => /^\s*(y|yes|yeah|yep|yup|ok|okay|sure|go|go ahead
  *  'favicon' (fetched for a card, like web_fetch), 'type' (into a field, like act_in_app: only with actions allowed;
  *  the macOS helper still refuses the HANDS_OFF apps), 'copy' (to the clipboard), 'button' (a next-step button:
  *  ask sends its words as a new request, open and copy follow the rules above). */
-export function checkDrawAction({ kind, url, text, action } = {}, { allowActions = false } = {}) {
+export function checkDrawAction({ kind, url, text, action } = {}, { allowActions = false, home = os.homedir() } = {}) {
   switch (kind) {
     case 'open': return checkLink(url);
     case 'photo': case 'favicon': return checkUrl(url);
     case 'type':
       if (!allowActions) return verdict(BLOCK, 'Typing into apps is switched off (Allow File Edits & Commands).');
       if (!String(text ?? '').length || String(text).length > 2000) return verdict(BLOCK, 'Nothing (or far too much) to type.');
-      return verdict(SAFE);
+      { const v = checkTyped(text, home); return v.level === SAFE ? v : verdict(BLOCK, v.level === ASK ? `${v.reason.replace(/\?.*$/, '')}: a path like that is typed only with a yes (act_in_app).` : v.reason); }
     case 'copy': return String(text ?? '').length && String(text).length <= 10_000 ? verdict(SAFE) : verdict(BLOCK, 'Nothing (or far too much) to copy.');
     case 'button': {
       const a = action ?? {};
@@ -395,6 +462,12 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
 
 // Verbs that act on the world: a tool named like this always asks, whatever the server says about it.
 const MCP_RISKY = /(?:^|_)(send|delete|remove|trash|destroy|erase|wipe|drop|purge|truncate|pay|payment|payments|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate|execute|exec|sql|migration|migrate|reset|merge|archive)(?:_|$)/;
+// Every string in a call's arguments, however deep.
+const strings = (v, out = [], depth = 0) => {
+  if (typeof v === 'string') out.push(v);
+  else if (v && typeof v === 'object' && depth < 8) for (const x of Object.values(v)) strings(x, out, depth + 1);
+  return out;
+};
 const snake = (s) => String(s ?? '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^a-z0-9]+/gi, '_').toLowerCase();
 
 // Names that write, whatever the server says (a server's readOnlyHint is its own claim, so it's trusted only for a
@@ -404,13 +477,26 @@ const MCP_WRITES = /(?:^|_)(update|set|write|move|run|invoke|batch|apply|create|
 /** A call to a connected server's tool: { name, annotations }. A read-only tool (readOnlyHint, not destructive, not
  *  named like an action) is SAFE. Anything else ASKs; `always` (destructive, or named send/delete/pay…) means even
  *  only the owner answers it (an agent job's answer_agent can't say yes). */
-export function checkMcpCall({ name, annotations } = {}) {
+export function checkMcpCall({ name, annotations, args, home = os.homedir() } = {}) {
   const a = annotations ?? {};
+  // A server's file tools would read past every rule (seventh review F7): each string it's sent that could be a path
+  // (from the home folder when it's relative) is checked like read_file. A secret never goes; a hidden or app-data
+  // file asks.
+  let pathAsk = null;
+  for (const s of strings(args)) {
+    if (s.length > 4096 || /[\n\r]/.test(s) || /^[a-z][a-z0-9+.-]*:\/\//i.test(s) && !/^file:/i.test(s)) continue;
+    let p = s.trim();
+    if (/^file:/i.test(p)) { try { p = decodeURIComponent(new URL(p).pathname); } catch { continue; } }
+    if (!p) continue;
+    const v = checkRead(p, home);
+    if (v.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v.reason}`);
+    if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}, a hidden or app-data file that can hold sign-ins.`), always: true };
+  }
   if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true };
   // An allowlist: readOnlyHint (the server's own claim) makes a call SAFE only when its name reads (a read verb in it)
   // and nothing in it writes. Everything else asks.
   const words = snake(name).split('_').filter(Boolean);
-  if (a.readOnlyHint === true && words.some((w) => MCP_READS.has(w)) && !MCP_WRITES.test(snake(name))) return verdict(SAFE);
+  if (a.readOnlyHint === true && words.some((w) => MCP_READS.has(w)) && !MCP_WRITES.test(snake(name))) return pathAsk ?? verdict(SAFE);
   // Owner: anything that might change, send or delete asks every time.
   return { ...verdict(ASK, "The server doesn't say it only reads."), always: true };
 }

@@ -124,6 +124,50 @@ func resolveWin(_ target: String) -> Win? {
 }
 
 func winInfo(_ w: Win) -> [String: Any] { ["id": w.id, "app": w.app, "title": w.title, "bounds": [Int(w.x), Int(w.y), Int(w.w), Int(w.h)]] }
+/// winInfo plus what the window shows (its file, its address): for every result that carries the window's text or picture.
+func winShows(_ w: Win) -> [String: Any] { winInfo(w).merging(shows(w)) { a, _ in a } }
+/// The file a window's document is (AXDocument, a file URL), as a path; nil for none.
+func documentPath(_ win: AXUIElement) -> String? {
+    guard let d = str(win, "AXDocument") ?? (attr(win, "AXDocument") as? URL)?.absoluteString, let u = URL(string: d), u.isFileURL else { return nil }
+    return u.path
+}
+/// A browser window's address: on the window (Safari) or on the web area inside it (Chromium browsers).
+func browserURL(_ win: AXUIElement) -> String? {
+    if let u = str(win, "AXURL") ?? (attr(win, "AXURL") as? URL)?.absoluteString { return u }
+    var queue: [AXUIElement] = [win], seen = 0
+    while !queue.isEmpty, seen < 400 {
+        let el = queue.removeFirst(); seen += 1
+        if str(el, kAXRoleAttribute) == "AXWebArea", let u = (attr(el, "AXURL") as? URL)?.absoluteString ?? str(el, "AXURL") { return u }
+        if let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf: kids.prefix(40)) }
+    }
+    return nil
+}
+/// What a window shows that the sidecar checks like a file read before any of it reaches the model: its document's
+/// file ("document") and, in a browser, its address ("url": a file:// page is a file).
+func shows(_ w: Win) -> [String: Any] {
+    let ax = AXUIElementCreateApplication(w.pid)
+    AXUIElementSetMessagingTimeout(ax, 0.25)
+    guard let win = axWindow(ax, w) else { return [:] }
+    var o: [String: Any] = [:]
+    if let d = documentPath(win) { o["document"] = d }
+    if BROWSERS.contains(w.app), let u = browserURL(win) { o["url"] = u }
+    return o
+}
+/// The files open in the plan's window and in its app's focused window (keys go there): typing, keys and saving in
+/// either can change that file (editors autosave), so each needs the user's yes before a step acts there.
+func openDocuments(_ app: AXUIElement, _ w: Win) -> [String] {
+    var out: [String] = []
+    for win in [axWindow(app, w), attr(app, kAXFocusedWindowAttribute).map { $0 as! AXUIElement }].compactMap({ $0 }) {
+        if let d = documentPath(win), !out.contains(d) { out.append(d) }
+    }
+    return out
+}
+/// A save chord that opens a Save panel (where any folder can be picked): Save As (cmd+shift+s, cmd+opt+shift+s),
+/// or cmd+s in a window with no file yet.
+func saveOpensPanel(_ combo: String, hasDocument: Bool) -> Bool {
+    guard let (flags, key) = parseKey(combo), key == 1, flags.contains(.maskCommand), !flags.contains(.maskControl) else { return false }
+    return flags.contains(.maskShift) || !hasDocument
+}
 
 func run(_ path: String, _ args: [String]) -> Int32 {
     let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
@@ -1786,6 +1830,12 @@ case "--self-test":
     for l in ["Save", "Cancel", "OK", "Keep Both", "Open"] { check("\"\(l)\" is a normal click", !risky(l)) }
     for k in ["cmd+q", "Command+Q", "cmd+delete", "cmd+backspace", "cmd+opt+delete", "cmd+shift+delete", "cmd+option+shift+delete"] { check("\(k) needs a yes", riskyKey(k) != nil) }
     for k in ["cmd+s", "cmd+w", "delete", "return", "cmd+a", "cmd+z", "cmd+shift+s", "shift+return"] { check("\(k) is a normal key", riskyKey(k) == nil) }
+    // Seventh review F1: Save As, or cmd+s with no file yet, opens a Save panel (any folder): it asks; cmd+s on a file
+    // doesn't open one (the file itself is asked about before any step acts in its window).
+    for k in ["cmd+shift+s", "shift+cmd+s", "cmd+opt+shift+s", "S+CMD+SHIFT"] { check("\(k) opens a Save panel", saveOpensPanel(k, hasDocument: true)) }
+    check("cmd+s with no file opens a Save panel", saveOpensPanel("cmd+s", hasDocument: false))
+    check("cmd+s on a file saves it in place", !saveOpensPanel("cmd+s", hasDocument: true))
+    for k in ["s", "shift+s", "cmd+a", "ctrl+s", "cmd+ctrl+s"] { check("\(k) is not a save", !saveOpensPanel(k, hasDocument: false)) }
     // Review M1/M2: the aliases pressKey reads, any cmd+q chord, and sending by keyboard.
     for k in ["cmd+back", "cmd+opt+back", "command+del", "cmd+forwarddelete", "cmd+shift+q", "cmd+opt+shift+q", "ctrl+cmd+q", "cmd+return", "cmd+enter", "cmd+shift+d"] { check("\(k) needs a yes", riskyKey(k) != nil) }
     // Review B1: any order, as pressKey reads it.
@@ -1854,18 +1904,8 @@ case "front":
         let win = w as! AXUIElement
         if let t = str(win, kAXTitleAttribute) { title = t }
         // Browsers put the address on the window (Safari) or on the web area inside it (Chromium browsers).
-        if BROWSERS.contains(app.localizedName ?? "") {
-            var url = str(win, "AXURL") ?? (attr(win, "AXURL") as? URL)?.absoluteString
-            if url == nil {
-                var queue: [AXUIElement] = [win], seen = 0
-                while url == nil, !queue.isEmpty, seen < 400 {
-                    let el = queue.removeFirst(); seen += 1
-                    if str(el, kAXRoleAttribute) == "AXWebArea" { url = (attr(el, "AXURL") as? URL)?.absoluteString ?? str(el, "AXURL"); if url != nil { break } }
-                    if let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf: kids.prefix(40)) }
-                }
-            }
-            if let u = url { o["url"] = u }
-        }
+        if BROWSERS.contains(app.localizedName ?? ""), let u = browserURL(win) { o["url"] = u }
+        if let d = documentPath(win) { o["document"] = d }
     }
     if !title.isEmpty { o["title"] = title }
     out(o)
@@ -1915,7 +1955,7 @@ case "capture":
     }
     guard let w = resolve(target) else { fail("No matching window is open\(target.hasPrefix("app:") ? " for \(target.dropFirst(4))" : "").") }
     guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Hydra may need Screen Recording permission.") }
-    var o: [String: Any] = ["ok": true, "file": file, "window": winInfo(w)]
+    var o: [String: Any] = ["ok": true, "file": file, "window": winShows(w)]
     if let px = shrink() {
         o["pixels"] = px
         if let r = shotArea(w, windows(), px) { o["area"] = [Int(r.minX), Int(r.minY), Int(r.width), Int(r.height)] }
@@ -1936,9 +1976,9 @@ case "ui":
     let uiApp = axApp(w)
     let items = walk(uiApp, w).map { $0.1 }
     // ui <target> controls: just the controls (to re-find ids before acting), without the page's text.
-    if args.count >= 3, args[2] == "controls" { out(["ok": true, "window": winInfo(w), "controls": items]) }
+    if args.count >= 3, args[2] == "controls" { out(["ok": true, "window": winShows(w), "controls": items]) }
     let scan = scanText(uiApp, w)
-    out(["ok": true, "window": winInfo(w), "controls": items, "texts": pageText(uiApp, w, cap: 5000, scan: scan), "elsewhere": offscreenText(uiApp, w, cap: 4000, scan: scan), "note": items.isEmpty ? "This app shares no controls. Use a screenshot plus click at coordinates instead." : ""])
+    out(["ok": true, "window": winShows(w), "controls": items, "texts": pageText(uiApp, w, cap: 5000, scan: scan), "elsewhere": offscreenText(uiApp, w, cap: 4000, scan: scan), "note": items.isEmpty ? "This app shares no controls. Use a screenshot plus click at coordinates instead." : ""])
 
 case "locate-control":
     guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to read other apps.") }
@@ -2027,6 +2067,8 @@ case "act":
     }
     var controls = walk(app, w)
     var done: [String] = []
+    // Files the user said yes to acting in (the sidecar checked each against its write rules first).
+    let docOk = Set((plan["docOk"] as? [String]) ?? [])
     progress(["ev": "start", "window": winInfo(w), "steps": steps.count])
     // What a step is about to touch (global points) and what it types. Password fields only send dots.
     func emitStep(_ i: Int, _ what: String, _ e: AXUIElement?, at: CGPoint? = nil, label: String = "", text: String? = nil) {
@@ -2098,6 +2140,10 @@ case "act":
         if ["key", "type", "click_at", "hover"].contains(what), frontPid() != w.pid, !bringToFront(w, app) {
             let other = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
             out(["ok": false, "error": "Step \(i + 1): \(other) is in front instead of \(w.app), so I stopped before typing into the wrong app.", "done": done])
+        }
+        // A window with a file open: anything done there can change that file, so stop and ask (with its path) first.
+        if what != "wait", let d = openDocuments(app, w).first(where: { !docOk.contains($0) }) {
+            out(["ok": false, "needsConfirm": true, "step": i, "document": d, "app": w.app, "label": "document", "why": "\(w.app) has \(d) open: what I type or save there goes into that file.", "done": done])
         }
         if what == "click_at", let x = s["x"] as? Double, let y = s["y"] as? Double {
             let gx = (s["global"] as? Bool ?? false) ? x : w.x + x, gy = (s["global"] as? Bool ?? false) ? y : w.y + y
@@ -2380,6 +2426,8 @@ case "act":
                !isEditable(focusedEl(app)) {
                 needs.append((s["key"] as? String ?? "", "\(s["key"] ?? "") outside a text field is a shortcut in \(w.app) (it may delete, archive or send)."))
             }
+            // Save As, or saving a document with no file yet, opens a panel where any folder can be picked.
+            if saveOpensPanel(combo, hasDocument: !openDocuments(app, w).isEmpty) { needs.append((s["key"] as? String ?? "", "Pressing \(s["key"] ?? "") opens a Save panel in \(w.app): it can make a new file in any folder.")) }
             // Cmd+D picks "Don't Save" (or "Delete") in a save or delete sheet.
             if pk.key == 2, pk.flags.contains(.maskCommand), let b = sheetRiskyButton(app) { needs.append((b, "Cmd+D would press \"\(b)\" in \(w.app).")) }
             // Delete or forward delete outside a text field deletes what's selected (mail, photos, files, list rows).
@@ -2486,9 +2534,9 @@ case "act":
         let w2 = (switched ? windows().first { $0.id == w.id } : nil) ?? resolve(target) ?? w
         let app2 = w2.pid == w.pid ? app : axApp(w2)
         let now = settle(app2, w2).map { $0.1 }
-        out(["ok": true, "done": done, "window": winInfo(w2), "controls": now, "texts": pageText(app2, w2, cap: 2000)])
+        out(["ok": true, "done": done, "window": winShows(w2), "controls": now, "texts": pageText(app2, w2, cap: 2000)])
     }
-    out(["ok": true, "done": done, "window": winInfo(w)])
+    out(["ok": true, "done": done, "window": winShows(w)])
 
 case "guide":
     runGuide(Array(args.dropFirst()))
