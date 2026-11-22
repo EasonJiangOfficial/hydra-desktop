@@ -137,7 +137,7 @@ pub fn bridge_js(token: &str) -> String {
 const BRIDGE_JS: &str = r#"(() => {
   if (location.origin !== 'https://hydra-olive-one.vercel.app' || window.hydraDesktop || window.top !== window) return;
   const T = '__HYDRA_TOKEN__';
-  let snap = { state: 'Asleep', micLevel: 0, outputLevel: 0, detached: false, muted: false, paused: false, reply: null, heard: null, ui: null };
+  let snap = { state: 'Asleep', wake: 'off', micLevel: 0, outputLevel: 0, detached: false, muted: false, paused: false, reply: null, heard: null, ui: null };
   const subs = new Set(), waiting = new Map();
   // Request ids start at a random point on each page load, so an answer meant for the page before a reload never
   // resolves a call on this one (they stay 9 digits, as the app checks).
@@ -307,6 +307,7 @@ pub fn clean_push(msg: &Value) -> Option<Value> {
     let text = |v: &Value| v.as_str().map(|t| t.chars().take(20_000).collect::<String>());
     let mut out = serde_json::Map::new();
     if let Some(s) = state { out.insert("state".into(), json!(s)); }
+    if let Some(w) = msg.get("wake").and_then(Value::as_str).filter(|w| ["phrase", "off"].contains(w)) { out.insert("wake".into(), json!(w)); }
     if let Some(v) = level("micLevel") { out.insert("micLevel".into(), json!(v)); }
     if let Some(v) = level("outputLevel") { out.insert("outputLevel".into(), json!(v)); }
     for k in ["detached", "muted", "paused"] {
@@ -480,6 +481,8 @@ mod tests {
         let p = |v: Value| clean_push(&v);
         assert_eq!(p(json!({ "state": "Speaking", "outputLevel": 1.7, "token": "x" })), Some(json!({ "state": "Speaking", "outputLevel": 1.0 })));
         assert_eq!(p(json!({ "state": "Dancing" })), None);
+        assert_eq!(p(json!({ "state": "Listening", "wake": "phrase" })), Some(json!({ "state": "Listening", "wake": "phrase" })), "waiting for the key phrase");
+        assert_eq!(p(json!({ "state": "Listening", "wake": "clap" })), Some(json!({ "state": "Listening" })), "only phrase or off");
         assert_eq!(p(json!({ "muted": true, "paused": false })), Some(json!({ "muted": true, "paused": false })));
         assert_eq!(p(json!({ "reply": { "id": "r1", "text": "Hello", "final": true, "extra": 1 } })), Some(json!({ "reply": { "id": "r1", "text": "Hello", "final": true } })));
         assert_eq!(p(json!({ "reply": null })), Some(json!({ "reply": null })));

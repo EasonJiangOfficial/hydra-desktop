@@ -2386,7 +2386,10 @@ function panelState() {
 const SPEECH_LANGS = ['auto', 'en-US', 'ar-SA', 'he-IL', 'es-ES', 'fr-FR', 'de-DE', 'it-IT', 'pt-BR', 'ja-JP', 'ko-KR', 'zh-CN', 'hi-IN'];
 const speechLangId = () => (SPEECH_LANGS.includes(config.speechLang) ? config.speechLang : 'auto');
 let langInfo = null; // what the voice helper settled on for it: { id, engine, online }
+// The helper listens for the key phrase (and only for it) while this is true; the overlay tells the bridge (wake).
+const phraseListening = () => VOICE_OK && !!config.voice && voiceReady() && phraseOn() && !power.asleep;
 const voiceConfig = () => {
+  ui({ kind: 'wake_phrase', on: phraseListening() });
   send({ type: 'voice_config', enabled: VOICE_OK && config.voice && voiceReady(), mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn() && !power.asleep, wakeName: config.wakeName || '', lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
   // The native listening pill beside the cursor stays hidden while the notch capsule is where I appear.
   send({ type: 'pill', on: notchMode() === 'off' });
@@ -3179,6 +3182,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     notchUi();
     ui({ kind: 'size', size: sizeNow() });
     ui({ kind: 'orb_mode', detached: orbDetached() }); send({ type: 'orb_mode', detached: orbDetached() });
+    ui({ kind: 'wake_phrase', on: phraseListening() });
     ui({ kind: 'look', look: config.look ?? 'hydra' });
     if (config.onboarded) ui({ kind: 'greet' });
     agents.sync();

@@ -11,6 +11,9 @@ type UiAction = { kind: 'navigate'; href: string } | { kind: 'openPanel'; param:
   | { kind: 'setScope'; scope: 'all' | 'personal' | 'ugc' } | { kind: 'highlight'; selector: string };
 interface HydraDesktopState {
   state: 'Asleep' | 'Listening' | 'Thinking' | 'Speaking';
+  wake: 'phrase' | 'off'; // version 3, added: 'phrase' while awake and idle, when only the key phrase listens (say
+                          // "Hey Hydra" first; nothing else is answered); 'off' otherwise. A real take is
+                          // state 'Listening' with wake 'off'. Absent from an older app: treat as 'off'.
   micLevel: number;    // 0..1, the owner's microphone while he talks (0 otherwise)
   outputLevel: number; // 0..1, Hydra's voice while it speaks (0 otherwise)
   detached: boolean;   // version 2: true when the orb floats on the desktop instead of living in this window
@@ -68,3 +71,6 @@ per-launch token and a request id (`id=<n>`, starting at a random point on each 
 that call and is not merged into the state. `setup` and `requestPermission` are answered by the shell (permissions)
 and the sidecar (pairing, Claude); `pair`, `signInClaude` and `unpair` by the sidecar. The pairing code is letters,
 digits and dashes (6 to 20); the device key it is traded for goes to the Keychain only and never to the page.
+
+`wake` is additive: `state` keeps its four values, so a page that reads only `state` works as before. A page that
+knows `wake` shows the idle Mac as waiting for the key phrase (Say "Hey Hydra") instead of listening.

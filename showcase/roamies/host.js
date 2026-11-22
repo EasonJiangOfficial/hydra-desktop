@@ -440,14 +440,17 @@
   // Attached (the default): the orb lives in the Hydra window (the web app draws it from the bridge), so none floats
   // on the desktop. Detached: the docked desktop orb. The sidecar says which (orb_mode); drawings still use this layer.
   if (Roamie.orbAttached == null) Roamie.orbAttached = true;
-  let micLevel = 0, hearing2 = false, orbSent = '', orbAt = 0;
+  let micLevel = 0, hearing2 = false, orbSent = '', orbAt = 0, wakePhrase = false;
+  // wake (docs/BRIDGE.md): 'phrase' while awake and idle with only the key phrase listening (no take is open, so
+  // nothing said is answered until "Hey Hydra"); 'off' in a real take, thinking, speaking, asleep or with the phrase off.
   function orbNow() {
-    const out = Roamie.voiceOut?.playing() ? Roamie.voiceOut.level() : 0;
-    const state = Roamie.asleep ? 'Asleep' : Roamie.voiceOut?.playing() ? 'Speaking' : hearing2 ? 'Listening' : responding ? 'Thinking' : 'Listening';
-    return { state, micLevel: hearing2 ? micLevel : 0, outputLevel: out, detached: !Roamie.orbAttached };
+    const speaking = !!Roamie.voiceOut?.playing(), out = speaking ? Roamie.voiceOut.level() : 0;
+    const state = Roamie.asleep ? 'Asleep' : speaking ? 'Speaking' : hearing2 ? 'Listening' : responding ? 'Thinking' : 'Listening';
+    const wake = !Roamie.asleep && wakePhrase && !speaking && !hearing2 && !responding ? 'phrase' : 'off';
+    return { state, wake, micLevel: hearing2 ? micLevel : 0, outputLevel: out, detached: !Roamie.orbAttached };
   }
   function pushOrb(force = false) {
-    const o = orbNow(), key = `${o.state}|${o.micLevel.toFixed(2)}|${o.outputLevel.toFixed(2)}|${o.detached}`, now = performance.now();
+    const o = orbNow(), key = `${o.state}|${o.wake}|${o.micLevel.toFixed(2)}|${o.outputLevel.toFixed(2)}|${o.detached}`, now = performance.now();
     if (!force && key === orbSent && now - orbAt < 2000) return;
     orbSent = key; orbAt = now;
     invoke('orb_state', { msg: o }).catch(() => {});
@@ -552,6 +555,7 @@
     if (m.kind === 'sound') { if (Roamie.sfx) Roamie.sfx.enabled = m.on; return; }
     // Hydra asleep (5 minutes without talk, or the sleep word) or awake: the orb holds still and pale while asleep.
     if (m.kind === 'orb_mode') { Roamie.orbAttached = !m.detached; pushOrb(true); return; }
+    if (m.kind === 'wake_phrase') { wakePhrase = !!m.on; pushOrb(true); return; }
     if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
     // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
     if (m.kind === 'listen_after') { Roamie.sfx?.play('hydra_wake'); waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
