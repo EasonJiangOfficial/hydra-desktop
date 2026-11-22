@@ -1054,7 +1054,8 @@ final class Voice {
 
     // Never asks for permission: wake listening starts only once talking has been allowed.
     private func wakeAllowed(_ now: Double) -> Bool {
-        wakeOn && !wakeHold && !dryRun && now >= wakeCooldownUntil && now >= wakeRetryAt && authorized(wake: true)
+        // Never while asleep (owner: asleep, only a double clap or a tap wakes it), whatever the sidecar last said.
+        wakeOn && !asleep && !wakeHold && !dryRun && now >= wakeCooldownUntil && now >= wakeRetryAt && authorized(wake: true)
     }
 
     private func startWake(_ now: Double) {
@@ -1069,9 +1070,12 @@ final class Voice {
     }
 
     /// Another mic was picked: wake listening, or a mic kept open between takes, starts again on it next time.
-    func micChanged() {
-        // Another mic may have echo cancellation: try barge-in again.
+    /// Another mic (picked, or the Mac's default input changed): it may have echo cancellation, so try barge-in again.
+    func retryBarge() {
         if bargeBroken { bargeBroken = false; bargeOn = bargeWanted; bargeRetryAt = 0; emit(["type": "barge_available"]) }
+    }
+    func micChanged() {
+        retryBarge()
         if phase == .wake { stopWake() }
         if phase == .idle { stopAudio(close: true) }
     }
@@ -1630,6 +1634,9 @@ if args.contains("--no-mute") { OutputMute.enabled = false }
 if let i = args.firstIndex(of: "--chord"), i + 1 < args.count { voice.setChord(args[i + 1].components(separatedBy: ",")) }
 if LiveTest.url != nil { OutputMute.enabled = false; voice.setWake(true); LiveTest.start() }
 let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in voice.tick() }
+// The Mac's default input changing (headset in or out): barge-in gets another try with echo cancellation.
+var defaultInputAddr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultInputAddr, DispatchQueue.main) { _, _ in voice.retryBarge() }
 RunLoop.main.add(timer, forMode: .common)
 Thread.detachNewThread {
     while let line = readLine() {
