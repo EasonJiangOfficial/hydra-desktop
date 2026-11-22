@@ -393,20 +393,29 @@ let MESSENGERS: Set<String> = ["Messages", "Slack", "WhatsApp", "Mail", "Discord
 /// single-line field of any app could submit a form or a dialog, unless it is a search, address or find field; a
 /// multi-line box could send when it sits in web content (chat boxes in browsers and Electron apps) or in a chat app.
 func sendField(app: String, role: String?, subrole: String?, label: String, inWeb: Bool) -> Bool {
+    // Only a real search field, or a native address or search bar, is let off; a chat box whose placeholder names a
+    // channel ("Message #find-a-buddy") is not.
     if role == "AXSearchField" || subrole == "AXSearchField" { return false }
-    if label.range(of: #"(?i)\b(search|address|url|find|filter|go to)\b"#, options: .regularExpression) != nil { return false }
-    switch role ?? "" {
+    if !inWeb, ["AXTextField", "AXComboBox"].contains(role ?? ""), label.range(of: #"(?i)\b(search|address|url|go to)\b"#, options: .regularExpression) != nil { return false }
+    // Focus the helper can't see (Electron apps often): could submit.
+    guard let role else { return true }
+    switch role {
     case "AXTextField", "AXComboBox", "AXSecureTextField": return true
     case "AXTextArea": return inWeb || MESSENGERS.contains(app)
+    // Any field in a browser's or a chat app's web content (contenteditable shows as a group) may submit.
+    case "AXGroup": return (inWeb && BROWSERS.contains(app)) || MESSENGERS.contains(app)
     default: return MESSENGERS.contains(app)
     }
 }
+/// A line break in any form: LF, CR (and CR LF, one Character in Swift), NEL, line and paragraph separators, ETX.
+func hasLineBreak(_ s: String) -> Bool { s.unicodeScalars.contains { [0x0A, 0x0D, 0x85, 0x2028, 0x2029, 0x03].contains($0.value) } }
 /// The labels and reasons Return (or space, or a typed line break) in the front window would need a yes for: the
 /// window's or sheet's default button when it deletes, sends or pays; a focused risky button; a field that could send.
-func sendChecks(_ app: AXUIElement, appName: String, returnKey: Bool) -> [(label: String, why: String)] {
+/// target: the field the step acts on (set, fill), else whatever has keyboard focus.
+func sendChecks(_ app: AXUIElement, appName: String, returnKey: Bool, target: AXUIElement? = nil) -> [(label: String, why: String)] {
     var out: [(label: String, why: String)] = []
     if returnKey, let b = defaultButtonTitle(app), risky(b) { out.append((b, "Return would press \"\(b)\" in \(appName).")) }
-    let f = focusedEl(app)
+    let f = target ?? focusedEl(app)
     let role = f.map { axRole($0) }
     if let f, ["AXButton", "AXLink", "AXMenuItem", "AXRadioButton", "AXCheckBox", "AXPopUpButton"].contains(role ?? "") {
         let l = str(f, kAXTitleAttribute) ?? str(f, kAXDescriptionAttribute) ?? ""
@@ -421,6 +430,17 @@ func sendChecks(_ app: AXUIElement, appName: String, returnKey: Bool) -> [(label
         }
     }
     return out
+}
+/// A risky button on a sheet of the focused window ("Don't Save", "Delete"…): what Cmd+D may press. nil when none.
+func sheetRiskyButton(_ app: AXUIElement) -> String? {
+    guard let f = attr(app, kAXFocusedWindowAttribute) else { return nil }
+    let win = f as! AXUIElement
+    for sheet in (attr(win, kAXChildrenAttribute) as? [AXUIElement] ?? []) where str(sheet, kAXRoleAttribute) == "AXSheet" {
+        for b in (attr(sheet, kAXChildrenAttribute) as? [AXUIElement] ?? []) where str(b, kAXRoleAttribute) == "AXButton" {
+            if let t = str(b, kAXTitleAttribute), risky(t) { return t }
+        }
+    }
+    return nil
 }
 /// A yes covers only what was asked about: the same words, compared without case or outer spaces.
 func sameYes(_ s: [String: Any], _ label: String) -> Bool {
@@ -1179,10 +1199,12 @@ func shortcutRoute(item: MenuShortcut, appInFront: Bool, trustMenu: Bool) -> Sho
 /// Cmd shortcuts in the background: press the app's menu item that has that shortcut (keys sent to a background
 /// app don't reach its menus, so Cmd+S typed the line but never saved). press: false only looks, so an item that
 /// could be pressed still reads .pressed.
+/// The one-character key names, by key code (for matching a menu item's shortcut).
+var KEY_CHARS: [CGKeyCode: String] { Dictionary(KEYS.filter { $0.key.count == 1 }.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a }) } // computed: KEYS is set up further down the file
 func pressMenuShortcut(_ app: AXUIElement, _ combo: String, press: Bool = true) -> MenuShortcut {
-    let parts = combo.lowercased().replacingOccurrences(of: " ", with: "").split(separator: "+").map(String.init)
-    guard let key = parts.last, key.count == 1, parts.contains(where: { ["cmd", "command", "meta", "super"].contains($0) }) else { return .notFound }
-    let shift = parts.contains("shift"), opt = parts.contains { ["opt", "option", "alt"].contains($0) }, ctrl = parts.contains { ["ctrl", "control"].contains($0) }
+    // Read by parseKey, like every other key route: a chord it can't read (meta+q, two keys) presses nothing.
+    guard let (flags, code) = parseKey(combo), flags.contains(.maskCommand), let key = KEY_CHARS[code] else { return .notFound }
+    let shift = flags.contains(.maskShift), opt = flags.contains(.maskAlternate), ctrl = flags.contains(.maskControl)
     let want = (shift ? 1 : 0) | (opt ? 2 : 0) | (ctrl ? 4 : 0)
     guard let bar = attr(app, kAXMenuBarAttribute) else { return .notFound }
     var stack: [(AXUIElement, Int)] = [(bar as! AXUIElement, 0)]
@@ -1775,6 +1797,16 @@ case "--self-test":
     check("Return in a search field is a search", !sendField(app: "Finder", role: "AXTextField", subrole: "AXSearchField", label: "", inWeb: false))
     check("Return in the address bar opens a page", !sendField(app: "Safari", role: "AXTextField", subrole: nil, label: "Smart Search Field address", inWeb: false))
     check("Return on a web page outside a field isn't a send", !sendField(app: "Safari", role: "AXWebArea", subrole: nil, label: "", inWeb: true))
+    // Third review: B2 every line break form; m2 a chat box named after a channel, unseen focus, contenteditable.
+    for t in ["a\nb", "a\rb", "a\r\nb", "a\u{2028}b", "a\u{2029}b", "a\u{85}b", "a\u{3}b"] { check("\(t.unicodeScalars.map { String($0.value, radix: 16) }) is a line break", hasLineBreak(t)) }
+    check("plain text has no line break", !hasLineBreak("hello there"))
+    check("a Slack box \"Message #find-a-buddy\" could send", sendField(app: "Slack", role: "AXTextArea", subrole: nil, label: "Message #find-a-buddy", inWeb: true))
+    check("a web chat box mentioning search could send", sendField(app: "Google Chrome", role: "AXTextField", subrole: nil, label: "Search or ask anything", inWeb: true))
+    check("focus the helper can't see could submit", sendField(app: "SomeElectronApp", role: nil, subrole: nil, label: "", inWeb: false))
+    check("a contenteditable box in a browser could send", sendField(app: "Safari", role: "AXGroup", subrole: nil, label: "", inWeb: true))
+    // B3: menu shortcuts read through parseKey: meta/super chords press nothing anywhere.
+    check("meta+q and super+shift+d press nothing", parseKey("meta+q") == nil && parseKey("super+shift+d") == nil && parseKey("meta+shift+d") == nil)
+    check("the menu route reads q from cmd+q", parseKey("cmd+q").map { KEY_CHARS[$0.key] } == "q")
     // Review M6: a yes covers the words asked about, not what is there now.
     check("a yes for Delete covers Delete", sameYes(["confirmed": true, "confirmedLabel": "Delete"], " delete "))
     check("a yes for Delete draft doesn't cover Delete account", !sameYes(["confirmed": true, "confirmedLabel": "Delete draft"], "Delete account"))
@@ -2071,7 +2103,7 @@ case "act":
             if (what == "click" || what == "press_button"), case let l = (info["label"] as? String) ?? "", risky(l), !sameYes(s, l) {
                 out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
             }
-            if what == "set", let text = s["text"] as? String, text.contains(where: { $0 == "\n" || $0 == "\r" }), case let needs = sendChecks(app, appName: w.app, returnKey: true), !needs.isEmpty,
+            if what == "set", let text = s["text"] as? String, hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: e), !needs.isEmpty,
                case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
                 out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": "A line break acts as Return. " + needs.map(\.why).joined(separator: " "), "done": done])
             }
@@ -2151,7 +2183,7 @@ case "act":
             }
             let text = s["text"] as? String ?? "", into = focusedEl(app), before = into.flatMap { str($0, kAXValueAttribute) }
             // A typed line break acts as Return: in a chat, mail or web form field that can send.
-            if text.contains(where: { $0 == "\n" || $0 == "\r" }), case let needs = sendChecks(app, appName: w.app, returnKey: true), !needs.isEmpty,
+            if hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: into), !needs.isEmpty,
                case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
                 out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": "A line break acts as Return. " + needs.map(\.why).joined(separator: " "), "done": done])
             }
@@ -2170,10 +2202,6 @@ case "act":
         case "fill":
             // A form field by its label, placeholder or id: put the cursor in it, replace its text, check it took.
             let text = s["text"] as? String ?? ""
-            if text.contains(where: { $0 == "\n" || $0 == "\r" }), case let needs = sendChecks(app, appName: w.app, returnKey: true), !needs.isEmpty,
-               case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
-                out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": "A line break acts as Return. " + needs.map(\.why).joined(separator: " "), "done": done])
-            }
             var s = s
             if s["id"] == nil, let n = Int((s["field"] as? String ?? "").trimmingCharacters(in: .whitespaces)) { s["id"] = n }
             let name = (s["field"] as? String) ?? ""
@@ -2192,6 +2220,12 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): no text field called \"\(name)\" here. Check its label with read_window.", "done": done])
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
+            // A line break in the text acts as Return in the field it goes into (checked on that field, not on what had
+            // focus before): its form's default button, a send box, a dialog's risky default.
+            if hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: e), !needs.isEmpty,
+               case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": "A line break acts as Return. " + needs.map(\.why).joined(separator: " "), "done": done])
+            }
             emitStep(i, "fill", e, label: label, text: text)
             let isDate = ["AXDateField", "AXTimeField", "AXDateTimeArea"].contains(axRole(e))
             func took(_ r: (ok: Bool, shows: String)) -> Bool {
@@ -2323,9 +2357,16 @@ case "act":
             // Everything this key could do that needs a yes, asked once: the chord itself (cmd+q…), and for Return or
             // Enter with any modifiers (or space on a button) the default button, a focused risky button and a field
             // that could send. The yes names all of it; if any of it changed by now, it asks again.
+            // One parser for every key route: a chord parseKey can't read (meta+q, two keys) is refused here, before the
+            // menu route or the keyboard could press anything.
+            guard let pk = parseKey(combo) else { out(["ok": false, "error": "Step \(i + 1): unknown key \(s["key"] ?? "") (use cmd, ctrl, opt, shift and one key)", "done": done]) }
             var needs: [(label: String, why: String)] = []
             if let does = riskyKey(combo) { needs.append((s["key"] as? String ?? "", "Pressing \(s["key"] ?? "") \(does).")) }
-            if let pk = parseKey(combo), pk.key == 36 || pk.key == 49 { needs += sendChecks(app, appName: w.app, returnKey: pk.key == 36) }
+            if pk.key == 36 || pk.key == 49 { needs += sendChecks(app, appName: w.app, returnKey: pk.key == 36) }
+            // Cmd+D picks "Don't Save" (or "Delete") in a save or delete sheet.
+            if pk.key == 2, pk.flags.contains(.maskCommand), let b = sheetRiskyButton(app) { needs.append((b, "Cmd+D would press \"\(b)\" in \(w.app).")) }
+            // Delete or forward delete outside a text field deletes what's selected (mail, photos, files, list rows).
+            if pk.key == 51 || pk.key == 117, !isEditable(focusedEl(app)) { needs.append(("delete selection", "Delete here would delete what's selected in \(w.app).")) }
             if !needs.isEmpty, case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
                 out(["ok": false, "needsConfirm": true, "step": i, "label": both, "why": needs.map(\.why).joined(separator: " "), "done": done])
             }
