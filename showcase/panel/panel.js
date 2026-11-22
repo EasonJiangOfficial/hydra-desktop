@@ -222,27 +222,8 @@
   }
   // One button for updates, updated in place (not rebuilt) so it keeps focus: Check for updates, then Update to x
   // (it downloads, installs and restarts), then Done. "Up to date" shows for a few seconds after a check.
-  const FRESH = 6000;
-  let freshTimer = 0;
-  function updateButton() {
-    $('head-update').hidden = true; return; // Hydra Desktop has no self-updater
-    const u = state.update, b = $('head-update'), v = u.available;
-    const fresh = u.result?.ok && Date.now() - (u.result.at ?? 0) < FRESH;
-    const [label, aria, kind, off] =
-      u.done ? ['Done', `Roamies ${u.done} is installed. Restarting`, 'ghost', true]
-      : u.installing ? ['Updating…', `Installing Roamies ${v}`, 'ghost', true]
-      : v ? (u.page ? [`Get ${v}`, `Open the download page for Roamies ${v}`, 'primary', false] : [`Update to ${v}`, `Install Roamies ${v} and restart`, 'primary', false])
-      : u.checking ? ['Checking…', 'Checking for updates', 'ghost', true]
-      : fresh ? ['Up to date', `Roamies ${state.version} is up to date`, 'ghost', true]
-      : u.result ? ['Check again', "Couldn't check for updates. Check again", 'ghost', false]
-      : ['Check for updates', 'Check for updates', 'ghost', false];
-    b.hidden = false; b.textContent = label; b.disabled = off;
-    b.className = `px btn mini ${kind}`;
-    b.setAttribute('aria-label', aria);
-    b.title = u.result && !u.result.ok && !v && !u.checking ? u.result.error ?? "Couldn't check for updates." : '';
-    clearTimeout(freshTimer);
-    if (fresh) freshTimer = setTimeout(() => state && updateButton(), FRESH - (Date.now() - u.result.at) + 50);
-  }
+  // Hydra Desktop has no self-updater, so no update button.
+  function updateButton() { $('head-update').hidden = true; }
   $('head-update').addEventListener('click', () => act(state?.update?.available ? 'install_update' : 'update'));
   // Quit asks first: the first press turns it into Confirm for 4 s, the second quits.
   const quitB = $('head-quit');
@@ -250,7 +231,7 @@
   const unarmQuit = () => { clearTimeout(quitTimer); quitB.setAttribute('aria-pressed', 'false'); quitB.setAttribute('aria-label', 'Quit Hydra'); };
   quitB.addEventListener('click', () => {
     if (quitB.getAttribute('aria-pressed') === 'true') { unarmQuit(); act('quit'); return; }
-    quitB.setAttribute('aria-pressed', 'true'); quitB.setAttribute('aria-label', 'Confirm: quit Roamies');
+    quitB.setAttribute('aria-pressed', 'true'); quitB.setAttribute('aria-label', 'Confirm: quit Hydra');
     quitTimer = setTimeout(unarmQuit, 4000);
   });
   const closeB = $('head-close');
@@ -589,7 +570,7 @@
         el('span', { className: 'acct-name' }, p.label, p.on ? el('span', { className: 'led on', role: 'img', 'aria-label': p.method === 'local' ? 'Connected' : 'Signed in', 'data-tip': p.method === 'local' ? 'Connected' : 'Signed in' }) : null),
         p.on ? el('span', { className: 'row-btns' },
           p.key ? changeKey(p) : null,
-          ui.key === p.id ? null : armed(p.signedIn && !p.keySaved ? 'Sign out' : 'Remove', 'Confirm', `signout:${p.id}`, `signout:${p.id}`, `Remove ${p.label} from Roamies`))
+          ui.key === p.id ? null : armed(p.signedIn && !p.keySaved ? 'Sign out' : 'Remove', 'Confirm', `signout:${p.id}`, `signout:${p.id}`, `Remove ${p.label} from Hydra`))
           : state.loggingIn === p.id ? el('span', { className: 'waiting', textContent: 'Signing in…' })
           : p.method === 'oauth' ? (p.key ? el('span', { className: 'links' }, signIn(p), addKey(p)) : signIn(p))
           : addKey(p)),
@@ -1137,11 +1118,11 @@
 
   // ---------------------------------------------------------------- browser preview
   function preview() {
-    document.title = 'Roamies panel (preview with sample data)';
+    document.title = 'Hydra panel (preview with sample data)';
     const at = Date.now(), q = new URLSearchParams(location.search);
     const CLAUDE_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
     const s = {
-      version: '0.9.0', os: /Win/.test(navigator.platform) ? 'win' : 'mac',
+      version: '1.0.0', os: /Win/.test(navigator.platform) ? 'win' : 'mac',
       status: { state: 'ready', text: 'Ready' }, busy: false, canNew: true,
       model: { provider: 'anthropic', id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', providerLabel: 'Anthropic' },
       providers: [
@@ -1172,7 +1153,7 @@
         { at: at - 9.4 * 60e3, kind: 'ask', text: 'what does this error mean' },
       ],
       usage: { requests: 14, tokens: 31240 },
-      facts: [{ id: 'f1', text: 'Prefers short answers in the morning' }, { id: 'f2', text: 'Working on the Roamies 1.0 launch, due end of month' }, { id: 'f3', text: 'Has a cat called Miso' }],
+      facts: [{ id: 'f1', text: 'Prefers short answers in the morning' }, { id: 'f2', text: 'Working on the Hydra 1.0 launch, due end of month' }, { id: 'f3', text: 'Has a cat called Miso' }],
       commitments: [{ id: 'c1', text: 'Send the launch email', when: 'Fri 7 Nov, 10:00', overdue: false }, { id: 'c2', text: 'Book the dentist', when: 'Mon 3 Nov, 09:00', overdue: true }],
       jobs: [{ id: 'j1a2b3c', title: 'Tech news', paused: false, next: 'Thu 6 Nov, 08:00', repeat: 'weekdays', last: 'Last: Summed up 6 stories on AI chips and a Mac update', bad: false },
         { id: 'j4d5e6f', title: 'Tidy Downloads', paused: true, next: 'Paused', repeat: 'Fri', last: "Didn't run: Allow File Edits & Commands is off", bad: true }],

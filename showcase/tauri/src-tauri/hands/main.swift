@@ -1300,7 +1300,7 @@ final class DragPill: NSView, NSDraggingSource {
         super.init(frame: frame)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("Roamies app. Drag into the list above.")
+        setAccessibilityLabel("Hydra app. Drag into the list above.")
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
     required init?(coder: NSCoder) { nil }
@@ -1313,7 +1313,7 @@ final class DragPill: NSView, NSDraggingSource {
         drawFrame(bounds, frame: hot || dragging ? Pal.accent : Pal.lineHot, fill: Pal.bg)
         let side = bounds.height - 16
         icon.draw(in: NSRect(x: 10, y: 8, width: side, height: side), from: .zero, operation: .sourceOver, fraction: dragging ? 0.35 : 1, respectFlipped: true, hints: nil)
-        let label = NSAttributedString(string: "Roamies", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), .foregroundColor: Pal.ink])
+        let label = NSAttributedString(string: "Hydra", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), .foregroundColor: Pal.ink])
         let sz = label.size()
         label.draw(at: NSPoint(x: 10 + side + 8, y: (bounds.height - sz.height) / 2))
     }
@@ -1385,8 +1385,8 @@ final class Guide: NSObject {
         title.stringValue = hasPill ? "Drag me into the list above." : "Add me to the list above."
         body.stringValue = kind == "screen"
             ? "Use Screen & System Audio Recording, not the audio-only list."
-            : hasPill ? "Already there? Just switch me on." : "Press + under the list and pick Roamies."
-        panel.setAccessibilityLabel("Roamies permission guide")
+            : hasPill ? "Already there? Just switch me on." : "Press + under the list and pick Hydra."
+        panel.setAccessibilityLabel("Hydra permission guide")
     }
 
     /// The biggest System Settings window, in AppKit coordinates (origin bottom-left of the main screen).
@@ -1793,7 +1793,7 @@ case "capture":
     if target == "screen" {
         // The main display without Roamies on it (shared/shot.swift); older macOS: screencapture, Roamies and all.
         let px = Shot.capture(nil, to: file, png: false, maxPx: maxPx)
-        if px == nil { guard run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file]) == 0 else { fail("Screen capture failed. Roamies may need Screen Recording permission.") } }
+        if px == nil { guard run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file]) == 0 else { fail("Screen capture failed. Hydra may need Screen Recording permission.") } }
         // Its bounds (points) let the caller map pixels back.
         let d = CGDisplayBounds(CGMainDisplayID())
         var o: [String: Any] = ["ok": true, "file": file, "what": "screen", "bounds": [Int(d.minX), Int(d.minY), Int(d.width), Int(d.height)]]
@@ -1802,7 +1802,7 @@ case "capture":
         out(o)
     }
     guard let w = resolve(target) else { fail("No matching window is open\(target.hasPrefix("app:") ? " for \(target.dropFirst(4))" : "").") }
-    guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Roamies may need Screen Recording permission.") }
+    guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Hydra may need Screen Recording permission.") }
     var o: [String: Any] = ["ok": true, "file": file, "window": winInfo(w)]
     if let px = shrink() {
         o["pixels"] = px
@@ -1819,7 +1819,7 @@ case "select":
     out(ok ? ["ok": true, "file": args[1]] : ["ok": false, "cancelled": true])
 
 case "ui":
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to read other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to read other apps.") }
     guard args.count >= 2, let w = resolve(args[1]) else { fail("No matching window is open.") }
     let uiApp = axApp(w)
     let items = walk(uiApp, w).map { $0.1 }
@@ -1829,7 +1829,7 @@ case "ui":
     out(["ok": true, "window": winInfo(w), "controls": items, "texts": pageText(uiApp, w, cap: 5000, scan: scan), "elsewhere": offscreenText(uiApp, w, cap: 4000, scan: scan), "note": items.isEmpty ? "This app shares no controls. Use a screenshot plus click at coordinates instead." : ""])
 
 case "locate-control":
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to read other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to read other apps.") }
     guard args.count >= 3, let w = resolve(args[1]), let id = Int(args[2]) else { fail("usage: locate-control <target> <id>") }
     let items = walk(axApp(w), w)
     guard id >= 1, id <= items.count else { fail("No control \(id) in \(w.app). Read the window again.") }
@@ -1861,7 +1861,7 @@ case "ocr-find":
 case "find-text":
     // Looks through every window of the app ("app:X"), or every window on screen ("screen"), front to back,
     // because the text is often in a window that isn't the frontmost one.
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to read other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to read other apps.") }
     guard args.count >= 3 else { fail("usage: find-text <target> <text>") }
     let t = args[1]
     var wins: [Win]
@@ -1889,7 +1889,7 @@ case "find-text":
     out(["ok": true, "matches": Array(ordered)])
 
 case "act":
-    guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to control other apps.") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to control other apps.") }
     guard args.count >= 2, let data = args[1].data(using: .utf8),
           let plan = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           let steps = plan["steps"] as? [[String: Any]] else { fail("bad plan") }

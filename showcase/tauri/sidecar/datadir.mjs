@@ -103,7 +103,7 @@ export function migrateData({ base = baseDir(), old = oldBase(), agent = false, 
   }
   if (isDir(L.oldDir)) {
     try {
-      writeFileSync(path.join(L.oldDir, 'MOVED.txt'), `Roamies now keeps its data in ${L.dir}\n(settings are ${L.config}).\n\nThis folder and ${L.oldConfig} are the copy from before the move,\nkept in case you go back to an older version. You can delete them.\n`);
+      writeFileSync(path.join(L.oldDir, 'MOVED.txt'), `Hydra now keeps its data in ${L.dir}\n(settings are ${L.config}).\n\nThis folder and ${L.oldConfig} are the copy from before the move,\nkept in case you go back to an older version. You can delete them.\n`);
     } catch (e) { log(`couldn't write MOVED.txt: ${e.message}`); }
   }
   log(`moved data to ${L.dir}`);

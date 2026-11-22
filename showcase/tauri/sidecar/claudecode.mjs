@@ -355,7 +355,7 @@ function sdkOptions(o, resume, link) {
     strictMcpConfig: true,
     mcpServers: { [MCP_SERVER]: bridge.config },
     allowedTools: bridge.allowedTools(),
-    canUseTool: async (name, toolInput) => (name.startsWith(TOOL_PREFIX) ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `${name} is not available in Roamies.` }),
+    canUseTool: async (name, toolInput) => (name.startsWith(TOOL_PREFIX) ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `${name} is not available in Hydra.` }),
     includePartialMessages: true,
     pathToClaudeCodeExecutable: o.executable,
     // No telemetry or other non-essential calls from Claude Code: only the model requests leave this Mac.

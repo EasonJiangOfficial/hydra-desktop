@@ -63,7 +63,7 @@ const full = {
   assert.equal(fs.readFileSync(path.join(t.old, 'sidekick', 'memory.json'), 'utf8'), memory, 'the old copy is kept');
   assert.equal(fs.readFileSync(path.join(t.old, 'sidekick.json'), 'utf8'), settings);
   const moved = fs.readFileSync(path.join(t.old, 'sidekick', 'MOVED.txt'), 'utf8');
-  assert.match(moved, /Roamies now keeps its data in/); assert.ok(moved.includes(D)); assert.match(moved, /You can delete them/);
+  assert.match(moved, /Hydra now keeps its data in/); assert.ok(moved.includes(D)); assert.match(moved, /You can delete them/);
   assert.deepEqual(fs.readdirSync(path.join(t.home, 'Roamies')), ['Data'], 'no temporary folder left');
   if (process.platform !== 'win32') assert.equal((fs.statSync(path.join(D, 'memory.json')).mode & 0o777).toString(8), '600', 'still private');
 

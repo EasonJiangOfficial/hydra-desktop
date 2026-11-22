@@ -1665,7 +1665,7 @@ fn fallback_menu(app: &AppHandle, status: &str) {
     set_menu(app, &[
         json!({ "id": "status", "label": status, "enabled": false }),
         json!({ "sep": true }),
-        json!({ "id": "restart", "label": "Restart Roamies" }),
+        json!({ "id": "restart", "label": "Restart Hydra" }),
         json!({ "id": "quit", "label": "Quit Hydra" }),
     ]);
 }

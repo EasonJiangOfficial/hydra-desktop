@@ -667,7 +667,7 @@ final class Voice {
         listenNow()
     }
     var wakeHold = false {
-        didSet { if wakeOn && wakeHold != oldValue { wakeLog(wakeHold ? "paused while Roamies answers" : "resumed") } }
+        didSet { if wakeOn && wakeHold != oldValue { wakeLog(wakeHold ? "paused while Hydra answers" : "resumed") } }
     }
     private var wakeLoud = 0.0, wakeLevelAt = 0.0 // seconds loud enough to be speech in this wake window
     private var wakeCooldownUntil = 0.0, wakeRetryAt = 0.0, wakeAt = 0.0
