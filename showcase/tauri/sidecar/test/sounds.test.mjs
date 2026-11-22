@@ -49,7 +49,24 @@ assert.match(host, /function onVoice\(m\) \{[\s\S]{0,300}const a = getAgent\(\);
 // unless that end wasn't a finished task (a retry follows, or it was stopped quietly).
 assert.doesNotMatch(agent, /k\.S\(final \? 'done' : 'error'\)/, 'no chime per tool');
 assert.match(host, /case 'start':[\s\S]{0,600}toolsRan = false;/);
-assert.match(host, /case 'tool':\n        toolsRan = true;/);
+// toolsRan only where a tool visual shows: a tool with no animation (listing commitments) or one run while the mic
+// is open shows nothing, so it earns no 'done'. The real case 'tool' block, run against stubs.
+const toolCase = host.match(/\n      case 'tool':\n([\s\S]*?)\n      case 'tool_end':/)[1];
+for (const [e, listen, notch, want] of [
+  [{ anim: null }, null, false, false], [{ anim: { tool: 'files' } }, { open: true }, false, false],
+  [{ id: 1, anim: { tool: 'files' } }, null, false, true], [{ anim: { tool: 'web' } }, null, true, true],
+]) {
+  const c = { e, listen, toolsRan: false, research: false, fromWeb: false, jobs: [], notchOn: () => notch, N: () => ({ tool() {} }),
+    endTalk() {}, playTools() {}, panel: () => null, webStatus: () => '', toolWords: () => '' };
+  vm.runInNewContext(`switch ('tool') { case 'tool':\n${toolCase} }`, c);
+  assert.equal(c.toolsRan, want, JSON.stringify({ e, listen, notch }));
+}
+// The 'working' chime plays where the task tag starts, and the tag draws on the desktop even with the orb attached
+// (only bubbles and the orb itself hide then), so that chime always has something on screen.
+assert.match(agent, /def\.start\?\.\(st, C\);\n        k\.S\('toolstart'\);/);
+const over = agent.match(/\n      over: \(ctx, env\) => \{([\s\S]*?)\n      \},/)[1];
+assert.match(over, /\n        if \(tool\) drawTag\(ctx, tool\);/);
+assert.doesNotMatch(over, /orbAttached/);
 assert.match(host, /case 'done':\n        responding = false;\n        if \(toolsRan && !e\.stopped\) Roamie\.sfx\?\.play\('done'\);\n        toolsRan = false;/);
 assert.match(side, /if \(retryNext\) ui\(\{ kind: 'agent', e: \{ type: 'done', stopped: true \} \}\);/);
 assert.match(side, /controller\.signal\.aborted && quiet\) ui\(\{ kind: 'agent', e: \{ type: 'done', stopped: true \} \}\);/);

@@ -353,10 +353,10 @@
         break;
       }
       case 'tool':
-        toolsRan = true;
         if (listen?.open) break;
-        // Tools with nothing to show (listing commitments) don't interrupt the bubble.
+        // Tools with nothing to show (listing commitments) don't interrupt the bubble, nor earn the end's chime.
         if (!e.anim) break;
+        toolsRan = true; // a tool visual shows (the notch's line or the task tag), so the end chimes once
         if (notchOn()) {
           if (e.anim.tool === 'web') { fromWeb = true; if (research) { research = 'looking'; panel()?.status(webStatus(e.anim)); break; } }
           N().tool(toolWords(e.anim));
