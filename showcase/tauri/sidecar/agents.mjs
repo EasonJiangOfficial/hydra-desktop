@@ -490,6 +490,12 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     const a = agents.get(String(id)), p = procs.get(String(id));
     if (!a?.ask || !p) return false;
     if (allow && by !== 'owner' && a.ask.always) return 'owner';
+    // An answer already kept for a free slot: only the owner may change it; a later model answer is ignored.
+    if (a.ask.answer !== undefined) {
+      if (by !== 'owner') return false;
+      a.ask.answer = !!allow; tell('update', a);
+      return true;
+    }
     // Answered while the cap is full: the answer is kept and the agent carries on once a slot frees (check()).
     if (a.ask.answer === undefined && running().filter((x) => x.state === 'working').length >= capFor(a)) {
       a.ask.answer = !!allow; a.step = 'Answered; waits for a free slot'; tell('update', a);

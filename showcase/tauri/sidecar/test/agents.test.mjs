@@ -532,4 +532,25 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   assert.ok(fs.existsSync(path.join(a.dir, 'inputs', 'logo.png')), 'the files are still copied in');
 }
 
+// Fifth review: an answer kept for a free slot is the owner's; a later model answer never changes it.
+{
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-agentkept-')));
+  const kids = [];
+  const fork = () => { const c = new EventEmitter(); Object.assign(c, { sent: [], connected: true, send(m) { c.sent.push(m); }, kill() {} }); kids.push(c); return c; };
+  const config = { model: async () => ({ provider: 'local', model: 'm1', route: 'api' }), creds: async () => ({}), allowActions: () => true, open: async () => {}, reveal: async () => {} };
+  const mgr = createAgents({ fork, ui: () => {}, config, root: path.join(home, 'HydraAgent'), userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen, checkLink }, home, now: () => 1 });
+  const a = await mgr.start({ type: 'maker', title: 'First', brief: 'x' });
+  kids[0].emit('message', { t: 'ask', id: 7, question: 'Run `rm a`?', always: true });
+  assert.equal(mgr.get(a.id).state, 'waiting');
+  await mgr.start({ type: 'maker', title: 'Second', brief: 'x' }); // fills the one local slot
+  assert.equal(mgr.answer(a.id, false), true, 'the owner says no while the slot is full: kept');
+  assert.equal(mgr.answer(a.id, true, 'model'), 'owner', 'a model yes is refused');
+  assert.equal(mgr.answer(a.id, false, 'model'), false, 'a later model answer is ignored');
+  assert.equal(mgr.get(a.id).ask.answer, false);
+  kids[0].sent.length = 0;
+  assert.equal(mgr.answer(a.id, true), true, 'the owner may change his own answer');
+  assert.equal(mgr.get(a.id).ask.answer, true);
+  assert.equal(kids[0].sent.length, 0, 'still kept until a slot frees');
+}
+
 console.log('agents tests: passed');

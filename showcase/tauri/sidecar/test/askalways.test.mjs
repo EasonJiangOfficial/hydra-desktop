@@ -44,6 +44,15 @@ console.log('every ask asks: ok');
   assert.ok(!run.description.includes("the user's home folder"));
   const out = await run.execute({ command: process.platform === 'win32' ? 'cd' : 'pwd' }, undefined);
   assert.ok(String(out).includes(fs.realpathSync(workdir)) || String(out).includes(workdir), 'and runs there');
+  if (process.platform === 'darwin') {
+    // Fifth review: a plain read never touches a shell. With no usable shell it still runs, by absolute path, piped.
+    const keep = process.env.SHELL; process.env.SHELL = '/nonexistent/shell';
+    fs.writeFileSync(path.join(workdir, 'a.txt'), 'b\na\n');
+    try {
+      assert.equal(String(await run.execute({ command: 'cat a.txt | sort | head -n 1' }, undefined)).trim(), 'a', 'a pipeline of plain reads runs with no shell');
+      await assert.rejects(run.execute({ command: 'echo $HOME' }, undefined), /said no/, '$ is not a plain word: it asks');
+    } finally { process.env.SHELL = keep; }
+  }
   fs.rmSync(workdir, { recursive: true, force: true });
   console.log('workdir tests: passed');
 }

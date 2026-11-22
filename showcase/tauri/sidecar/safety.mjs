@@ -37,7 +37,7 @@ const NO_WRITE = [
   /(^|\/)\.git\/(.*\/)?(info\/attributes|objects\/info\/alternates|commondir)$/i,
   /(^|\/)\.(zshrc|zprofile|zshenv|zlogin|bashrc|bash_profile|profile|login|inputrc)$/, /(^|\/)\.config\/fish(\/|$)/,
   /(^|\/)Library\/(LaunchAgents|LaunchDaemons|StartupItems|Preferences|Keychains|Application Support\/com\.apple)(\/|$)/,
-  /(^|\/)\.gitconfig$/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gg(\/|$)/, /(^|\/)(Roamies|HydraAgent)\/(Skills|Data)(\/|$)/i, /(^|\/)\.tauri(\/|$)/, /\.app(\/|$)/i, /(^|\/)crontab$/,
+  /(^|\/)\.gitconfig$/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gg(\/|$)/, /(^|\/)(Roamies|HydraAgent)\/(Skills|Data)(\/|$)/i, /(^|\/)\.tauri(\/|$)/, /\.app(\/|$)/, /(^|\/)Applications\/(.+\/)?[^/]+\.app(\/|$)/i, /(^|\/)crontab$/,
   /\/Start Menu\/Programs\/Startup(\/|$)/i, /(^|\/)Documents\/(Windows)?PowerShell\/.*profile\.ps1$/i, /^[a-z]:\/(Windows|Program Files( \(x86\))?|ProgramData)(\/|$)/i,
   // Linux: what starts at login (autostart entries, systemd user units, session environment), app launchers and
   // D-Bus services (each names a program the desktop runs), and the X session's startup files.
@@ -56,7 +56,9 @@ const ruleHit = (list, a, home) => {
   return list.some((re) => re.test(r) || re.test(a)) || (!isAbs(r) && CI.get(list).some((re) => re.test(r)));
 };
 // A repo's own settings that make git run programs, or point it at others: asked for, whoever writes them.
-const GIT_ASK = [/(^|\/)\.git$/, /(^|\/)\.gitattributes$/i, /(^|\/)\.gitmodules$/i];
+const GIT_ASK = [/(^|\/)\.git$/, /(^|\/)\.gitattributes$/i, /(^|\/)\.gitmodules$/i, /(^|\/)\.git\/HEAD$/i, /(^|\/)\.git\/worktrees\/[^/]+\/gitdir$/i,
+  // Files a tool runs on its own later: git hooks by husky, direnv's .envrc, VS Code tasks.
+  /(^|\/)\.husky\//i, /(^|\/)\.envrc$/i, /(^|\/)\.vscode\/(tasks|launch|settings)\.json$/i];
 const SYSTEM_ROOTS = ['/System', '/usr', '/bin', '/sbin', '/etc', '/private', '/Library', '/Applications', '/var', '/opt', '/cores'];
 
 const norm = (p, home) => {
@@ -64,7 +66,12 @@ const norm = (p, home) => {
   const abs = s === '~' ? h : s.startsWith('~/') ? path.join(h, s.slice(2)) : isAbs(s) ? s : path.join(h, s);
   return path.normalize(abs).replace(/(.)\/$/, '$1');
 };
-const rel = (abs, home) => { const h = slash(home); return abs === h ? '' : abs.startsWith(h + '/') ? abs.slice(h.length + 1) : abs; };
+// The home folder matched without case on a Mac (APFS): /USERS/ken/.ssh is ~/.ssh.
+const ciFs = process.platform === 'darwin' || process.platform === 'win32';
+const rel = (abs, home) => {
+  const h = slash(home), a = ciFs ? abs.toLowerCase() : abs, hh = ciFs ? h.toLowerCase() : h;
+  return a === hh ? '' : a.startsWith(hh + '/') ? abs.slice(h.length + 1) : abs;
+};
 // Where a path really leads once symlinks are followed (also a dangling link, or a path not made yet): a link in a
 // harmless folder can point into ~/.ssh or a startup file.
 function realOf(abs, depth = 0) {
@@ -176,7 +183,7 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
   if (all.some((a) => ruleHit(SECRET, a, home) || ruleHit(NO_WRITE, a, home))) {
     return { ...verdict(BLOCK, `${p} is a protected file (keys, settings, startup scripts or an app), so I won't write to it.`), path: abs };
   }
-  const realHome = realOf(home), inside = (a) => [home, realHome].some((h) => a.startsWith(h + '/')) || /^\/(private\/)?tmp\//.test(a);
+  const realHome = realOf(home), lc = (x) => (ciFs ? x.toLowerCase() : x), inside = (a) => [home, realHome].some((h) => lc(a).startsWith(lc(h) + '/')) || /^\/(private\/)?tmp\//i.test(a);
   if (!all.every(inside)) {
     return { ...verdict(BLOCK, `I only write files inside your home folder, not ${p}.`), path: abs };
   }
@@ -185,7 +192,7 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
     if (all.every(within)) return { ...verdict(SAFE), path: abs };
   }
   if (exists) return { ...verdict(ASK, `Overwrite ${r || abs}?`), path: abs, always: true };
-  if (all.some((a) => GIT_ASK.some((re) => re.test(rel(a, home)) || re.test(a)))) return { ...verdict(ASK, `${r || abs} tells git where its settings are, or which programs to run on files: write it?`), path: abs, always: true };
+  if (all.some((a) => GIT_ASK.some((re) => re.test(rel(a, home)) || re.test(a)))) return { ...verdict(ASK, `${r || abs} tells git or another tool where its settings are, or which programs to run: write it?`), path: abs, always: true };
   return { ...verdict(SAFE), path: abs };
 }
 
@@ -222,7 +229,31 @@ export function splitCommand(cmd) {
   return out;
 }
 
-const words = (s) => (s.match(/"(?:\\.|[^"])*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^(['"])([\s\S]*)\1$/, '$2'));
+// The words a shell would pass on, quotes and backslashes applied: -e'xec' is -exec, ~/.a''ws is ~/.aws, \ls is ls.
+// Every rule reads these, so a spliced spelling meets the same checks as the plain one.
+// cmd.exe has no backslash escapes (C:\Users\ken is a path): set for the length of one classifyCommand call.
+let winSyntax = false;
+function words(s) {
+  const out = [];
+  let cur = '', inWord = false, q = null;
+  const t = String(s ?? '');
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (q === "'") { if (c === "'") q = null; else cur += c; continue; }
+    if (q === '"') {
+      if (c === '"') q = null;
+      else if (c === '\\' && i + 1 < t.length && '"\\$`\n'.includes(t[i + 1])) { if (t[i + 1] !== '\n') cur += t[i + 1]; i++; }
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { q = c; inWord = true; continue; }
+    if (c === '\\' && !winSyntax) { if (i + 1 < t.length) { if (t[i + 1] !== '\n') cur += t[i + 1]; i++; inWord = true; } continue; }
+    if (/\s/.test(c)) { if (inWord) { out.push(cur); cur = ''; inWord = false; } continue; }
+    cur += c; inWord = true;
+  }
+  if (inWord) out.push(cur);
+  return out;
+}
 // Skip env assignments and wrappers to find the program that really runs. `assigns`: it sets environment variables
 // for it (PAGER=, MANPAGER=, GIT_EXTERNAL_DIFF= and the like can make a read-only program run another one).
 function program(ws) {
@@ -410,8 +441,9 @@ function globHits(t, home, cwd) {
 
 // Files a command writes with > >> &>, quotes removed; /dev/null and 2>&1 style copies left out.
 // A whole shell word after > or >>: "$HOME"/.zshrc is one word (quotes glued to the rest), with its quotes taken off.
-const redirectTargets = (text) => [...text.matchAll(/(?:^|[^>])>{1,2}\|?(?!&)\s*((?:"[^"]*"|'[^']*'|[^\s;&|<>"'])+)/g)]
-  .map((m) => m[1].replace(/["']/g, '')).filter((t) => t && t !== '/dev/null');
+// Backslashes are applied like quotes (~/.zsh\rc is ~/.zshrc), so a spliced spelling meets the protected-file rules.
+const redirectTargets = (text) => [...text.matchAll(/(?:^|[^>])>{1,2}\|?(?!&)\s*((?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^\s;&|<>"'\\])+)/g)]
+  .map((m) => words(m[1]).join(' ')).filter((t) => t && t !== '/dev/null');
 
 /** run_command. SAFE runs, ASK needs the user's yes, BLOCK never runs. `exists(path)`, if given, lets a redirect
  *  that makes a new file run like write_file making one; without it every redirect asks. */
@@ -538,32 +570,79 @@ function alwaysAsk(text, home, cwd) {
   return null;
 }
 
-// The pure-read allowlist (see the last gate in classifyCommand). Per program: which arguments are fine. No
-// environment assignments, no redirect except into /dev/null.
-const PURE_READ = {
-  ls: () => true, cat: () => true, head: () => true, tail: () => true, wc: () => true, stat: () => true, file: (a) => !a.includes('-C'),
-  du: () => true, df: () => true, pwd: () => true, echo: () => true, date: (a) => !a.some((x) => !x.startsWith('+') && !x.startsWith('-')) && !a.includes('-s'),
-  which: () => true, whoami: () => true, uname: () => true, sw_vers: () => true, cd: () => true, true: () => true,
-  // find: tests and printing only; any action, exec or write primary asks.
-  find: (a) => !a.some((x) => /^-(exec|execdir|ok|okdir|delete|fls|fprint\w*|fprintf)$/.test(x)),
-  // grep and rg on the paths given: never a preprocessor, pager or config file of the project's.
-  grep: (a) => !a.some((x) => /^--?(include-from|exclude-from)/.test(x)), egrep: () => true, fgrep: () => true,
-  rg: (a) => !a.some((x) => /^(--pre(-glob)?|--search-zip|-z|--hostname-bin)(=|$)/.test(x)) && a.includes('--no-config'),
-  sort: (a) => !a.some((x) => /^(-o|--output|-T|--temporary-directory|--compress-program)/.test(x)), uniq: (a) => a.filter((x) => !x.startsWith('-')).length < 2,
-  cut: () => true,
-  // scutil: every argument must be part of a read form (so "--get X --set Y" asks).
-  scutil: (a) => /^(--get\s+\w+|-r\s+\S+|--dns|--proxy|--nwi|--nc\s+list)$/.test(a.join(' ')),
+// ---------- the only commands that run without a yes ----------
+// They never touch a shell: the command is read by a strict lexer that takes only plain words (letters, digits and
+// . _ - / ~ = , : @ +), split into a pipeline on " | ", and each program is a bare name from this map, run by its
+// absolute path with execFile and its own argv (no PATH lookup, no zsh). Each has an allowlist of flags; grouped short
+// flags are split and each letter checked; long options must match exactly. Anything else asks.
+const PLAIN = /^[A-Za-z0-9._\-\/~=,:@+]+$/;
+const num = (x) => /^\d+$/.test(x);
+const flagsOnly = (letters) => (a) => a.startsWith('-') && a.length > 1 && !a.startsWith('--') && [...a.slice(1)].every((c) => letters.includes(c));
+// Checks a tool's arguments: options from an allowlist, then operands (paths or words).
+const SAFE_TOOLS = {
+  ls: { bin: '/bin/ls', args: (a) => a.every((x) => !x.startsWith('-') || flagsOnly('laAhR1tSr')(x)) },
+  cat: { bin: '/bin/cat', args: (a) => a.every((x) => !x.startsWith('-') || x === '-n') },
+  head: { bin: '/usr/bin/head', args: (a) => countArgs(a) },
+  tail: { bin: '/usr/bin/tail', args: (a) => countArgs(a) },
+  wc: { bin: '/usr/bin/wc', args: (a) => a.every((x) => !x.startsWith('-') || flagsOnly('lwcm')(x)) },
+  stat: { bin: '/usr/bin/stat', args: (a) => a.every((x) => !x.startsWith('-')) },
+  file: { bin: '/usr/bin/file', args: (a) => a.every((x) => !x.startsWith('-') || flagsOnly('bi')(x)) },
+  du: { bin: '/usr/bin/du', args: (a) => { for (let i = 0; i < a.length; i++) { if (a[i] === '-d') { if (!num(a[++i] ?? '')) return false; } else if (a[i].startsWith('-') && !flagsOnly('sh')(a[i])) return false; } return true; } },
+  df: { bin: '/bin/df', args: (a) => a.every((x) => !x.startsWith('-') || x === '-h') },
+  pwd: { bin: '/bin/pwd', args: (a) => a.length === 0 },
+  echo: { bin: '/bin/echo', args: (a) => a.every((x) => !x.startsWith('-')) },
+  date: { bin: '/bin/date', args: (a) => a.length === 0 || (a.length === 1 && a[0].startsWith('+')) },
+  which: { bin: '/usr/bin/which', args: (a) => a.length >= 1 && a.every((x) => !x.startsWith('-')) },
+  whoami: { bin: '/usr/bin/whoami', args: (a) => a.length === 0 },
+  uname: { bin: '/usr/bin/uname', args: (a) => a.length === 0 || (a.length === 1 && a[0] === '-a') },
+  sw_vers: { bin: '/usr/bin/sw_vers', args: (a) => a.length === 0 },
+  sort: { bin: '/usr/bin/sort', args: (a) => { for (let i = 0; i < a.length; i++) { if (a[i] === '-k' || a[i] === '-t') { if (!a[++i]) return false; } else if (/^-[kt]./.test(a[i])) continue; else if (a[i].startsWith('-') && !flagsOnly('rnuf')(a[i])) return false; } return true; } },
+  uniq: { bin: '/usr/bin/uniq', args: (a) => a.filter((x) => !x.startsWith('-')).length <= 1 && a.every((x) => !x.startsWith('-') || flagsOnly('cdui')(x)) },
+  cut: { bin: '/usr/bin/cut', args: (a) => { for (let i = 0; i < a.length; i++) { if (['-f', '-d', '-c'].includes(a[i])) { if (!a[++i]) return false; } else if (/^-[fdc]./.test(a[i])) continue; else if (a[i].startsWith('-')) return false; } return true; } },
+  find: { bin: '/usr/bin/find', args: (a) => {
+    let i = 0;
+    while (i < a.length && !a[i].startsWith('-')) i++; // the paths first
+    const withValue = new Set(['-name', '-iname', '-type', '-maxdepth', '-mindepth', '-size', '-mtime', '-newer', '-path']);
+    for (; i < a.length; i++) { if (withValue.has(a[i])) { if (!a[++i]) return false; } else if (a[i] !== '-print') return false; }
+    return true;
+  } },
+  grep: { bin: '/usr/bin/grep', args: (a) => { const ops = a.filter((x) => !x.startsWith('-')); return ops.length >= 1 && a.every((x) => !x.startsWith('-') || flagsOnly('inrlcvwEFHh')(x)); } },
+  scutil: { bin: '/usr/sbin/scutil', args: (a) => a.length === 2 && a[0] === '--get' && /^[A-Za-z]+$/.test(a[1]) },
 };
-function pureRead(text) {
-  if (/(^|[^>&0-9])\d?>{1,2}(?!\s*\/dev\/null\b)|<|>&?\s*(?!\/dev\/null)\S/.test(text.replace(/\d?>{1,2}\s*\/dev\/null\b|\d?>&\d/g, ''))) return false;
-  const ws = words(text), prog = program(ws);
-  if (prog.assigns || /^(command|builtin|exec|nohup|time|nice|caffeinate|env|xargs|stdbuf)$/.test(ws[0] ?? '')) return false;
-  const ok = PURE_READ[prog.name.toLowerCase()];
-  return !!ok && ok(prog.args);
+function countArgs(a) {
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === '-n' || a[i] === '-c') { if (!num(a[++i] ?? '')) return false; }
+    else if (/^-[nc]\d+$/.test(a[i]) || /^-\d+$/.test(a[i])) continue;
+    else if (a[i].startsWith('-')) return false;
+  }
+  return true;
+}
+/** The argv lists to run (absolute program paths, ~ expanded) when a command may run without a yes, else null. */
+export function strictPlan(cmd, home) {
+  const t = String(cmd ?? '').trim();
+  if (!t || /[^\x20-\x7e]/.test(t)) return null; // control characters, unicode lookalikes
+  const plan = [];
+  for (const seg of t.split(' | ')) {
+    const ws = seg.trim().split(/ +/);
+    const [name, ...args] = ws;
+    // date's +FORMAT may hold % (no shell reads it); every other word is plain.
+    if (ws.some((w, k) => !PLAIN.test(w) && !(name === 'date' && k === 1 && /^\+[A-Za-z0-9%._\-\/:,]+$/.test(w)))) return null;
+    const tool = Object.hasOwn(SAFE_TOOLS, name) ? SAFE_TOOLS[name] : null;
+    if (!tool || !tool.args(args) || !fs.existsSync(tool.bin)) return null;
+    // ~ and ~/x as a shell would expand them; ~user and ~+ forms aren't plain enough.
+    const argv = [];
+    for (const x of args) { if (x === '~' || x.startsWith('~/')) argv.push(path.join(slash(home), x.slice(1))); else if (x.includes('~')) return null; else argv.push(x); }
+    plan.push([tool.bin, ...argv]);
+  }
+  return plan;
 }
 
 /** `cwd`: the folder the command starts in (default home); `own`: the runner's own folder (see checkWrite). */
-export function classifyCommand(cmd, home, { exists, cwd: start = null, own = null } = {}) {
+export function classifyCommand(cmd, home, opts = {}) {
+  winSyntax = /^[a-z]:[\\/]/i.test(String(home ?? ''));
+  try { return classifyInner(cmd, home, opts); } finally { winSyntax = false; }
+}
+function classifyInner(cmd, home, { exists, cwd: start = null, own = null } = {}) {
   home = slash(home);
   const s0 = String(cmd ?? '').trim();
   const s = unrollLoop(s0) ?? s0;
@@ -604,7 +683,7 @@ export function classifyCommand(cmd, home, { exists, cwd: start = null, own = nu
   // The last gate: only a few plain reading tools run without a yes, and only in forms that can't run other code,
   // read a repo's or project's own settings, or write anything. Everything else asks (git, npm, brew, pip, cargo,
   // make, interpreters, curl, open…), whatever the rules above made of it.
-  if (level === SAFE && !parts.every((p) => pureRead(p.text))) { level = ASK; reason = reason || 'Only plain reading runs without a yes.'; }
+  if (level === SAFE && !strictPlan(s0, home)) { level = ASK; reason = reason || 'Only plain reading runs without a yes.'; }
   // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ASK asks the
   // owner, every time (there is no setting that skips it); `always` stays on the verdict for the code that reads it.
   if (level === ASK) return { ...verdict(level, reason), always: true };

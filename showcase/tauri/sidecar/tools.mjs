@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, riskyKey, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, strictPlan, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, riskyKey, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -29,6 +29,23 @@ export const run = (cmd, args, { onLine, ...opts } = {}) => new Promise((res) =>
   child.stderr.on('data', (d) => {
     buf += d;
     for (let k; (k = buf.indexOf('\n')) >= 0; buf = buf.slice(k + 1)) { try { onLine(buf.slice(0, k)); } catch { /* a listener's fault never fails the command */ } }
+  });
+});
+/** Runs argv lists as a pipeline (a | b), no shell: each program by absolute path, stdout into the next one's stdin. */
+export const runPlan = (plan, { cwd, env, timeout = 60_000, max = 8 << 20 } = {}) => new Promise((res) => {
+  let stdout = '', stderr = '', done = false, left = plan.length, code = 0, signal = null;
+  const kids = plan.map(([bin, ...args], i) => spawn(bin, args, { cwd, env, windowsHide: true, stdio: [i === 0 ? 'ignore' : 'pipe', 'pipe', 'pipe'] }));
+  const finish = (err) => { if (done) return; done = true; clearTimeout(timer); for (const k of kids) { try { k.kill(); } catch { /* gone */ } } res({ err, stdout, stderr }); };
+  const timer = setTimeout(() => finish(Object.assign(new Error('timed out'), { signal: 'SIGTERM' })), timeout);
+  kids.forEach((k, i) => {
+    k.on('error', (e) => finish(Object.assign(e, { code: 127 })));
+    k.stderr.on('data', (d) => { if (stderr.length < max) stderr += d; });
+    if (i < kids.length - 1) { k.stdout.pipe(kids[i + 1].stdin); kids[i + 1].stdin.on('error', () => { /* reader quit early (head) */ }); }
+    else k.stdout.on('data', (d) => { stdout += d; if (stdout.length > max) finish(Object.assign(new Error('too much output'), { code: 'MAXBUFFER' })); });
+    k.on('close', (c, sig) => {
+      if (i === kids.length - 1) { code = c; signal = sig; }
+      if (--left === 0) finish(code === 0 ? null : Object.assign(new Error(`exit ${code}`), { code, signal }));
+    });
   });
 });
 // Windows "open": Start-Process gets the target (and the app to open it in) through environment variables, so
@@ -995,7 +1012,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     {
-      name: 'run_command', description: `Run a shell command in ${where} and return its output, for what other tools can't do (counting, sorting, mdfind to find files by name, git, moving or copying). Open things with open, and make or edit files with write_file (several: one call each, in the same turn): never sed -i or tee, and never a shell loop that makes files, which always needs a yes. A > redirect into a new file is fine; overwriting a file or changing things asks the user first, which is slow.`,
+      name: 'run_command', description: `Run a shell command in ${where} and return its output, for what other tools can't do (counting, sorting, mdfind to find files by name, git, moving or copying). Open things with open, and make or edit files with write_file (several: one call each, in the same turn): never sed -i or tee, and never a shell loop that makes files, which always needs a yes. Only plain reads run without a yes: ls, cat, head, tail, wc, sort, uniq, cut, find, grep, file, du, df, stat, date, echo, pwd, whoami, uname -a, sw_vers, which and scutil --get, with plain words (letters, digits, . _ - / ~ = , : @ +), their common read flags, and | between them. Anything else (quotes, $, *, ;, &&, >, other programs or flags) asks the user first, which is slow.`,
       parameters: z.object({ command: z.string() }), executionMode: 'sequential', timeoutMs: 190_000, // up to 2 min to answer, then the 60 s run
       execute: async ({ command }, ctx) => {
         if (!allowActions()) throw new Error(actionsOff);
@@ -1004,8 +1021,11 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''}`, ctx))) {
           throw new Error(`${userName} said no, so the command didn't run.`);
         }
-        const [sh, shArgs, shOpts] = shellFor(command);
-        const r = await run(sh, shArgs, { ...shOpts, cwd: workdir, env: { ...process.env, ...GIT_SAFE } });
+        // A command that runs without a yes never touches a shell: its plain words go to fixed programs by absolute path.
+        const plan = v.level === SAFE ? strictPlan(command, HOME) : null;
+        if (v.level === SAFE && !plan) throw new Error('That command could not be read clearly, so it did not run.');
+        const r = plan ? await runPlan(plan, { cwd: workdir, env: { ...process.env, ...GIT_SAFE } })
+          : await run(...((([sh, a, o]) => [sh, a, { ...o, cwd: workdir, env: { ...process.env, ...GIT_SAFE } }])(shellFor(command))));
         const out = clip((r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).trim() || '(no output)', 12_000);
         if (r.err && r.err.code !== 0) throw new Error(`Exit ${r.err.code ?? r.err.signal}\n${out}`);
         return out;

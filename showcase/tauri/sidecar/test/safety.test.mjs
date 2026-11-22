@@ -19,10 +19,10 @@ cases('command', cmd, [
   // Plain looking around: runs without asking.
   ['ls -la', SAFE], ['ls ~/Downloads', SAFE], ['pwd', SAFE], ['date', SAFE], ['git status', ASK] /* runs a repo's filters: asks (third review M3) */, ['git log --oneline -5', ASK],
   ['git diff HEAD~1', ASK], ['du -sh ~/Downloads', SAFE], ['df -h', SAFE], ['ps aux | grep node', ASK], ['mdfind -name report.pdf', ASK],
-  ['find ~/Documents -name "*.pdf"', SAFE], ['grep -rn TODO ~/projects/app', SAFE], ['cat ~/notes.txt | wc -l', SAFE], ['echo hi', SAFE],
-  ['defaults read com.apple.dock', ASK], ['node --version', ASK], ['npm ls', ASK], ['brew list', ASK], ['sw_vers && uname -a', SAFE],
-  ['ls /tmp | grep -i sidekick', SAFE], ['which python3 2>/dev/null', SAFE], ['git rev-parse HEAD > /dev/null', ASK],
-  ["osascript -e 'get volume settings'", ASK], ['echo "a; rm -rf ~"', SAFE],
+  ['find ~/Documents -name "*.pdf"', ASK], ['find ~/Documents -name notes.pdf', SAFE], ['grep -rn TODO ~/projects/app', SAFE], ['cat ~/notes.txt | wc -l', SAFE], ['echo hi', SAFE],
+  ['defaults read com.apple.dock', ASK], ['node --version', ASK], ['npm ls', ASK], ['brew list', ASK], ['sw_vers && uname -a', ASK],
+  ['ls /tmp | grep -i sidekick', SAFE], ['which python3 2>/dev/null', ASK], ['git rev-parse HEAD > /dev/null', ASK],
+  ["osascript -e 'get volume settings'", ASK], ['echo "a; rm -rf ~"', ASK],
   // Changes things: needs a yes.
   ['rm notes.txt', ASK], ['rm -r ~/projects/old-app', ASK], ['mv a.txt b.txt', ASK], ['mkdir ~/new', ASK], ['touch x', ASK],
   ['git commit -m wip', ASK], ['git push', ASK], ['git push --force origin main', ASK], ['npm install', ASK], ['npm publish', ASK],
@@ -213,18 +213,18 @@ console.log('safety tests: passed');
 }
 // Redirects joined with & (2>&1, &>file) are part of the command, not a background job.
 assert.deepEqual(splitCommand('ls 2>&1 | head').map((p) => p.text), ['ls 2>&1', 'head'], '2>&1 stays one part');
-assert.equal(classifyCommand('ls -la /tmp/x 2>&1 | head -50', HOME).level, SAFE, '2>&1 on a read-only command');
+assert.equal(classifyCommand('ls -la /tmp/x 2>&1 | head -50', HOME).level, ASK, '2>&1 on a read-only command'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('ls &>out.txt', HOME).level, ASK, '&> writes a file');
-assert.equal(classifyCommand('ls &>/dev/null', HOME).level, SAFE, '&>/dev/null writes nothing');
+assert.equal(classifyCommand('ls &>/dev/null', HOME).level, ASK, '&>/dev/null writes nothing'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('ls &> ~/.zshrc', HOME).level, BLOCK, '&> into a startup file');
 assert.equal(classifyCommand('ls & rm -rf ~', HOME).level, BLOCK, 'a real & still splits');
-assert.equal(classifyCommand('cd /tmp/x && grep -c ERROR *', HOME).level, SAFE, 'cd only changes the folder');
+assert.equal(classifyCommand('cd /tmp/x && grep -c ERROR *', HOME).level, ASK, 'cd only changes the folder'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('cd ~/.ssh && ls', HOME).level, BLOCK, 'cd into secrets is still blocked');
 console.log('redirect tests: all passed');
 // After a cd, relative paths are checked in that folder.
 assert.equal(classifyCommand('cd ~/.config && cat gh/hosts.yml', HOME).level, BLOCK, 'secret reached through cd');
 assert.equal(classifyCommand('cd ~/Library && grep -r x Keychains', HOME).level, BLOCK, 'keychain reached through cd');
-assert.equal(classifyCommand('cd /tmp/x && ls -la', HOME).level, SAFE, 'flags are not paths');
+assert.equal(classifyCommand('cd /tmp/x && ls -la', HOME).level, ASK, 'flags are not paths'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('cd "$X" && cat notes.txt', HOME).level, ASK, 'unknown folder');
 assert.equal(classifyCommand('cd ~/Projects && cd .. && cat .ssh/id_rsa', HOME).level, BLOCK, 'cd .. is followed');
 // mkdir follows the write_file rules.
@@ -334,7 +334,7 @@ cases('read-only loopholes', cmd, [
   } catch (e) { if (process.platform !== 'win32') throw e; links = false; console.log('symlink cases skipped:', e.code); }
   const c = (x) => classifyCommand(x, home);
   cases('wildcards', c, [
-    ['cat ~/.ss*/id_*', BLOCK], ['cat ~/.ssh/id_*', BLOCK], ['cat ~/no*thing', SAFE], ['ls ~/*.md', SAFE],
+    ['cat ~/.ss*/id_*', BLOCK], ['cat ~/.ssh/id_*', BLOCK], ['cat ~/no*thing', ASK], ['ls ~/*.md', ASK],
     ['cat ~/**/id_rsa', BLOCK], ['cat ~/**/notes.txt', ASK], ['cat ~/notes.txt', SAFE],
   ]);
   if (links) {

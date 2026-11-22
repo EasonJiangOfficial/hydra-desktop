@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkMcpCall, checkWrite, classifyCommand, isRiskyClick, riskyKey } from '../safety.mjs';
+import { checkMcpCall, checkWrite, classifyCommand, isRiskyClick, riskyKey, strictPlan } from '../safety.mjs';
+import { runPlan } from '../tools.mjs';
 
 const HOME = os.homedir();
 // Each of these asks and is marked `always`.
@@ -57,11 +58,50 @@ for (const c of PROTECTED) assert.equal(classifyCommand(c, HOME, { cwd: HOME, ex
     'git status', 'git status --porcelain', 'git ls-files', 'git describe', 'less +!rm a', 'more +/x a'];
   for (const c of A3) { const v = classifyCommand(c, H3, { cwd: H3, exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c}: ${v.level}`); }
   // Fourth review: only the pure-read tools run without a yes; git, npm and the rest all ask.
-  for (const c of ['ls -la', 'cat a', 'wc -l a', 'scutil --get HostName', 'head -5 a 2>/dev/null', 'ls | grep x']) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'safe', `${c} only reads`);
+  for (const c of ['ls -la', 'cat a', 'wc -l a', 'scutil --get HostName', 'head -5 a', 'ls | grep x']) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'safe', `${c} only reads`);
   for (const c of ['npm audit', 'npm ls', 'git log', 'git rev-parse HEAD', 'git log -U1', 'git log --cc', 'git log -S x', 'git remote show origin', 'less a', 'brew list', 'python3 -V', 'make -n', 'open .', 'curl https://x', 'echo x > new', 'mkdir x', 'scutil --get A --set B']) {
     const v = classifyCommand(c, H3, { cwd: H3, exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c} asks`);
   }
   console.log(`third review commands: ${B3.length} blocked, ${A3.length} ask`);
+  // Fifth review: plain words only, fixed programs by absolute path, an allowlist of flags per program.
+  const cls = (c) => classifyCommand(c, H3, { cwd: H3, exists: () => false });
+  assert.deepEqual(strictPlan('ls -la ~/x', H3), [['/bin/ls', '-la', `${H3}/x`]]);
+  assert.deepEqual(strictPlan('cat a | sort -r | head -n 3', H3), [['/bin/cat', 'a'], ['/usr/bin/sort', '-r'], ['/usr/bin/head', '-n', '3']]);
+  assert.deepEqual(strictPlan('date +%Y-%m-%d', H3), [['/bin/date', '+%Y-%m-%d']]);
+  for (const c of ['ls -lhR1tSr a', 'cat -n a', 'tail -c 10 a', 'wc -lwcm a', 'sort -rnuf -k 2 -t , a', 'sort -k2 -n a', 'cut -c1-5 a', 'find proj -name x -type f -maxdepth 2 -print', 'grep -inrlcvwEFHh x a',
+    'file -bi a', 'du -sh -d 1 a', 'df -h', 'date', 'echo hi there', 'sw_vers', 'uname -a', 'whoami', 'pwd', 'which git', 'scutil --get ComputerName', 'ls ~'])
+    assert.equal(cls(c).level, 'safe', `${c} runs`);
+  for (const c of ['ls "a"', "ls 'a'", 'ls a\\ b', 'echo $HOME', 'ls *', 'ls a?', 'ls [a]', 'ls (a)', 'ls {a,b}', 'ls < a', 'ls a; ls', 'ls a & ls', 'ls !a', 'ls #a', 'ls a\nls',
+    'ls\ta', 'ls a b', 'ｌs a', 'ls a\u0007', 'ls ~root', '/bin/ls', './ls', 'env ls', 'ls --color', 'ls -lF', 'cat -v a', 'tail -f a', 'tail -F a', 'head -n x a', 'sort -o out a',
+    'sort -T d a', 'sort --compress-program=x a', 'find . -exec rm', 'find . -delete', 'find . -fprint x', 'find . -name', 'grep --include-from=x y a', 'grep -P x a', 'grep -e x a',
+    'rg x', 'file -L a', 'file -m x a', 'du -A a', 'df -i', 'date -s 1200', 'echo -e x', 'uname -s', 'which -a git', 'scutil --set HostName x', 'uniq a b', 'ls | sh', 'ls|grep x', 'ls |'])
+    assert.equal(cls(c).level === 'safe', false, `${JSON.stringify(c)} is not a plain read`);
+  // Spliced spellings are unquoted first, so they meet the secret and protected-path rules.
+  for (const c of ["cat ~/.s''sh/id_rsa", 'cat ~/.s\\sh/id_rsa', 'cat ~/".ssh"/id_rsa', "cat ~/'.aws'/credentials", 'echo x > ~/.zs""hrc', 'echo x > ~/.zsh\\rc', "cp a ~/Library/LaunchAgent\\s/", "cp a ~/Library/Launch'Agents'/x.plist"])
+    assert.equal(cls(c).level, 'block', `${c} is blocked`);
+  if (process.platform === 'darwin') {
+    const up = H3.toUpperCase();
+    assert.equal(classifyCommand(`cat ${up}/.ssh/id_rsa`, H3, { cwd: H3, exists: () => false }).level, 'block', 'home matched without case on a Mac');
+    assert.equal(checkWrite(`${up}/.zshrc`, H3).level, 'block');
+    assert.equal(checkWrite(`${up}/notes.txt`, H3).level, 'safe', 'a home spelled in capitals is still home');
+  }
+  // .app: an app bundle (case-sensitive), or any case only at a bundle under Applications.
+  assert.equal(checkWrite(`${H3}/Applications/Foo.APP/Contents/x`, H3).level, 'block');
+  assert.equal(checkWrite('/Applications/Foo.App/x', H3).level, 'block');
+  assert.equal(checkWrite(`${H3}/proj/Foo.app/x`, H3).level, 'block');
+  assert.equal(checkWrite(`${H3}/proj/notes.APP`, H3).level, 'safe', 'a file that just ends in .APP outside Applications');
+  // Files another tool runs later ask, always.
+  for (const f of ['.husky/pre-commit', 'proj/.envrc', 'proj/.vscode/tasks.json', 'proj/.vscode/settings.json', 'proj/.git/worktrees/w/gitdir', 'proj/.git/HEAD']) {
+    const v = checkWrite(`${H3}/${f}`, H3); assert.ok(v.level === 'ask' && v.always, `${f} asks`);
+  }
+  // runPlan: no shell anywhere, so $, ; and globs are plain text, and a pipeline joins the programs.
+  const r1 = await runPlan([['/bin/echo', '$HOME;', '*']], { cwd: H3 });
+  assert.equal(r1.stdout, '$HOME; *\n');
+  const r2 = await runPlan([['/bin/echo', 'b'], ['/usr/bin/wc', '-l']], { cwd: H3 });
+  assert.equal(r2.stdout.trim(), '1'); assert.equal(r2.err, null);
+  const r3 = await runPlan([['/bin/ls', `${H3}/missing`]], { cwd: H3 });
+  assert.ok(r3.err && r3.err.code !== 0, 'a failing program reports its exit');
+  console.log('fifth review: strict plain reads, no shell, spliced spellings blocked: passed');
   fs.rmSync(H3, { recursive: true, force: true });
 }
 // Fourth review: ordinary recursive copies, clones and unpacks into projects or backups ask (they were blocked); only
