@@ -751,8 +751,7 @@
     const lang = v.lang ?? 'auto';
     const online = v.langOnline === true || (['ar-SA', 'he-IL'].includes(lang) && v.langOnline == null);
     return el('div', { className: 'reveal', 'data-anim': 'speakin' },
-      el('p', { className: 'sub', textContent: 'Speak in' }),
-      el('p', { className: 'why wrap', textContent: 'The language you talk to me in.' }),
+      el('p', { className: 'sub' }, 'Speak in', info('The language you talk to me in.')),
       el('span', { className: 'px field select' },
         el('select', { 'aria-label': 'Language I speak', 'data-k': 'speechlang', on: { change: (e) => act(`speechlang:${e.target.value}`) } },
           SPEAK_LANGS.map(([code, label]) => el('option', { value: code, textContent: label, dir: 'auto', selected: code === lang })))),
