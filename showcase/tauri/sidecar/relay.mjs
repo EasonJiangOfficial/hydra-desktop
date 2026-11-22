@@ -94,14 +94,18 @@ export function toolFilter(allowedTools) {
 export const connectorGroup = (server) => (/gmail/i.test(server) ? 'gmail' : /calendar/i.test(server) ? 'calendar' : String(server));
 
 // A claude.ai connector's call ({ server, tool }: connectorTool in claudecode.mjs): { level } from safety.mjs. claude.ai's
-// connectors send no hints, so their names are read as they are: a read verb first and no write verb is SAFE; any
-// other name asks every time (send, trash, delete, create, update...). The Mac and the server brain share this gate.
-const CONNECTOR_READ = /^(?:get|list|search|suggest|read|find|fetch|download)_/;
+// connectors send no hints, so their names are read as they are: a read verb first (get_, list_...) and no write verb is
+// SAFE; any other name asks every time (send, trash, delete, create, update, a hyphenated name...). A read that can
+// return a secret or fetch a URL (credentials, tokens, variables, env, url, web, fetch) asks too: text in an email must
+// never be able to read secrets out or send them to a link unasked. The Mac and the server brain share this gate.
+const CONNECTOR_READ = /^(?:get|list|search|suggest|read|find|download)_/;
 const CONNECTOR_WRITE = /(?:^|_)(?:send|delete|remove|trash|untrash|create|update|modify|move|reply|forward|share|archive|label|unlabel|mark|spam|cancel|respond|apply|upload|copy|draft)(?:_|$)/;
+const CONNECTOR_SENSITIVE = /(?:^|_)(?:credentials?|secrets?|tokens?|passwords?|keys?|apikey|variables?|vars?|envs?|environment|urls?|links?|web|http|https|fetch|webhooks?|access|auth)(?:_|$)/;
+const snakeName = (t) => String(t).replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^A-Za-z0-9]+/g, '_').toLowerCase();
 export function connectorLevel(c) {
   const claudeAi = c.server.startsWith('claude_ai_');
-  return claudeAi && CONNECTOR_READ.test(c.tool) && !CONNECTOR_WRITE.test(c.tool) ? { level: SAFE }
-    : checkMcpCall({ name: c.tool, annotations: claudeAi ? { readOnlyHint: true } : null });
+  return claudeAi && CONNECTOR_READ.test(c.tool) && !CONNECTOR_WRITE.test(c.tool) && !CONNECTOR_SENSITIVE.test(snakeName(c.tool)) ? { level: SAFE }
+    : checkMcpCall({ name: c.tool, annotations: null });
 }
 
 // What a relay turn says to the agent: where the owner is, the thread so far (data, never instructions), then his
@@ -154,15 +158,19 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
   const current = new Map(); // slot -> turn id
   // turn id -> when this Mac stopped it (unreachable or a bad event); kept in stateFile across restarts.
   const failed = new Map(readFailed(stateFile));
-  const remember = (id) => {
-    for (const [k, at] of failed) if (now() - at >= failedMs) failed.delete(k);
-    failed.set(id, now());
+  const save = () => {
     if (!stateFile) return;
     try {
       fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(Object.fromEntries(failed)), { mode: 0o600 });
       fs.renameSync(`${stateFile}.tmp`, stateFile);
     } catch (e) { log('relay_state', { error: String(e?.message ?? e).slice(0, 120) }); }
   };
+  const remember = (id) => {
+    for (const [k, at] of failed) if (now() - at >= failedMs) failed.delete(k);
+    failed.set(id, now());
+    save();
+  };
+  const forget = (id) => { if (failed.delete(id)) save(); };
 
   async function loop(signal, slot) {
     let fails = 0;
@@ -209,6 +217,12 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       current.delete(slot);
       return;
     }
+    // With stateFile the turn is marked on disk before it runs, and the mark is kept fresh by the heartbeat: a crash or
+    // kill -9 mid-turn leaves it, so after a restart a re-claim gets mac_failed instead of a second run (an approved
+    // send done twice). Cleared only when every event reached Hydra; any other end (unreachable, a bad event, 409) keeps it.
+    // ponytail: per device; a turn this device stopped can still be re-queued to another device (needs a server-side
+    // refusal in agent_relay_sweep).
+    if (stateFile) remember(turn.id);
     const queue = [];
     // sent: events this claim stored, so each batch carries its first event's number (seq) and a retried post is
     // stored once (the server skips what it has).
@@ -289,6 +303,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       const ms = !isLive ? heartbeatMs : toWindow > 0 ? Math.min(heartbeatMs, toWindow) : capBeatMs;
       beat = setTimeout(() => {
         if (lost || closed) return;
+        if (stateFile) remember(turn.id);
         if (!queue.length) posting = posting.then(() => post([]));
         nextBeat();
       }, ms);
@@ -312,6 +327,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       outer.removeEventListener('abort', stopTurn);
       await flush();
       await posting;
+      if (!lost) forget(turn.id);
       current.delete(slot);
       log('relay_done', { id: turn.id, lost });
     }

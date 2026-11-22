@@ -21,8 +21,9 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const body = (req) => new Promise((res) => { let s = ''; req.on('data', (d) => { s += d; }); req.on('end', () => res(s ? JSON.parse(s) : null)); });
 const json = (res, code, v, headers = {}) => { res.writeHead(code, { 'content-type': 'application/json', ...headers }); res.end(JSON.stringify(v)); };
 let handle = null;
+const keys = new Set([KEY]);
 const server = http.createServer(async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${KEY}`) return json(res, 401, { error: 'unauthorized' });
+  if (!keys.has(String(req.headers.authorization).replace(/^Bearer /, ''))) return json(res, 401, { error: 'unauthorized' });
   const u = new URL(req.url, 'http://x');
   const raw = req.method === 'POST' ? await body(req) : null;
   return handle(u, raw, res, req);
@@ -61,11 +62,17 @@ const fastSleep = (log) => (ms, s) => { log?.push(ms); return new Promise((r, j)
 }
 
 // A fake relay server for turns: queue per slot; each turn's claim, stored events and posts; a per-turn post rule.
+// Its own key and api: a poll an earlier block's relay sent just before it stopped can reach this server late, and it
+// must not take this block's turns (it did, now and then, under load).
 function relayServer(queue) {
+  const key = `hyd_dev_${randomUUID().replace(/-/g, '')}`;
+  keys.add(key);
+  const own = hydraApi({ base: api.base, getKey: async () => key });
   const turns = new Map();
   for (const t of queue) turns.set(t.id, { claimId: t.claimId, events: [], posts: [], rule: t.rule });
   const approvals = [];
-  handle = async (u, raw, res) => {
+  handle = async (u, raw, res, req) => {
+    if (req.headers.authorization !== `Bearer ${key}`) return u.pathname === '/api/agent/relay/next' ? void setTimeout(() => { res.writeHead(204); res.end(); }, 20) : json(res, 409, { error: 'stale_claim' });
     if (u.pathname === '/api/agent/relay/next') {
       slotSchema.parse(u.searchParams.get('slot'));
       const t = queue.shift();
@@ -95,7 +102,7 @@ function relayServer(queue) {
     if (u.pathname === '/api/agent/relay/approval') return json(res, 200, { status: 'approved' });
     return json(res, 404, {});
   };
-  return { turns, approvals };
+  return { turns, approvals, api: own };
 }
 
 // ---- MINOR 4: unreachable, then claimed again: not run twice, one error mac_failed with the new claim.
@@ -110,7 +117,7 @@ function relayServer(queue) {
   const ran = [], sleeps = [], logs = [];
   let answer = null;
   const relay = createRelay({
-    api, waitSecs: 1, flushMs: 1, heartbeatMs: 10_000, backoff: [5], retry: [10, 20], slots: ['live'], sleep: fastSleep(sleeps), log: (k, d) => logs.push([k, d]),
+    api: fake.api, waitSecs: 1, flushMs: 1, heartbeatMs: 10_000, backoff: [5], retry: [10, 20], slots: ['live'], sleep: fastSleep(sleeps), log: (k, d) => logs.push([k, d]),
     runTurn: async (t, { emit, approve }) => {
       ran.push(t.id);
       emit({ type: 'text', delta: 'hi' });
@@ -148,7 +155,7 @@ function relayServer(queue) {
   const fake = relayServer([live, routine]);
   let alive1 = null, alive2 = null;
   const relay = createRelay({
-    api, waitSecs: 1, flushMs: 1, heartbeatMs: 300, liveCapMs: 500, capWindowMs: 200, capBeatMs: 20, slots: ['live'], backoff: [5],
+    api: fake.api, waitSecs: 1, flushMs: 1, heartbeatMs: 300, liveCapMs: 500, capWindowMs: 200, capBeatMs: 20, slots: ['live'], backoff: [5],
     runTurn: async (t, { emit, alive }) => {
       if (t.id === id) {
         await wait(480); // past 300 ms: the last 200 ms before the cap

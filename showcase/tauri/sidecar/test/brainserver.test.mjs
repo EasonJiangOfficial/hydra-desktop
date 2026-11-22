@@ -4,8 +4,11 @@
 //   command line, seen through its spawn seam), no --strict-mcp-config or --bare, and no forbidden variable;
 // - a connector write becomes a relay approval and never runs before "approved"; a read runs; a decline never runs;
 // - pair stores the key with mode 600 (folder 700) and never prints it; status says what is there;
-// - the systemd unit's hardening (systemd-analyze verify where it exists), deploy-brain.sh (bash -n, shellcheck) and
-//   its file list against the brain's real imports. Run: npm test (HOME is a temp folder).
+// - only Gmail and Calendar connectors run on the server; a read that can return a secret or fetch a URL asks;
+// - pairing again while it runs takes effect without a restart;
+// - the systemd unit's hardening (systemd-analyze verify where it exists), deploy-brain.sh (bash -n, shellcheck): one
+//   bundled file that runs alone, no npm on the server, hydra@ only, sudo -n (ssh and rsync faked).
+// Run: npm test (HOME is a temp folder).
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -13,10 +16,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
-import { BUILTIN_TOOLS, brainGate, brainPaths, createBrainTurn, forbiddenEnv, main } from '../brain-server.mjs';
-import { createRelay } from '../relay.mjs';
+import { BUILTIN_TOOLS, brainGate, brainPaths, createBrainTurn, forbiddenEnv, main, writeKey } from '../brain-server.mjs';
+import { connectorLevel, createRelay } from '../relay.mjs';
 import { hydraApi, waitApproval } from '../hydramcp.mjs';
 import { relayApprovalSchema, relayBatchSchema } from '../relayschema.mjs';
 
@@ -68,8 +71,9 @@ const fakeHydraTools = (ran = []) => ({
   tools: () => [{ name: 'hydra_list_transactions', description: 'List transactions', parameters: z.looseObject({}), execute: async () => { ran.push('list'); return '[]'; } }],
 });
 
-// ---- 2. The exact Claude Code command line: our tools allowed, every built-in disallowed, nothing forbidden.
-{
+// ---- 2. The exact Claude Code command line: our tools allowed, every built-in disallowed, nothing forbidden. Checked
+// on the source here, and on the bundle the deploy ships (7).
+async function checkCommandLine({ createBrainTurn, BUILTIN_TOOLS }) {
   const home = tmpHome();
   const exe = path.join(home, 'claude');
   fs.writeFileSync(exe, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
@@ -112,6 +116,7 @@ const fakeHydraTools = (ran = []) => ({
   assert.ok(!Object.values(seen.env).some((v) => /leak/.test(String(v))), 'no token reaches Claude Code');
   assert.equal(seen.env.ENABLE_CLAUDEAI_MCP_SERVERS, undefined);
 }
+await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
 
 // ---- 3. A connector write is a relay approval: it runs only after "approved"; a read runs; a decline never runs.
 {
@@ -136,12 +141,30 @@ const fakeHydraTools = (ran = []) => ({
   assert.equal(await brainGate({ approve: async () => 'approved', alive: async () => false })('mcp__claude_ai_Gmail__send_message', {}), false, 'approved, but the turn is over: not run');
   assert.equal(await brainGate({ approve: async () => 'approved' })('Bash', {}), false, 'a built-in is never a connector');
 
+  // Only Gmail and Calendar run on the server: any other connector of the owner's account is refused, read or not,
+  // without an ask (an email cannot get the server to read Railway variables or fetch a link).
+  const other = [];
+  const strict = brainGate({ approve: async (a) => { other.push(a); return 'approved'; } });
+  for (const n of ['mcp__claude_ai_Railway__list-variables', 'mcp__claude_ai_Railway__get-bucket-credentials', 'mcp__claude_ai_Vercel__web_fetch_vercel_url',
+    'mcp__claude_ai_Vercel__get_access_to_vercel_url', 'mcp__claude_ai_Vercel__get_project_env', 'mcp__claude_ai_Google_Drive__read_file_content', 'mcp__claude_ai_Google_Drive__search_files',
+    'mcp__gg__hydra_list_transactions', 'mcp__Gmail__search_threads']) {
+    assert.equal(await strict(n, {}), false, `${n}: not run on the server`);
+  }
+  assert.equal(other.length, 0, 'and nothing is asked for them');
+  for (const n of ['mcp__claude_ai_Gmail__get_message', 'mcp__claude_ai_Gmail__download_gmail_attachment', 'mcp__claude_ai_Google_Calendar__list_events']) assert.equal(await strict(n, {}), true, `${n}: a Gmail or Calendar read runs`);
+  // The shared gate (Mac too): a read that can return a secret or fetch a URL asks, and so does any name that is not
+  // plainly a read (claude.ai sends no hints; none is assumed).
+  for (const tool of ['get-bucket-credentials', 'list-variables', 'get_project_env', 'web_fetch_vercel_url', 'get_access_to_vercel_url', 'fetch_url', 'get_api_key', 'list_tokens', 'getSecret']) {
+    assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'ask', `${tool} asks`);
+  }
+  for (const tool of ['search_threads', 'get_thread', 'list_events', 'read_file_content', 'download_gmail_attachment']) assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'safe', `${tool} is a read`);
+
   // End to end through the relay and a fake Hydra (the server's own schemas), with Claude Code stubbed.
   const T = [randomUUID(), randomUUID()];
   const queue = T.map((id) => ({ id, claimId: randomUUID(), threadId: randomUUID(), surface: 'phone', input: { text: 'email Ann' }, context: { path: '/', search: '', scope: 'all' } }));
   const claims = new Map(queue.map((t) => [t.id, t.claimId]));
   const posted = [], approvals = new Map(), order = [];
-  let wantAnswer = 'approved';
+  // The owner approves the first turn's ask and declines the second's (by turn, so no timing decides it).
   handle = (u, raw, res, req) => {
     if (req.headers.authorization !== `Bearer ${KEY}`) return json(res, 401, {});
     if (u.pathname === '/api/agent/relay/next') {
@@ -157,7 +180,7 @@ const fakeHydraTools = (ran = []) => ({
     if (u.pathname === '/api/agent/relay/approval' && req.method === 'POST') {
       relayApprovalSchema.parse(raw);
       const id = randomUUID();
-      approvals.set(id, { status: 'pending', polls: 0, answer: wantAnswer });
+      approvals.set(id, { status: 'pending', polls: 0, answer: raw.turnId === T[0] ? 'approved' : 'declined' });
       order.push(`asked ${raw.summary}`);
       return json(res, 200, { id });
     }
@@ -187,7 +210,6 @@ const fakeHydraTools = (ran = []) => ({
   });
   relay.start();
   await until(() => posted.filter((e) => e.turn === T[0] && e.type === 'done').length === 1);
-  wantAnswer = 'declined';
   await until(() => posted.filter((e) => e.turn === T[1] && e.type === 'done').length === 1);
   await relay.stop();
   assert.deepEqual(order, [
@@ -260,6 +282,32 @@ const fakeHydraTools = (ran = []) => ({
   fs.rmSync(home, { recursive: true, force: true });
 }
 
+// ---- 5b. Paired again while it runs (a revoked key, a new code): the running service uses the new key at once.
+{
+  const home = tmpHome();
+  const p = brainPaths({ HOME: home });
+  writeKey(p, KEY);
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.writeFileSync(p.claudeCreds, JSON.stringify({ claudeAiOauth: { accessToken: 'x' } }));
+  const bin = path.join(home, '.npm-global', 'bin', 'claude');
+  fs.mkdirSync(path.dirname(bin), { recursive: true });
+  fs.writeFileSync(bin, '#!/bin/sh\n', { mode: 0o755 });
+  const NEW = 'hyd_dev_brain_fedcba9876543210fedc';
+  const keys = [];
+  handle = (u, raw, res, req) => {
+    keys.push(req.headers.authorization);
+    return void setTimeout(() => { res.writeHead(204); res.end(); }, 20);
+  };
+  const running = main(['run'], { env: cleanEnv(home, { HYDRA_BRAIN_URL: BASE }), out: () => {}, err: () => {} });
+  await until(() => keys.length > 0);
+  assert.equal(keys[0], `Bearer ${KEY}`, 'the old key first');
+  writeKey(p, NEW); // hydra-brain pair <new code>, with the service still running
+  await until(() => keys.includes(`Bearer ${NEW}`));
+  process.emit('SIGTERM');
+  assert.equal(await running, 0);
+  fs.rmSync(home, { recursive: true, force: true });
+}
+
 // ---- 6. The systemd unit: hardened, journald, never an API key.
 {
   const unitPath = path.join(REPO, 'scripts', 'hydra-brain.service');
@@ -285,13 +333,25 @@ const fakeHydraTools = (ran = []) => ({
   assert.ok(rw.every((d) => d.replace(/^-/, '').startsWith('/home/hydra/')), 'nothing outside the hydra user\'s files is writable');
   assert.ok(!(kv.Environment ?? []).some((e) => forbiddenEnv({ [e.split('=')[0]]: '1' }).length), 'no forbidden variable in the unit');
   assert.ok(kv.Environment.includes('HYDRA_CLAUDE_BIN=/home/hydra/.npm-global/bin/claude'));
+  // Claude Code's .claude.json lives in ~/.claude (writable even when it is made after the service started), never
+  // in /home/hydra itself, which is read-only to the service.
+  assert.ok(kv.Environment.includes('CLAUDE_CONFIG_DIR=/home/hydra/.claude'));
+  assert.ok(!rw.some((d) => /\.claude\.json$/.test(d)), 'no single file in read-only /home/hydra is relied on');
+  // Defense in depth beyond the read-only file system.
+  for (const [k, v] of [['CapabilityBoundingSet', ''], ['RestrictNamespaces', 'yes'], ['SystemCallArchitectures', 'native'], ['ProtectProc', 'invisible'],
+    ['ProtectClock', 'yes'], ['ProtectHostname', 'yes'], ['ProtectKernelLogs', 'yes'], ['RestrictRealtime', 'yes'], ['RestrictAddressFamilies', 'AF_UNIX AF_INET AF_INET6 AF_NETLINK']]) {
+    assert.equal(one(k), v, `${k}=${v}`);
+  }
+  const ro = one('ReadOnlyPaths').split(/\s+/);
+  for (const f of ['settings.json', 'settings.local.json', 'hooks', 'CLAUDE.md']) assert.ok(ro.includes(`-/home/hydra/.claude/${f}`), `~/.claude/${f} stays read-only to the service`);
   assert.ok(!/^(?:\s*)(EnvironmentFile|AmbientCapabilities|CapabilityBoundingSet=.*CAP_)/m.test(unit), 'no capabilities, no env file');
   const sa = spawnSync('systemd-analyze', ['verify', unitPath], { encoding: 'utf8' });
   if (sa.error?.code === 'ENOENT') console.log('brainserver: systemd-analyze not installed here; the unit was checked statically');
   else assert.equal(sa.status, 0, sa.stderr);
 }
 
-// ---- 7. deploy-brain.sh: valid bash, shellcheck-clean, ships exactly the brain's imports, no GitHub pulls.
+// ---- 7. deploy-brain.sh: valid bash, shellcheck-clean; it ships one bundled file (no npm, no install script, nothing
+// fetched on the server), that bundle runs on its own; it deploys only to hydra@ and asks sudo for no password.
 {
   const script = path.join(REPO, 'scripts', 'deploy-brain.sh');
   const text = fs.readFileSync(script, 'utf8');
@@ -299,23 +359,53 @@ const fakeHydraTools = (ran = []) => ({
   const sc = spawnSync('shellcheck', [script], { encoding: 'utf8' });
   if (sc.error?.code === 'ENOENT') console.log('brainserver: shellcheck not installed here; skipped');
   else assert.equal(sc.status, 0, sc.stdout);
-  // The local import closure of brain-server.mjs.
-  const need = new Set();
-  const walk = (f) => {
-    if (need.has(f)) return;
-    need.add(f);
-    for (const m of fs.readFileSync(path.join(SIDECAR, f), 'utf8').matchAll(/^(?:import|export)\s[^'"]*?from\s+['"]\.\/([^'"]+)['"]/gm)) walk(m[1]);
-  };
-  walk('brain-server.mjs');
-  const files = /^FILES=\(([^)]*)\)/m.exec(text)[1].trim().split(/\s+/);
-  assert.deepEqual(files.filter((f) => f.endsWith('.mjs')).sort(), [...need].sort(), 'the deploy ships every module the brain imports, and no other');
-  assert.ok(files.includes('package.json') && files.includes('package-lock.json'), 'npm ci needs the lockfile');
-  assert.match(text, /npm ci --omit=dev/);
-  assert.match(text, /rsync -az --delete --exclude node_modules -e ssh "\$STAGE\/" "\$TARGET:hydra-brain\/"/);
   const code = text.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
-  assert.ok(!/github|git clone|git pull|curl |wget /i.test(code), 'the server never pulls code from anywhere');
-  const sudo = text.split('\n').filter((l) => /\bsudo\b/.test(l) && !l.trim().startsWith('#'));
-  assert.ok(sudo.length > 0 && sudo.every((l) => /sudo (install -m 644 -o root -g root "\$HOME\/hydra-brain\/hydra-brain\.service" \/etc\/systemd\/system\/hydra-brain\.service|systemctl )/.test(l)), 'sudo only for the unit file and systemctl');
+  assert.ok(!/github|git clone|git pull|curl |wget |\bnpm\b|\bnpx\b|\byarn\b|\bpnpm\b/i.test(code), 'the server never installs or pulls code from anywhere');
+  // Fake ssh and rsync: nothing here can reach a real server.
+  const bin = tmpHome(), calls = path.join(bin, 'calls.log');
+  for (const t of ['ssh', 'rsync']) fs.writeFileSync(path.join(bin, t), `#!/bin/sh\necho "${t} $*" >> "${calls}"\n[ "${t}" = ssh ] && cat > "${bin}/remote.sh"\nexit 0\n`, { mode: 0o755 });
+  const env = { HOME: bin, PATH: `${bin}:${process.env.PATH}` };
+  for (const target of ['root@203.0.113.7', 'ubuntu@203.0.113.7', '203.0.113.7', 'hydra@']) {
+    const r = spawnSync('bash', [script, target], { env, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 2, `${target}: refused`);
+    assert.match(r.stderr, /must be hydra@<host>/);
+  }
+  assert.equal(fs.existsSync(calls), false, 'a refused target is never contacted');
+  // The stage: exactly the bundle, its package.json, the unit and VERSION.
+  const stageDir = path.join(tmpHome(), 'stage');
+  const st = spawnSync('bash', [script, '--stage', stageDir], { env, encoding: 'utf8', timeout: 120_000 });
+  assert.equal(st.status, 0, st.stderr);
+  assert.deepEqual(fs.readdirSync(stageDir).sort(), ['VERSION', 'brain-server.mjs', 'hydra-brain.service', 'package.json']);
+  assert.equal(fs.existsSync(calls), false, '--stage contacts nothing');
+  // The bundle alone, in a folder with no node_modules anywhere above it: it runs, refuses an API key, and launches
+  // Claude Code with the same locked-down command line as the source.
+  const alone = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-brain-alone-'));
+  for (const f of fs.readdirSync(stageDir)) fs.copyFileSync(path.join(stageDir, f), path.join(alone, f));
+  const aloneHome = tmpHome();
+  const s1 = spawnSync(process.execPath, [path.join(alone, 'brain-server.mjs'), 'status'], { cwd: alone, env: cleanEnv(aloneHome), encoding: 'utf8', timeout: 30_000 });
+  assert.equal(s1.status, 0, s1.stderr);
+  assert.match(s1.stdout, /^key: missing$/m);
+  const s2 = spawnSync(process.execPath, [path.join(alone, 'brain-server.mjs'), 'run'], { cwd: alone, env: cleanEnv(aloneHome, { ANTHROPIC_API_KEY: 'sk-ant-xyz' }), encoding: 'utf8', timeout: 30_000 });
+  assert.equal(s2.status, 2, s2.stderr);
+  await checkCommandLine(await import(pathToFileURL(path.join(alone, 'brain-server.mjs')).href));
+  // A real deploy run against the fakes: rsync of the stage only, then the remote script.
+  fs.rmSync(calls, { force: true });
+  const d = spawnSync('bash', [script, 'hydra@203.0.113.7'], { env, encoding: 'utf8', timeout: 120_000 });
+  assert.equal(d.status, 0, d.stderr);
+  const log = fs.readFileSync(calls, 'utf8').trim().split('\n');
+  assert.equal(log.length, 2, log.join('\n'));
+  assert.match(log[0], /^rsync -az --delete -e ssh \S+\/ hydra@203\.0\.113\.7:hydra-brain\/$/);
+  assert.equal(log[1], 'ssh hydra@203.0.113.7 bash -s');
+  const remote = fs.readFileSync(path.join(bin, 'remote.sh'), 'utf8');
+  assert.equal(spawnSync('bash', ['-n', path.join(bin, 'remote.sh')]).status, 0, 'the remote script is valid bash');
+  const remoteCode = remote.split('\n').filter((l) => !l.trim().startsWith('#'));
+  assert.ok(!remoteCode.some((l) => /\bnpm\b|\bnpx\b|github|curl |wget /.test(l)), 'nothing is installed or fetched on the server');
+  const sudo = remoteCode.filter((l) => /\bsudo\b/.test(l) && !l.startsWith('nosudo() { echo'));
+  assert.equal(sudo.length, 4);
+  assert.ok(sudo.every((l) => /^sudo -n (install -m 644 -o root -g root "\$HOME\/hydra-brain\/hydra-brain\.service" \/etc\/systemd\/system\/hydra-brain\.service|systemctl (daemon-reload|enable hydra-brain\.service|restart hydra-brain\.service)) \|\| nosudo$/.test(l)), 'sudo -n, only for the unit file and systemctl');
+  assert.match(remote, /\[ "\$\(id -un\)" = hydra \]/, 'the server side checks it runs as hydra too');
+  assert.match(remote, /export CLAUDE_CONFIG_DIR="\$HOME\/\.claude"/, "the owner's login shell keeps Claude Code's files in ~/.claude");
+  fs.rmSync(alone, { recursive: true, force: true });
 }
 
 server.close();

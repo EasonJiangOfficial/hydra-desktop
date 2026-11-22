@@ -94,11 +94,15 @@ function writeStatus(p, patch) {
 }
 export const brainVersion = () => { try { return fs.readFileSync(path.join(HERE, 'VERSION'), 'utf8').trim() || 'dev'; } catch { return 'dev'; } };
 
+/** The only connectors the server uses: the owner's claude.ai Gmail and Google Calendar. Any other connector on his
+ * account (Drive, Vercel, Railway...) is never run here, read or not. */
+export const BRAIN_CONNECTORS = new Set(['gmail', 'calendar']);
 /** The connector gate: reads run; anything else is a relay approval, and runs only on "approved" (and a live turn). */
 export function brainGate({ approve, alive = async () => true, may = null, log = () => {} }) {
   return async (name, input) => {
     const c = connectorTool(name);
     if (!c) return false;
+    if (!c.server.startsWith('claude_ai_') || !BRAIN_CONNECTORS.has(connectorGroup(c.server))) { log('connector', { server: c.server, tool: c.tool, level: 'not_on_server' }); return false; }
     if (may && !may(connectorGroup(c.server), name)) { log('connector', { server: c.server, tool: c.tool, level: 'not_in_routine' }); return false; }
     const v = connectorLevel(c);
     log('connector', { server: c.server, tool: c.tool, level: v.level });
@@ -179,7 +183,8 @@ export async function main(argv, { env = process.env, out = (s) => console.log(s
       await new Promise((r) => setTimeout(r, setupWaitMs));
     }
     fs.mkdirSync(p.work, { recursive: true, mode: 0o700 });
-    const api = hydraApi({ base: brainBase(env), getKey: async () => key, ...(fetchImpl ? { fetchImpl } : {}) });
+    // The key is read again for every request: pairing again while this runs takes effect at once, no restart.
+    const api = hydraApi({ base: brainBase(env), getKey: async () => readKey(p) ?? key, ...(fetchImpl ? { fetchImpl } : {}) });
     const hydraTools = createHydraTools({ api, log: logLine });
     let toolsAt = 0;
     const turnRun = createBrainTurn({ hydraTools, executable, cwd: p.work, env, log: logLine });
