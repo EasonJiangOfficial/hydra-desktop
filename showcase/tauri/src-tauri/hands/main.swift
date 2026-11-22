@@ -2009,9 +2009,8 @@ case "trusted":
 case "windows":
     let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
     // Each window's file too (R11f-3): a key file open in an editor is blocked, not asked about as a window with no file.
-    // ponytail: no browser addresses here (a walk per browser window): a file:// page in a browser window other than
-    // the one located isn't blocked (a relay turn asks about it; on this Mac draw reads it). Add a cheap address read
-    // if that matters.
+    // No browser addresses here (a walk per browser window), so the list stays cheap: the sidecar reads each browser
+    // window's own with locate before draw reads it (R11g-2), so a file:// key file there is blocked too.
     out(["ok": true, "windows": windows().prefix(30).map { var i = winShows($0, url: false); if $0.pid == front { i["frontApp"] = true }; return i }])
 
 // Where the user is right now, for each message's live state: the app in front (never Roamies), its focused

@@ -276,10 +276,19 @@ const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime playe
 // Single-document apps only: a code editor's window shows its terminal panel, other tabs and an AI chat beside the
 // file it reports (R11c-6), so it asks.
 const DOC_APPS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint))$/i;
+const BROWSER_APPS = /^(safari|google chrome|chrome|chromium|arc|firefox|microsoft edge|msedge|brave browser|brave|opera|vivaldi|orion|zen)$/i;
+// The file names a title shows: ".env - Notepad", "*id_rsa - Notepad", "id_rsa — Edited", "● .env — shop — Code".
+const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).map((x) => x.replace(/^[*●•\s]+|[*●•\s]+$/gu, '')).filter(Boolean);
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
   if (win?.url) { try { const u = new URL(String(win.url).replace(/^view-source:/i, '')); if (u.protocol === 'file:') files.push(decodeURIComponent(u.pathname)); } catch { /* not a URL */ } }
+  // No file or address said (hands-win never says one; some Mac editors set no document): a key file's name in the
+  // title blocks it as the file itself would (R11g-3).
+  if (!files.length && !win?.url) {
+    const homes = homesOf(home), key = titleNames(win?.title).find((n) => hits(SECRET, [norm(n, home)], homes));
+    if (key) return verdict(BLOCK, `${app || 'That window'} shows ${key}, so I won't read it or look at it. Its name is a file that holds passwords or keys.`);
+  }
   let worst = verdict(SAFE);
   for (const f of files) {
     const v = checkRead(f, home);
@@ -292,7 +301,9 @@ export function checkWindow(win, home, { viewers = true } = {}) {
   if (!plain && worst.level === SAFE) {
     const title = String(win?.title ?? '').trim();
     const name = app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name";
-    worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? It has no file I can check, so it could show anything (a password, a message, a terminal).`), app };
+    // A browser window with no address said: its address wasn't read, so it isn't said to have no file (R11g-2).
+    const none = BROWSER_APPS.test(app) && !win?.url ? "I couldn't read which page or file it shows" : 'It has no file I can check';
+    worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a password, a message, a terminal).`), app };
   }
   return worst;
 }

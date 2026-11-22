@@ -457,6 +457,11 @@ async function* claudeCodeLoop(messages, o) {
   // turnAt: the step the turn under way started after (the last result). turnTook: what Claude Code's stream stamps say
   // this turn took so far (user_message_uuids on its replies): all a crash leaves to go by (R11f-1).
   let turnAt = 0, turnTook = null;
+  // folds: where a tool round ended and a new message began after it (R11g-5). Claude Code folds what was queued into a
+  // turn only there, and a typed turn's stream names none of it (sdk.d.ts: only its first frame is stamped). Each is the
+  // step its tool results came back at (the fold is made then, not when the next message starts), else that message's.
+  let toolAt = 0, lastStop = null;
+  const folds = [];
   const tookOf = (m) => (Array.isArray(m?.user_message_uuids) ? m.user_message_uuids : typeof m?.user_message_uuid === 'string' ? [m.user_message_uuid] : null);
   // Claude Code named what a turn took (R11c-B1): from then on, whatever it didn't take is unanswered. A turn that
   // ended well answered all it took; one cut short (an error result, max turns, a crash) only if its last message was
@@ -464,7 +469,8 @@ async function* claudeCodeLoop(messages, o) {
   const settle = (took, ok) => {
     if (!took) return;
     byUuid = true;
-    if (ok || (finalAt === answeredAt && finalAt > turnAt)) for (const a of added) if (took.includes(a.uuid)) a.done = true;
+    // Cut short after its final answer: what was sent before a fold in this turn was taken in and answered too.
+    if (ok || (finalAt === answeredAt && finalAt > turnAt)) for (const a of added) if (took.includes(a.uuid) || (!ok && folds.some((f) => f > a.at && f > turnAt))) a.done = true;
   };
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
   // After begin(): the first message is on the input already, so an addition always comes after it.
@@ -505,9 +511,15 @@ async function* claudeCodeLoop(messages, o) {
       if (message.type !== 'result') {
         // An assistant message that starts after an addition is its answer (or takes it in).
         if (!message.parent_tool_use_id) {
-          if (message.type === 'stream_event' && message.event?.type === 'message_start') { streamed = true; answeredAt = msgAt = ++step; }
-          else if (message.type === 'stream_event' && message.event?.type === 'message_delta' && message.event.delta?.stop_reason === 'end_turn') finalAt = msgAt;
+          if (message.type === 'stream_event' && message.event?.type === 'message_start') {
+            streamed = true;
+            const prev = msgAt;
+            answeredAt = msgAt = ++step;
+            if (lastStop === 'tool_use') folds.push(toolAt > prev ? toolAt : msgAt);
+            lastStop = null;
+          } else if (message.type === 'stream_event' && message.event?.type === 'message_delta') { lastStop = message.event.delta?.stop_reason ?? lastStop; if (lastStop === 'end_turn') finalAt = msgAt; }
           else if (message.type === 'assistant' && !streamed) { answeredAt = ++step; if (message.message?.stop_reason === 'end_turn') finalAt = step; }
+          else if (message.type === 'user' && Array.isArray(message.message?.content) && message.message.content.some((b) => b?.type === 'tool_result')) toolAt = ++step;
           const s = tookOf(message);
           if (s) turnTook = [...new Set([...(turnTook ?? []), ...s])];
         }

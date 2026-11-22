@@ -394,7 +394,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     let res;
     try { res = JSON.parse(r.stdout.trim().split('\n').pop() || '{}'); } catch { throw new Error(told(`hands helper failed: ${r.stderr.trim().slice(0, 200) || 'no output'}`)); }
     if (res.ok === false && !res.cancelled && !res.needsConfirm) {
-      if (process.platform === 'darwin' && /Accessibility/i.test(res.error ?? '')) {
+      // Only the helper's own words for it (main.swift), never a step's error that quotes the word from a window (R11g-4).
+      if (process.platform === 'darwin' && /^Hydra needs Accessibility permission/.test(res.error ?? '')) {
+        // A relay turn: the owner isn't at this Mac, so nothing opens there unasked.
+        if (remote()) throw new Error('Accessibility is off for Hydra on the Mac, so I can\'t read or control its apps from here. Tell the user to switch on Hydra in System Settings → Privacy & Security → Accessibility when they\'re back at the Mac, briefly.');
         // Open the exact Settings pane (once a minute at most) so the fix is one click away.
         if (Date.now() - axNudged > 60_000) { axNudged = Date.now(); openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'); }
         throw new Error('Accessibility is off for Hydra, so I can\'t read or control other apps yet. I just opened System Settings → Privacy & Security → Accessibility: switch on Hydra there, then ask again. Tell the user exactly that, briefly.');
@@ -477,7 +480,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // blockOnly: draw on this Mac, where only a key file stops it (as read_window), R11f-3.
   async function searchedShows(spec, ctx, ok = null, blockOnly = false) {
     const all = (await hands('windows').catch(() => null))?.windows ?? [];
-    if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN, blockOnly }).then(() => ({}));
+    // 'windows' leaves out a browser's address (a walk of each window, main.swift): each browser window checked gets
+    // its own here, so a key file open as a file:// page is blocked as one open in an editor is (R11g-2). hands-win
+    // reads none; the title check covers it there (checkWindow).
+    const addressed = (ws) => (process.platform === 'win32' ? ws : Promise.all(ws.map((w) => (w?.url || !appMatches(w, 'browser') ? w : hands('locate', `window:${w.id}`).then((r) => ({ ...w, ...r?.window }), () => w)))));
+    if (spec === 'screen') return windowShows(await addressed(all), ctx, { whole: WHOLE_SCREEN, blockOnly }).then(() => ({}));
     const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
     const name = spec.startsWith('app:') ? spec.slice(4) : null;
     const app = String(front?.app ?? name ?? '').trim();
@@ -485,7 +492,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // 'app:X': every window the helper's fuzzy match takes ("Preview Terminal" is Preview and Terminal); 'front': the
     // front app's windows.
     const same = (w) => (name != null ? appMatches(w, name) : !!app && String(w.app ?? '').toLowerCase() === app.toLowerCase());
-    const wins = [...(front ? [front] : []), ...(one ? [] : all.filter((w) => same(w) && w.id !== front?.id))];
+    const wins = [...(front ? [front] : []), ...(one ? [] : await addressed(all.filter((w) => same(w) && w.id !== front?.id)))];
     await windowShows(wins, ctx, { ok, blockOnly, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
     return { front, ids: new Set(wins.map((w) => w.id)) };
   }
@@ -846,12 +853,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // A relay turn (R11b-A): the windows draw reads words or controls in are checked first, as read_window's are. Again
     // for each beat, where the window each read goes to is resolved anew: the app in front can change between beats (an
     // open or type mark, a click, an alert, R11c-2). A window said yes to, as it showed then, isn't asked about twice.
-    // The whole screen: once a drawing (its question names everything on it). On this Mac nothing asks, but a key file
-    // open in a window draw reads is blocked, as read_window blocks it (R11f-3).
+    // The whole screen is asked once a drawing (its question names everything on it), but each beat still checks its
+    // windows for a key file: one can open between beats (R11g-1). On this Mac nothing asks, but a key file open in a
+    // window draw reads is blocked, as read_window blocks it (R11f-3).
     const okWins = new Set(), gated = new Map();
+    let screenAsked = false;
     const gate = (where = spec) => {
-      const k = where === 'screen' ? where : `${segNo}:${where}`;
-      if (!gated.has(k)) gated.set(k, searchedShows(where, ctx, okWins, !remote()));
+      const k = `${segNo}:${where}`;
+      if (!gated.has(k)) gated.set(k, searchedShows(where, ctx, okWins, !remote() || (where === 'screen' && screenAsked)).then((r) => { if (where === 'screen') screenAsked = true; return r; }));
       return gated.get(k);
     };
     try {

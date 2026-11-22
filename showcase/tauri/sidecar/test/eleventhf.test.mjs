@@ -12,7 +12,8 @@ const HOME = fs.realpathSync.native(os.homedir());
 assert.ok(HOME.includes('roamies-test-') || HOME.startsWith(fs.realpathSync.native(os.tmpdir())), 'runs only with a temp home');
 
 // ---- The tools against a fake helper that sends what the real ones send (hands/main.swift): 'windows' each window's
-// file (no address), 'locate' and 'ui' its file and address, find-text each match's window without either.
+// file (no address), 'locate' and 'ui' its file and address, find-text each match's window without either. On Windows
+// as hands-win does: no file or address anywhere (win_info), so a key file is known by its window's title (R11g-3).
 if (['darwin', 'win32'].includes(process.platform)) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-11f-'));
   const bin = path.join(dir, 'bin'), launched = path.join(dir, 'launched.log');
@@ -27,7 +28,7 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(a) + '\\n');
 const st = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, 'utf8'));
 const W = st.wins;
 const info = (w) => ({ id: w.id, app: w.app, title: w.title, bounds: [0, 0, 800, 600] });
-const shows = (w, url = true) => ({ ...info(w), ...(w.doc ? { document: w.doc } : {}), ...(url && w.url ? { url: w.url } : {}) });
+const shows = (w, url = true) => (process.platform === 'win32' ? info(w) : { ...info(w), ...(w.doc ? { document: w.doc } : {}), ...(url && w.url ? { url: w.url } : {}) });
 const sel = (t) => t === 'front' ? [W[0]] : t.startsWith('app:') ? W.filter((w) => w.app.toLowerCase().includes(t.slice(4).toLowerCase())) : t.startsWith('window:') ? W.filter((w) => w.id === +t.slice(7)) : [];
 let o = { ok: true };
 if (a[0] === 'windows') o = { ok: true, windows: W.map((w) => shows(w, false)) };
@@ -101,7 +102,8 @@ console.log(JSON.stringify(o));
   reset({ wins: [preview] });
   const f3b = await ring('Preview', 'Hello');
   assert.ok(f3b.startsWith('Drew '), f3b);
-  assert.deepEqual(asks, [], 'a plain read of Documents in Preview asks nothing');
+  // hands-win says no file, so there a relay read asks.
+  if (process.platform !== 'win32') assert.deepEqual(asks, [], 'a plain read of Documents in Preview asks nothing');
   reset({ wins: [{ id: 4, app: 'TextEdit', title: 'id_rsa', doc: key, text: '-----BEGIN OPENSSH PRIVATE KEY-----' }, preview] }, { relay: false });
   const f3c = await ring('TextEdit', 'BEGIN');
   assert.ok(f3c.includes('Blocked for safety: TextEdit shows') && !f3c.includes('PRIVATE KEY'), f3c);
@@ -125,7 +127,17 @@ console.log(JSON.stringify(o));
 // crash: Claude Code's uuids (on the error result, or on the stream's stamps) say it never took it, so it is named.
 const ev = (event, stamp) => ({ type: 'stream_event', parent_tool_use_id: null, event, ...(stamp ? { user_message_uuid: stamp.at(-1), user_message_uuids: stamp } : {}) });
 const step = (text, stop, stamp) => [ev({ type: 'message_start', message: { usage: {} } }, stamp), ev({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }), ev({ type: 'message_delta', delta: { stop_reason: stop }, usage: {} }), ev({ type: 'message_stop' })];
-const fakeQuery = (gen) => ({ prompt }) => { const it = prompt[Symbol.asyncIterator](); return Object.assign(gen(it), { interrupt: async () => {}, close: () => {} }); };
+// Stamped as sdk.d.ts says a typed turn is (R11g-5): only the turn's first frame of each kind keeps the uuids; a result
+// ends the turn.
+const firstStamps = async function* (src) {
+  let kinds = new Set();
+  for await (const m of src) {
+    if (m.type === 'result') kinds = new Set();
+    else if (m.user_message_uuids) { if (kinds.has(m.type)) { const { user_message_uuid, user_message_uuids, ...rest } = m; void user_message_uuid; void user_message_uuids; yield rest; continue; } kinds.add(m.type); }
+    yield m;
+  }
+};
+const fakeQuery = (gen) => ({ prompt }) => { const it = prompt[Symbol.asyncIterator](); return Object.assign(firstStamps(gen(it)), { interrupt: async () => {}, close: () => {} }); };
 const agentWith = (query) => new ClaudeCodeAgent({ model: 'm', system: 's', tools: [], executable: '/bin/claude', cwd: '/', env: {}, query, onRateLimit: () => {} });
 const runIt = async (agent) => { try { for await (const e of agentEvents(agent.prompt('what is on Thursday?'))) void e; return null; } catch (e) { return e.message; } };
 for (const kind of ['error_result', 'crash']) {
