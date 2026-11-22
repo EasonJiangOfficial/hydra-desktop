@@ -6,7 +6,9 @@
 // out: {type:'menu', items} {type:'ui', msg} {type:'overlays', ids}
 import { CONFIG_PATH, DATA_DIR, OLDER_DATA, ROAMIES_DIR } from './datadir.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
-import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare } from './claudecode.mjs';
+import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
+import { HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
+import { createRelay } from './relay.mjs';
 import { SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
@@ -36,6 +38,7 @@ import { cleanWakeName, wakeName } from './wakename.mjs';
 import { cleanSleepWord, createPower, DEFAULT_SLEEP_WORD, heardSleepWord } from './power.mjs';
 import { cleanDeviceKey, cleanHydraUrl, createHydraLink, HYDRA_KEY_SECRET } from './hydralink.mjs';
 import { SystemVoice, systemStatus } from './sysvoice.mjs';
+import { HydraVoice } from './hydravoice.mjs';
 import { KEY_NAME as SYNC_KEY, MIN_PASSPHRASE, checkFolder, folderReady, merge as syncMerge, newDevice, prepareFolder, readRemotes, suggestFolders, tooMuchGone, writeOwn } from './sync.mjs';
 import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
@@ -85,6 +88,9 @@ const guideVoices = new Set();
 // 0 to 100: my voice and sounds (#136). A missing or broken value is full volume, never silence.
 const volumeNow = () => (Number.isFinite(Number(config.volume)) ? Math.max(0, Math.min(100, Math.round(Number(config.volume)))) : 100);
 const ui = (msg) => {
+  // Muted from the Hydra window (bridge setMuted): the voice plays silently until unmuted, whatever the volume says.
+  if (msg.kind === 'volume' && voiceMuted) msg = { ...msg, v: 0 };
+  trackReply(msg);
   if (msg.kind === 'speech') {
     if (msg.stop) { send({ type: 'onboard', msg }); return send({ type: 'ui', msg }); }
     if (guideVoices.has(msg.id)) { if (msg.end) guideVoices.delete(msg.id); return send({ type: 'onboard', msg }); }
@@ -93,6 +99,32 @@ const ui = (msg) => {
   send({ type: 'ui', msg });
 };
 const ob = (msg) => send({ type: 'onboard', msg });
+// ---------- the Hydra window's bridge (hydra.rs, docs/BRIDGE.md v3) ----------
+// The reply being written and spoken goes to the web app's orb card as it streams (reply), as do muted and paused.
+const pushWeb = (msg) => send({ type: 'hydra_push', msg });
+let voiceMuted = false, voicePaused = false;
+let replySeq = 0, replyNow = null, replyAt = 0, replyTimer = null;
+function replyPush(final) {
+  if (!replyNow) return;
+  clearTimeout(replyTimer); replyTimer = null; replyAt = Date.now();
+  pushWeb({ reply: { id: replyNow.id, text: replyNow.text, final } });
+}
+function trackReply(msg) {
+  if (msg.kind === 'say' && msg.text) { replyNow = { id: `r${++replySeq}`, text: String(msg.text) }; replyPush(true); replyNow = null; return; }
+  if (msg.kind !== 'agent') return;
+  const e = msg.e ?? {};
+  if (e.type === 'start') {
+    replyNow = { id: `r${++replySeq}`, text: '' }; replyPush(false);
+    if (voicePaused) setPaused(false); // a new reply plays
+  } else if (e.type === 'text' && replyNow) {
+    replyNow.text += String(e.text ?? '');
+    if (Date.now() - replyAt > 100) replyPush(false); else replyTimer ??= setTimeout(() => replyPush(false), 100);
+  } else if ((e.type === 'done' || e.type === 'error') && replyNow) {
+    if (e.type === 'error' && !replyNow.text && e.message) replyNow.text = String(e.message);
+    replyPush(true); replyNow = null;
+  }
+}
+function setPaused(on) { voicePaused = !!on; send({ type: 'ui', msg: { kind: 'voice_pause', on: voicePaused } }); pushWeb({ paused: voicePaused }); }
 const say = (text, mood) => (onboarding ? ob({ kind: 'say', text, mood }) : ui({ kind: 'say', text, mood }));
 const sayOut = say;
 
@@ -264,11 +296,21 @@ let voiceProblemAt = 0;
 // Hydra's data (hydralink.mjs): the URL and device key; its tools join the agent's once both are set.
 const hydraLink = createHydraLink({ getUrl: () => cleanHydraUrl(config.hydraUrl).url || '', getKey: () => secrets.get(HYDRA_KEY_SECRET) });
 hydraLink.load().catch(() => {});
+// The Mac is the brain (W3 contract): paired with Hydra (bridge pair()), this Mac serves turns from the website, the
+// phone and routines (relay.mjs) with the owner's Claude login, and reads and writes Hydra's data through its MCP
+// tools (hydramcp.mjs). The device key lives in the Keychain and in this variable only; it is never logged.
+let hydraKey = null;
+const hydraBase = () => cleanHydraUrl(config.hydraUrl).url || HYDRA_ORIGIN;
+const hydraHttp = { req: (p, o) => hydraApi({ base: hydraBase(), getKey: async () => hydraKey }).req(p, o) };
+const hydraTools = createHydraTools({ api: hydraHttp, log: (k, d) => logLine(k, d) });
+const relay = createRelay({ api: hydraHttp, runTurn: (t, h) => relayTurn(t, h), log: (k, d) => logLine(k, d) });
+// Hydra's voice without a Fish Audio key of its own: Hydra's server voice (its Fish key), else the Mac's.
+HydraVoice.server = { api: hydraHttp, paired: () => !!hydraKey };
 // Beats made on this computer (a Gemini voice's, or a Fish voice the app doesn't ship) are kept, so each voice
 // and model's are only made once.
 const BEAT_DIR = path.join(DATA_DIR, 'beats');
 const speech = createSpeaker({
-  LocalVoiceImpl: SystemVoice, localStatus: systemStatus, keepWarmMs: 24 * 3600_000,
+  LocalVoiceImpl: HydraVoice, localStatus: systemStatus, keepWarmMs: 24 * 3600_000,
   beatStore: { read: (name) => readJson(path.join(BEAT_DIR, `${name}.json`)), write: (name, data) => writeJson(path.join(BEAT_DIR, `${name}.json`), data) },
   emit: (m) => ui(m),
   log: (kind, data) => logLine(kind, data),
@@ -989,7 +1031,7 @@ function makeAgent(cc) {
     model: config.model,
     system: system(),
     priorMessages: prior,
-    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name)) : [...tools, ...leanTools(hydraLink.tools())],
+    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name)) : [...tools, ...leanTools(hydraLink.tools()), ...localHydraTools()],
     maxTurns: config.lite ? LITE_TURNS : 24,
     transformContext: (msgs, o) => {
       const fitted = fitContext(msgs, { budgetTokens: requestBudget(), force: o?.force });
@@ -1004,7 +1046,7 @@ function makeAgent(cc) {
   if (cc) {
     const sid = session?.id;
     agent = new ClaudeCodeAgent({
-      ...common, executable: cc.executable, env: cc.env, cwd: WORKDIR, keepWarm: true,
+      ...common, executable: cc.executable, env: cc.env, cwd: WORKDIR, keepWarm: true, connectors: true, gate: connectorGate,
       resume: ccResume?.session === sid ? ccResume.state : null,
       onResume: (state) => { ccResume = { session: sid, state }; },
     });
@@ -2309,7 +2351,7 @@ function panelState() {
     intro: !!intro,
     // Hydra: asleep or awake, the sleep word, the clap wake's sensitivity, and the link to Hydra's data.
     hydra: { olderData: OLDER_DATA ? OLDER_DATA.replace(os.homedir(), '~') : null, detached: orbDetached(), asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), wake: phraseOn(),
-      url: hydraLink.url, link: hydraLink.status(), tools: hydraLink.toolCount },
+      url: hydraLink.url, link: hydraKey ? 'ready' : hydraLink.status(), tools: hydraTools.count, relay: relay.running },
     // The latest error anyone saw, for Copy last error.
     problem: lastProblem ? { code: lastProblem.code, at: lastProblem.at } : null,
   };
@@ -2454,7 +2496,7 @@ function onWriteTap() {
 async function onMenu(id, via) {
   if (id === 'show') ui({ kind: 'summon', show: true });
   else if (id === 'ask') await typeToAsk();
-  else if (id === 'stop') { const cancelled = busy; if (busy) logLine('stopped', { by: via === 'esc' ? 'esc' : 'stop' }); endIntro(); controller?.abort(); speech.stop(); ink.stop(cancelled); }
+  else if (id === 'stop') { if (voicePaused) setPaused(false); const cancelled = busy; if (busy) logLine('stopped', { by: via === 'esc' ? 'esc' : 'stop' }); endIntro(); controller?.abort(); speech.stop(); ink.stop(cancelled); }
   else if (id === 'new') {
     endIntro();
     freshSession('new'); menu();
@@ -2634,7 +2676,8 @@ async function onMenu(id, via) {
   else if (id === 'login') setLogin(!login.on);
   else if (id === 'logs') fs.mkdir(LOG_DIR, { recursive: true, mode: 0o700 }).then(() => openUrl(LOG_DIR)).catch(() => {});
   else if (id === 'diagnostics') saveDiagnostics();
-  else if (id === 'setup') send({ type: 'onboarding' });
+  // One setup, in the Hydra window (its Set up this Mac screen drives it through the bridge).
+  else if (id === 'setup') send({ type: 'main_show' });
   else if (id === 'intro') send({ type: 'onboarding', mode: 'chat' });
   else if (id === 'snap') areaSnap();
   else if (id === 'list') showList({ seconds: 20 });
@@ -2697,7 +2740,7 @@ async function onMenu(id, via) {
     const r = cleanDeviceKey(typed);
     if (!r.ok) { say(r.why, 'concerned'); return; }
     try { if (r.key) await secrets.set(HYDRA_KEY_SECRET, r.key); else await secrets.delete(HYDRA_KEY_SECRET); } catch (e) { say(`I couldn't save the key: ${e.message}`, 'concerned'); return; }
-    hydraLink.setKey(r.key); agentStale = true; if (panelOpen) panel();
+    hydraLink.setKey(r.key); hydraKey = r.key || null; if (hydraKey) hydraOnline(); else { relay.stop(); hydraTools.clear(); } agentStale = true; if (panelOpen) panel();
   }
   else if (id === 'voicedl') startVoiceDownload();
   else if (id === 'voice') {
@@ -2917,6 +2960,127 @@ async function onGuide(m) {
   }
 }
 
+// ---------- Hydra: pairing, the relay brain, connectors ----------
+const RELAY_MODEL = 'claude-opus-5-5'; // relay turns' model (config.relayModel); the local voice keeps the owner's pick
+const SURFACE_WORDS = { web: 'on the web', phone: 'on the phone', routine: 'as a routine', desktop: 'on this Mac' };
+function hydraOnline() {
+  if (!hydraKey) return;
+  if (!config.hydraUrl) { config.hydraUrl = HYDRA_ORIGIN; saveConfig(); }
+  hydraLink.setKey(hydraKey);
+  relay.start();
+  hydraTools.refresh().then(() => { agentStale = true; if (panelOpen) panel(); }).catch((e) => logLine('hydra_tools', { error: String(e?.message ?? e).slice(0, 160) }));
+  readHydraSettings();
+}
+// Hydra's own settings for this Mac, now and every few minutes: the sleep word is set in Hydra (agent_settings.sleep_word).
+let hydraSettingsTimer = null;
+async function readHydraSettings() {
+  clearTimeout(hydraSettingsTimer);
+  if (!hydraKey) return;
+  hydraSettingsTimer = setTimeout(readHydraSettings, 5 * 60_000); hydraSettingsTimer.unref?.();
+  try {
+    const r = await hydraHttp.req('/api/agent/state', { timeout: 20_000 });
+    if (!r.ok) return;
+    const j = await r.json();
+    const w = j?.settings?.sleepWord ?? j?.settings?.sleep_word;
+    if (typeof w !== 'string') return;
+    const c = cleanSleepWord(w);
+    if (c.ok && c.phrase !== (config.sleepWord || '')) { config.sleepWord = c.phrase; saveConfig(); voiceConfig(); logLine('sleep_word', { from: 'hydra' }); if (panelOpen) panel(); }
+  } catch (e) { logLine('hydra_state', { error: String(e?.message ?? e).slice(0, 120) }); }
+}
+// Hydra's tools for the local voice agent: a gated one waits for the owner's yes in Hydra; the UI tool moves the window.
+function localHydraTools() {
+  if (!hydraKey) return [];
+  return [
+    ...hydraTools.tools({ onConfirm: ({ summary }) => say(`That needs your yes in Hydra: ${summary}`, 'concerned') }),
+    showTool({ onUi: (action) => { send({ type: 'main_show' }); pushWeb({ ui: { ...action, at: Date.now() } }); } }),
+  ];
+}
+// The desktop risk gate for the owner's claude.ai connectors (Gmail, Calendar...), which bypass Hydra's own gate:
+// reads run; a send, a change, a trash or a delete asks the owner every time (an unanswered ask is a no).
+async function connectorGate(name, input, signal) {
+  const c = connectorTool(name);
+  if (!c) return false;
+  // claude.ai's own connectors don't send hints here; their tool names are read as they are (a read verb and nothing
+  // that writes). Any other server's tools need its own read-only hint too.
+  const v = checkMcpCall({ name: c.tool, annotations: c.server.startsWith('claude_ai_') ? { readOnlyHint: true } : null });
+  logLine('connector', { server: c.server, tool: c.tool, level: v.level });
+  if (v.level === SAFE) return true;
+  if (v.level === 'block') return false;
+  const app = c.server.replace(/^claude_ai_/, '').replace(/_/g, ' ');
+  return isYes(await ask({ placeholder: `${app}: ${c.tool.replace(/_/g, ' ')} ${JSON.stringify(input ?? {}).slice(0, 160)}`, choices: ['Allow', "Don't allow"], always: true }, signal));
+}
+// One relay turn (relay.mjs): the owner's Claude login on this Mac, its Mac tools, Hydra's tools and his connectors.
+// The events go back to Hydra in the agent SSE contract's shapes. A gated Hydra call sends confirm and waits for his
+// answer on any surface; a routine nobody watches waits the same way. Never an auto-yes.
+async function relayTurn(turn, { emit, signal }) {
+  await refreshAuth({ cached: true });
+  let cc = null;
+  try { cc = await claudeCodeRoute('anthropic'); } catch (e) { throw Object.assign(new Error(String(e?.message ?? e)), { code: 'mac_claude' }); }
+  if (!cc) throw Object.assign(new Error('Hydra Desktop is not signed in with Claude.'), { code: 'mac_signed_out' });
+  const said = String(turn.input?.text ?? turn.input?.audioTranscript ?? '').trim().slice(0, 20_000);
+  if (!said) throw new Error('The turn had no words.');
+  const at = turn.context ?? {};
+  const where = `(From Hydra ${SURFACE_WORDS[turn.surface] ?? 'on the web'}: the owner is on ${String(at.path ?? '/').slice(0, 200)}${String(at.search ?? '').slice(0, 200)}, scope ${['all', 'personal', 'ugc'].includes(at.scope) ? at.scope : 'all'}. Your reply shows there as text.${turn.surface === 'routine' ? ' This is a routine running by itself: nobody is watching, and anything that needs a yes waits for the owner.' : ''})`;
+  let list = [...tools, ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }) }), showTool({ onUi: (action) => emit({ type: 'ui', action }) })];
+  if (Array.isArray(turn.allowedTools)) {
+    const ok = new Set(turn.allowedTools.map(String));
+    list = list.filter((t) => ok.has(t.name) || ok.has(t.name.replace(/^hydra_/, '')));
+  }
+  const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
+  const agentRun = new ClaudeCodeAgent({
+    model: config.relayModel || RELAY_MODEL, system: system(), tools: list, maxTurns: 24, thinking: turn.surface === 'routine' ? 'medium' : 'low',
+    executable: cc.executable, env: cc.env, cwd: WORKDIR, signal, connectors: true, gate: connectorGate,
+  });
+  const names = new Map();
+  let usage;
+  logLine('relay_request', { surface: turn.surface, chars: said.length, model: config.relayModel || RELAY_MODEL });
+  for await (const e of agentEvents(agentRun.prompt(`${where}\n\n${said}`))) {
+    if (e.type === 'text_delta') emit({ type: 'text', delta: e.text });
+    else if (e.type === 'tool_call_start') { names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
+    else if (e.type === 'tool_call_end') { const n = names.get(e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? String(e.result ?? '').slice(0, 160) : words(n) }); }
+    else if (e.type === 'agent_done') usage = e.totalUsage;
+  }
+  if (signal.aborted) throw new Error('Stopped.');
+  emit({ type: 'done', ...(usage ? { usage } : {}) });
+}
+// The bridge's promise calls (hydra.rs): setup, pair, signInClaude, unpair. The answer goes back through the push
+// channel with the call's id; it never carries the device key or the pairing code.
+async function onBridge(m) {
+  const id = Number(m.id);
+  if (!Number.isInteger(id) || id < 1) return;
+  const answer = (result) => pushWeb({ res: { id, result } });
+  try {
+    if (m.cmd === 'setup') {
+      await refreshAuth();
+      const perm = (v) => (['granted', 'denied', 'not_determined'].includes(v) ? v : 'not_determined');
+      const p = m.perms ?? {};
+      answer({ paired: !!hydraKey, claude: oauthOn.get('anthropic') ? 'signed_in' : 'signed_out', permissions: { mic: perm(p.mic), accessibility: perm(p.accessibility), screen: perm(p.screen) }, version: VERSION });
+    } else if (m.cmd === 'pair') answer(await pairHere(String(m.code ?? '')));
+    else if (m.cmd === 'signInClaude') {
+      await refreshAuth();
+      if (!oauthOn.get('anthropic')) { await oauthLogin('anthropic'); await refreshAuth(); }
+      answer(oauthOn.get('anthropic') ? { ok: true } : { ok: false, error: 'Claude sign-in did not finish.' });
+    } else if (m.cmd === 'unpair') { await unpairHere(); answer(null); }
+  } catch (e) { answer({ ok: false, error: String(e?.message ?? e).slice(0, 200) }); }
+}
+async function pairHere(code) {
+  if (!/^[A-Za-z0-9-]{6,20}$/.test(code)) return { ok: false, error: 'invalid_code' };
+  const r = await pairDevice({ base: hydraBase(), code });
+  if (!r.ok) { logLine('pair', { ok: false, error: r.error }); return { ok: false, error: r.error }; }
+  try { await secrets.set(HYDRA_KEY_SECRET, r.key); } catch (e) { logLine('pair', { ok: false, error: 'keychain' }); return { ok: false, error: 'keychain' }; }
+  hydraKey = r.key;
+  logLine('pair', { ok: true });
+  hydraOnline(); agentStale = true; if (panelOpen) panel();
+  return { ok: true };
+}
+// Forgets this Mac's key (the web revokes it on the server, after asking the owner).
+async function unpairHere() {
+  await relay.stop();
+  hydraKey = null; hydraTools.clear(); hydraLink.setKey(null); clearTimeout(hydraSettingsTimer);
+  await secrets.delete(HYDRA_KEY_SECRET).catch((e) => console.error('unpair', e.message));
+  logLine('unpair', {}); agentStale = true; if (panelOpen) panel();
+}
+
 // ---------- main ----------
 createInterface({ input: process.stdin }).on('line', (line) => {
   let m;
@@ -2961,6 +3125,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'auto_listen' && m.turn === 'wake') { if (!power.asleep && !busy) send({ type: 'listen', wait: 8 }); }
   // The web app's bridge (window.hydraDesktop.attach / detach), passed on by the shell from Hydra's own page only.
   else if (m.type === 'orb_set') setOrbMode(!!m.detached, m.from ?? 'web');
+  // Bridge v3: the web card's mute and pause, and the promise calls (setup, pair, Claude sign-in, unpair).
+  else if (m.type === 'bridge_voice') {
+    if (typeof m.muted === 'boolean') { voiceMuted = m.muted; ui({ kind: 'volume', v: volumeNow() / 100 }); pushWeb({ muted: voiceMuted }); }
+    if (typeof m.paused === 'boolean') setPaused(m.paused);
+  }
+  else if (m.type === 'bridge_req') onBridge(m).catch((e) => console.error('bridge', e.message));
   else if (m.type === 'voice_barge_available') { bargeUnavailable = false; if (panelOpen) panel(); }
   else if (m.type === 'voice_barge_unavailable') { bargeUnavailable = true; logLine('barge', { unavailable: true }); if (panelOpen) panel(); }
   else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); power.talked(); }
@@ -3146,7 +3316,11 @@ const SETUP_VERSION = 2;
 if (config.onboarded && (config.setupVersion ?? 0) < SETUP_VERSION) {
   config.onboarded = false; config.onboardStep = 1; saveConfig();
 }
-if (!config.onboarded) send({ type: 'onboarding' });
+// One setup (owner: "why was setup for the agent separate from the setup of the app they shoud be one"): the Hydra
+// window's Set up this Mac screen drives it through the bridge, so the separate guide no longer opens by itself.
+if (!config.onboarded) { config.onboarded = true; config.onboardStep = 0; config.setupVersion = SETUP_VERSION; saveConfig(); }
+// Paired already: serve relay turns and load Hydra's tools (tried again later if the Keychain can't be read yet).
+retryLoad(async () => { const k = await secrets.get(HYDRA_KEY_SECRET); hydraKey = k || null; if (hydraKey) hydraOnline(); }, { onError: (e) => console.error('hydra key', e.message) });
 // Just updated: the panel opens on What's new by itself, once, a moment after launch. whatsNewFrom (the version
 // before) marks which changes are this update's.
 {

@@ -494,7 +494,7 @@
       row);
   }
 
-  const signIn = (p) => link('Sign in', () => act(`login:${p.id}`), { k: `login:${p.id}`, aria: `Sign in to ${p.label}`, disabled: !!state.loggingIn });
+  const signIn = (p) => link(p.id === 'anthropic' ? 'Sign in with Claude' : 'Sign in', () => act(`login:${p.id}`), { k: `login:${p.id}`, aria: p.id === 'anthropic' ? 'Sign in with Claude' : `Sign in to ${p.label}`, disabled: !!state.loggingIn });
   const connect = (s) => link('Connect', () => act(`local:connect:${s.id}`), { k: `local:connect:${s.id}`, aria: `Connect ${s.label}` });
   const addKey = (p) => link(ui.key === p.id ? 'Cancel' : 'Add key', () => toggleKey(p.id), { k: `addkey:${p.id}`, aria: `Add ${p.label} API key` });
 
@@ -563,18 +563,18 @@
     // The accounts, then each local server (Ollama, LM Studio, the ones added) and the Add a server row.
     const servers = state.localServers ?? [];
     if (ui.addSent != null && servers.length > ui.addSent) { ui.addSent = null; ui.add = { label: '', url: '', key: '', images: false }; if (ui.key === ADD) ui.key = null; }
-    const accounts = [...state.providers.filter((p) => p.id !== 'local' && (p.on || p.method)), ...servers.map((x) => ({ ...x, server: true })), { id: ADD, add: true }];
+    // Hydra Desktop runs on Claude only (the owner's Claude login): the one account is Sign in with Claude.
+    const accounts = state.providers.filter((p) => p.id === 'anthropic');
     const { box, nav } = paged('accounts', accounts, (p) => (p.add ? addServerRow() : p.server ? serverRow(p) : el('li', { className: `acct${ui.key === p.id ? ' open' : ''}` },
       el('div', { className: 'setting' },
         // Connected: a lit dot by the name, its word in a tooltip (and for screen readers).
-        el('span', { className: 'acct-name' }, p.label, p.on ? el('span', { className: 'led on', role: 'img', 'aria-label': p.method === 'local' ? 'Connected' : 'Signed in', 'data-tip': p.method === 'local' ? 'Connected' : 'Signed in' }) : null),
+        el('span', { className: 'acct-name' }, p.id === 'anthropic' ? 'Claude' : p.label, p.on ? el('span', { className: 'led on', role: 'img', 'aria-label': p.method === 'local' ? 'Connected' : 'Signed in', 'data-tip': p.method === 'local' ? 'Connected' : 'Signed in' }) : null),
         p.on ? el('span', { className: 'row-btns' },
-          p.key ? changeKey(p) : null,
           ui.key === p.id ? null : armed(p.signedIn && !p.keySaved ? 'Sign out' : 'Remove', 'Confirm', `signout:${p.id}`, `signout:${p.id}`, `Remove ${p.label} from Hydra`))
           : state.loggingIn === p.id ? el('span', { className: 'waiting', textContent: 'Signing in…' })
-          : p.method === 'oauth' ? (p.key ? el('span', { className: 'links' }, signIn(p), addKey(p)) : signIn(p))
+          : p.method === 'oauth' ? signIn(p)
           : addKey(p)),
-      p.method === 'key' || p.key ? keyForm(p.id, p.label, (key, kind) => send({ type: 'panel_key', provider: p.id, kind, key }), p.kinds) : null)),
+      null)),
     { label: 'Accounts', pin: accounts.findIndex((p) => p.id === ui.key) });
     // Tabs, so each part fits the window: the model you talk to, hybrid models, subagents, backups and the accounts. The
     // middle three need a signed-in account; with none, the page opens on Accounts.
@@ -582,7 +582,7 @@
     const tabs = [['default', 'Default'], hybrid ? ['hybrid', 'Hybrid'] : null, crew ? ['crew', 'Subagents'] : null, backups ? ['backups', 'Backups'] : null, ['accounts', 'Accounts']].filter(Boolean);
     const t = pageTab('model', tabs, on.length ? 'default' : 'accounts');
     const head = el('div', { className: 'mhead' }, tabRow('Model', 'model-panel', tabs, t, (id) => { ui.tabs.model = id; }));
-    if (t === 'accounts') return [head, tabPanel('model-panel', t, el('div', { className: 'group paged' }, el('div', { className: 'ghead' }, el('p', { textContent: 'Sign in to use their models.' })), box)), foot(null, nav)];
+    if (t === 'accounts') return [head, tabPanel('model-panel', t, el('div', { className: 'group paged' }, box)), foot(null, nav)];
     return [head, tabPanel('model-panel', t, ...(t === 'hybrid' ? [hybrid] : t === 'crew' ? [crew] : t === 'backups' ? [backups] : [group(null, 'Which AI answers you.', null,
       select ?? el('p', { className: 'empty', textContent: 'Sign in on the Accounts tab first.' }),
       effortRow('default', model, true),
@@ -781,8 +781,9 @@
         v.wake ? toggle('Key phrase', needs(`Say “Hey ${v.wakeName || 'Hydra'}” to start listening. Not while asleep.`), v.wakeWord, () => act('wakeword'), 'wakeword') : null,
         v.wake ? el('div', { className: 'setting' }, el('span', {}, 'Phrase'),
           el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: `Hey ${v.wakeName || 'Hydra'}` }), link('Change', () => act('wakename'), { k: 'wakename', aria: 'Change the key phrase' }))) : null,
-        el('div', { className: 'setting' }, el('span', {}, 'Sleep word', info('Said while Hydra listens, it puts Hydra to sleep at once.')),
-          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: v.sleepWord ?? 'Hydra, sleep' }), link('Change', () => act('sleepword', true), { k: 'sleepword', aria: 'Change the sleep word' }))),
+        // Set in Hydra (agent_settings.sleep_word): shown here, changed there.
+        el('div', { className: 'setting' }, el('span', {}, 'Sleep word', info('Puts Hydra to sleep at once. Change it in Hydra.')),
+          el('span', { className: 'val', textContent: v.sleepWord ?? 'Hydra, sleep' })),
         v.mac ? toggle('Interrupt by talking', v.bargeNA ? 'Off for now: this mic has no echo cancellation, so Hydra could hear its own voice and stop itself. It tries again with another mic.' : needs('Talk while Hydra speaks to stop it and say something new. A double clap does it too. Uses the Mac\'s echo cancellation.'), v.barge, () => act('barge'), 'barge') : null),
       group('After replies', 'When the mic opens without a key.', null,
         toggle('Auto-listen', needs(v.listenEvery ? 'Mic opens after every spoken reply.' : 'Mic opens when I ask you something.'), v.autoListen, () => act('autolisten'), 'autolisten'),
@@ -1127,7 +1128,7 @@
       status: { state: 'ready', text: 'Ready' }, busy: false, canNew: true,
       model: { provider: 'anthropic', id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', providerLabel: 'Anthropic' },
       providers: [
-        { id: 'anthropic', label: 'Anthropic', on: true, method: 'oauth', key: true, signedIn: true, models: [{ id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', levels: CLAUDE_LEVELS }, { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', levels: CLAUDE_LEVELS }] },
+        { id: 'anthropic', label: 'Anthropic', on: !q.has('signedout'), method: 'oauth', key: true, signedIn: !q.has('signedout'), models: [{ id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', levels: CLAUDE_LEVELS }, { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', levels: CLAUDE_LEVELS }] },
         { id: 'openai', label: 'OpenAI', on: false, method: 'oauth', key: true, models: [] },
         { id: 'gemini', label: 'Gemini', on: true, method: 'key', key: true, keySaved: true, models: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', levels: ['high'] }] },
         { id: 'moonshot', label: 'Kimi (Moonshot)', on: false, method: 'key', models: [], kinds: [

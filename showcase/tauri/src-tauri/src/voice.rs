@@ -292,9 +292,15 @@ fn handle_voice(app: &AppHandle, msg: Value) {
             to_overlays(app, &ui);
             to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state") }));
         }
-        Some("partial") | Some("level") => to_overlays(app, &ui),
+        Some("level") => to_overlays(app, &ui),
+        // The words as they're recognised, for the Hydra window's orb card too (bridge v3: heard).
+        Some("partial") => {
+            to_overlays(app, &ui);
+            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": false } }));
+        }
         Some("final") => {
             to_overlays(app, &ui);
+            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": true } }));
             // area: the part of the screen marked with the pen while talking (a PNG, its rect and the strokes).
             to_sidecar(app, &json!({ "type": "voice", "text": msg.get("text"), "area": msg.get("area"), "ms": msg.get("ms"), "via": msg.get("via") }));
         }

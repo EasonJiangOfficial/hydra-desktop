@@ -69,9 +69,10 @@ pub fn bridge_token() -> &'static str {
     })
 }
 
-/// What a bridge call does: tell the sidecar something, or open a link in the default browser.
+/// What a bridge call does: tell the sidecar something, open a link in the default browser, or (version 3, answered
+/// through the push channel with the call's id) report setup or ask macOS for a permission.
 #[derive(Debug, PartialEq)]
-pub enum BridgeAct { Sidecar(Value), Open(String) }
+pub enum BridgeAct { Sidecar(Value), Open(String), Setup(u32), Permission(u32, String) }
 
 /// A `hydra-desktop://<cmd>?t=<token>[&u=<link>]` call, or None: no token or the wrong one (another frame), a page that
 /// isn't Hydra's own, an unknown call, or a link that isn't https, http or mailto.
@@ -79,7 +80,36 @@ pub fn bridge_action(url: &Url, token: &str, on_hydra: bool) -> Option<BridgeAct
     if !on_hydra || url.scheme() != BRIDGE_SCHEME { return None; }
     let param = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
     if param("t").as_deref() != Some(token) || token.is_empty() { return None; }
+    // A promise call's id (version 3): the page's counter, echoed back in the answer.
+    let id = || param("id").filter(|v| (1..=9).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit())).and_then(|v| v.parse::<u32>().ok());
+    let req = |cmd: &str, extra: Value| -> Option<BridgeAct> {
+        let mut m = json!({ "type": "bridge_req", "id": id()?, "cmd": cmd });
+        if let (Some(o), Value::Object(x)) = (m.as_object_mut(), extra) { o.extend(x); }
+        Some(BridgeAct::Sidecar(m))
+    };
     match url.host_str().unwrap_or("") {
+        // Version 3: the web card's buttons drive the Mac's voice.
+        "stop" => Some(BridgeAct::Sidecar(json!({ "type": "menu", "id": "stop", "via": "web" }))),
+        "pause" => Some(BridgeAct::Sidecar(json!({ "type": "bridge_voice", "paused": true }))),
+        "resume" => Some(BridgeAct::Sidecar(json!({ "type": "bridge_voice", "paused": false }))),
+        "mute" => match param("on").as_deref() {
+            Some("1") => Some(BridgeAct::Sidecar(json!({ "type": "bridge_voice", "muted": true }))),
+            Some("0") => Some(BridgeAct::Sidecar(json!({ "type": "bridge_voice", "muted": false }))),
+            _ => None,
+        },
+        // Version 3: one setup in the Hydra window.
+        "setup" => id().map(BridgeAct::Setup),
+        "perm" => {
+            let kind = param("kind").filter(|k| ["mic", "accessibility", "screen"].contains(&k.as_str()))?;
+            Some(BridgeAct::Permission(id()?, kind))
+        }
+        // The one-time pairing code: letters, digits and dashes only (the server's codes), never logged.
+        "pair" => {
+            let code = param("code").filter(|c| (6..=20).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))?;
+            req("pair", json!({ "code": code }))
+        }
+        "claude" => req("signInClaude", json!({})),
+        "unpair" => req("unpair", json!({})),
         "wake" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": true, "from": "web" }))),
         "sleep" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": false, "from": "web" }))),
         "detach" => Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": true, "from": "web" }))),
@@ -101,11 +131,27 @@ pub fn bridge_js(token: &str) -> String {
 const BRIDGE_JS: &str = r#"(() => {
   if (location.origin !== 'https://hydra-olive-one.vercel.app' || window.hydraDesktop || window.top !== window) return;
   const T = '__HYDRA_TOKEN__';
-  let snap = { state: 'Asleep', micLevel: 0, outputLevel: 0, detached: false };
-  const subs = new Set();
-  const call = (cmd, extra = '') => { location.href = 'hydra-desktop://' + cmd + '?t=' + T + extra; };
+  let snap = { state: 'Asleep', micLevel: 0, outputLevel: 0, detached: false, muted: false, paused: false, reply: null, heard: null, ui: null };
+  const subs = new Set(), waiting = new Map();
+  let n = 0;
+  // Each call is its own hidden frame's navigation, caught and cancelled by the app (hydra.rs), so calls made one
+  // right after another never replace each other the way two location changes in a row would.
+  const call = (cmd, extra = '') => {
+    const f = document.createElement('iframe');
+    f.hidden = true;
+    f.src = 'hydra-desktop://' + cmd + '?t=' + T + extra;
+    (document.body || document.documentElement).appendChild(f);
+    setTimeout(() => f.remove(), 3000);
+  };
+  // A call with an answer: the app replies through __hydraDesktopPush({ res: { id, result } }).
+  const ask = (cmd, extra = '', ms = 180000) => new Promise((resolve, reject) => {
+    const id = ++n;
+    const t = setTimeout(() => { waiting.delete(id); reject(new Error('Hydra Desktop did not answer')); }, ms);
+    waiting.set(id, (r) => { clearTimeout(t); resolve(r); });
+    call(cmd, '&id=' + id + extra);
+  });
   Object.defineProperty(window, 'hydraDesktop', { value: Object.freeze({
-    version: 2,
+    version: 3,
     get state() { return snap.state; },
     get detached() { return snap.detached; },
     get micLevel() { return snap.micLevel; },
@@ -116,8 +162,18 @@ const BRIDGE_JS: &str = r#"(() => {
     sleep: () => call('sleep'),
     detach: () => call('detach'),
     attach: () => call('attach'),
+    stop: () => call('stop'),
+    pause: () => call('pause'),
+    resume: () => call('resume'),
+    setMuted: (muted) => call('mute', '&on=' + (muted ? 1 : 0)),
+    setup: () => ask('setup'),
+    pair: (code) => ask('pair', '&code=' + encodeURIComponent(String(code))),
+    signInClaude: () => ask('claude', '', 600000),
+    requestPermission: (kind) => ask('perm', '&kind=' + encodeURIComponent(String(kind)), 150000),
+    unpair: () => ask('unpair').then(() => undefined),
   }) });
   Object.defineProperty(window, '__hydraDesktopPush', { value: (m) => {
+    if (m && m.res) { const done = waiting.get(m.res.id); if (done) { waiting.delete(m.res.id); done(m.res.result); } return; }
     snap = { ...snap, ...m };
     for (const fn of subs) { try { fn({ ...snap }); } catch {} }
     window.dispatchEvent(new CustomEvent('hydradesktop', { detail: { ...snap } }));
@@ -162,6 +218,8 @@ pub fn open_main(app: &AppHandle) {
                 match bridge_action(url, bridge_token(), on_hydra) {
                     Some(BridgeAct::Sidecar(msg)) => crate::to_sidecar(&nav_app, &msg),
                     Some(BridgeAct::Open(link)) => open_in_browser(&link),
+                    Some(BridgeAct::Setup(id)) => crate::bridge_setup(&nav_app, id),
+                    Some(BridgeAct::Permission(id, kind)) => crate::bridge_permission(&nav_app, id, kind),
                     None => {}
                 }
                 false
@@ -210,20 +268,70 @@ pub fn navigate(app: &AppHandle, link: &str) {
     }
 }
 
-/// The agent's state for the web app's orb: { state, micLevel, outputLevel }, from the overlay (host.js).
-pub fn push(app: &AppHandle, msg: &Value) {
-    let Some(w) = app.get_webview_window(MAIN_LABEL) else { return };
-    // Only into Hydra's own page (the sign-in or a blocked page never gets the agent's state).
-    if !w.url().is_ok_and(|u| is_hydra(&u)) { return; }
+/// What may go to the page from the app: the orb's state and levels, attached or not (version 2); muted, paused, the
+/// reply being spoken, the words heard, a UI action and a promise call's answer (version 3). Anything else is dropped.
+pub fn clean_push(msg: &Value) -> Option<Value> {
     let state = msg.get("state").and_then(Value::as_str).filter(|s| ["Asleep", "Listening", "Thinking", "Speaking"].contains(s));
     let level = |k: &str| msg.get(k).and_then(Value::as_f64).map(|v| (v.clamp(0.0, 1.0) * 1000.0).round() / 1000.0);
+    let text = |v: &Value| v.as_str().map(|t| t.chars().take(20_000).collect::<String>());
     let mut out = serde_json::Map::new();
     if let Some(s) = state { out.insert("state".into(), json!(s)); }
     if let Some(v) = level("micLevel") { out.insert("micLevel".into(), json!(v)); }
     if let Some(v) = level("outputLevel") { out.insert("outputLevel".into(), json!(v)); }
-    if let Some(d) = msg.get("detached").and_then(Value::as_bool) { out.insert("detached".into(), json!(d)); }
-    if out.is_empty() { return; }
-    let _ = w.eval(format!("window.__hydraDesktopPush&&__hydraDesktopPush({})", Value::Object(out)));
+    for k in ["detached", "muted", "paused"] {
+        if let Some(d) = msg.get(k).and_then(Value::as_bool) { out.insert(k.into(), json!(d)); }
+    }
+    match msg.get("reply") {
+        Some(Value::Null) => { out.insert("reply".into(), Value::Null); }
+        Some(r) => if let (Some(id), Some(t)) = (r.get("id").filter(|v| v.is_string() || v.is_u64()), r.get("text").and_then(text)) {
+            out.insert("reply".into(), json!({ "id": id, "text": t, "final": r.get("final").and_then(Value::as_bool).unwrap_or(false) }));
+        },
+        None => {}
+    }
+    match msg.get("heard") {
+        Some(Value::Null) => { out.insert("heard".into(), Value::Null); }
+        Some(h) => if let Some(t) = h.get("text").and_then(text) {
+            out.insert("heard".into(), json!({ "text": t, "final": h.get("final").and_then(Value::as_bool).unwrap_or(false) }));
+        },
+        None => {}
+    }
+    // A UI action (the server's UiAction shape); the page checks every path again before acting on it.
+    if let Some(a) = msg.get("ui").filter(|a| a.is_object()) {
+        let s = |k: &str| a.get(k).and_then(Value::as_str).filter(|v| v.len() <= 2000);
+        let ok = match s("kind") {
+            Some("navigate") => s("href").is_some_and(|h| h.starts_with('/') && !h.starts_with("//")).then(|| json!({ "kind": "navigate", "href": s("href") })),
+            Some("openPanel") => s("param").zip(s("value")).map(|(p, v)| json!({ "kind": "openPanel", "param": p, "value": v })),
+            Some("setScope") => s("scope").filter(|v| ["all", "personal", "ugc"].contains(v)).map(|v| json!({ "kind": "setScope", "scope": v })),
+            Some("highlight") => s("selector").map(|v| json!({ "kind": "highlight", "selector": v })),
+            _ => None,
+        };
+        if let Some(mut v) = ok {
+            // Each action is new, even when it repeats the last one.
+            v["at"] = a.get("at").filter(|x| x.is_u64()).cloned().unwrap_or(json!(0));
+            out.insert("ui".into(), v);
+        }
+    }
+    // A promise call's answer. Only these keys reach the page; the sidecar never puts a key or code in one.
+    if let Some(r) = msg.get("res") {
+        if let Some(id) = r.get("id").and_then(Value::as_u64) {
+            return Some(json!({ "res": { "id": id, "result": r.get("result").cloned().unwrap_or(Value::Null) } }));
+        }
+    }
+    (!out.is_empty()).then(|| Value::Object(out))
+}
+
+/// Sends what clean_push lets through into the main window, only while it shows Hydra's own page (the sign-in or a
+/// blocked page never gets the agent's state).
+pub fn push(app: &AppHandle, msg: &Value) {
+    let Some(w) = app.get_webview_window(MAIN_LABEL) else { return };
+    if !w.url().is_ok_and(|u| is_hydra(&u)) { return; }
+    let Some(out) = clean_push(msg) else { return };
+    let _ = w.eval(format!("window.__hydraDesktopPush&&__hydraDesktopPush({out})"));
+}
+
+/// A promise call's answer.
+pub fn answer(app: &AppHandle, id: u32, result: Value) {
+    push(app, &json!({ "res": { "id": id, "result": result } }));
 }
 
 #[cfg(test)]
@@ -279,15 +387,77 @@ mod tests {
         assert_eq!(open("javascript:alert(1)"), None);
         assert_eq!(open("file:///etc/passwd"), None);
         assert_eq!(open("x-apple.systempreferences:com.apple.preference.security"), None);
-        // The page script: main frame and Hydra only, carries the secret, version 2.
+        // The page script: main frame and Hydra only, carries the secret, version 3.
         let js = bridge_js(t);
         assert!(js.contains(&format!("const T = '{t}'")) && !js.contains("__HYDRA_TOKEN__"));
         assert!(js.contains("!e.isTrusted"), "only real clicks open links");
-        assert!(js.contains("window.top !== window") && js.contains("version: 2") && js.contains("detach: () => call('detach')") && js.contains("get detached()"));
+        assert!(js.contains("window.top !== window") && js.contains("version: 3") && js.contains("detach: () => call('detach')") && js.contains("get detached()"));
         assert_eq!(bridge_token().len(), 32);
         assert_eq!(bridge_token(), bridge_token(), "one secret per launch");
     }
     fn url_escape(s: &str) -> String { s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect() }
+
+    #[test]
+    fn version_3_calls() {
+        let u = |s: &str| s.parse::<Url>().unwrap();
+        let t = "0123456789abcdef0123456789abcdef";
+        let b = |s: &str| bridge_action(&u(&format!("hydra-desktop://{s}")), t, true);
+        let sc = |v: Value| Some(BridgeAct::Sidecar(v));
+        assert_eq!(b(&format!("stop?t={t}")), sc(json!({ "type": "menu", "id": "stop", "via": "web" })));
+        assert_eq!(b(&format!("pause?t={t}")), sc(json!({ "type": "bridge_voice", "paused": true })));
+        assert_eq!(b(&format!("resume?t={t}")), sc(json!({ "type": "bridge_voice", "paused": false })));
+        assert_eq!(b(&format!("mute?t={t}&on=1")), sc(json!({ "type": "bridge_voice", "muted": true })));
+        assert_eq!(b(&format!("mute?t={t}&on=0")), sc(json!({ "type": "bridge_voice", "muted": false })));
+        assert_eq!(b(&format!("mute?t={t}&on=yes")), None, "mute needs 1 or 0");
+        assert_eq!(b(&format!("setup?t={t}&id=7")), Some(BridgeAct::Setup(7)));
+        assert_eq!(b(&format!("setup?t={t}")), None, "a promise call needs its id");
+        assert_eq!(b(&format!("setup?t={t}&id=-1")), None);
+        assert_eq!(b(&format!("setup?t={t}&id=1234567890")), None, "ids are short counters");
+        assert_eq!(b(&format!("perm?t={t}&id=3&kind=mic")), Some(BridgeAct::Permission(3, "mic".into())));
+        assert_eq!(b(&format!("perm?t={t}&id=3&kind=accessibility")), Some(BridgeAct::Permission(3, "accessibility".into())));
+        assert_eq!(b(&format!("perm?t={t}&id=3&kind=screen")), Some(BridgeAct::Permission(3, "screen".into())));
+        assert_eq!(b(&format!("perm?t={t}&id=3&kind=camera")), None, "only the three permissions");
+        assert_eq!(b(&format!("pair?t={t}&id=4&code=AB12-CD34")), sc(json!({ "type": "bridge_req", "id": 4, "cmd": "pair", "code": "AB12-CD34" })));
+        assert_eq!(b(&format!("pair?t={t}&id=4&code=a%22b%3Bc%3Cd")), None, "codes are letters, digits and dashes");
+        assert_eq!(b(&format!("pair?t={t}&id=4&code=abc")), None, "too short");
+        assert_eq!(b(&format!("pair?t={t}&code=AB12CD34")), None, "no id");
+        assert_eq!(b(&format!("claude?t={t}&id=5")), sc(json!({ "type": "bridge_req", "id": 5, "cmd": "signInClaude" })));
+        assert_eq!(b(&format!("unpair?t={t}&id=6")), sc(json!({ "type": "bridge_req", "id": 6, "cmd": "unpair" })));
+        // The secret and Hydra's own page, as for every call.
+        for c in ["stop", "pause", "resume", "mute?on=1&", "setup?id=1&", "perm?id=1&kind=mic&", "pair?id=1&code=AB12CD34&", "claude?id=1&", "unpair?id=1&"] {
+            let (host, q) = c.split_once('?').map(|(h, q)| (h, q.to_owned())).unwrap_or((c, String::new()));
+            assert_eq!(bridge_action(&u(&format!("hydra-desktop://{host}?{q}t=guess")), t, true), None, "{c} with a wrong secret");
+            assert_eq!(bridge_action(&u(&format!("hydra-desktop://{host}?{q}t={t}")), t, false), None, "{c} from a page that isn't Hydra");
+        }
+        let js = bridge_js(t);
+        for f in ["stop: () => call('stop')", "pause: () => call('pause')", "resume: () => call('resume')", "setMuted: (muted)", "setup: () => ask('setup')",
+            "pair: (code)", "signInClaude: ()", "requestPermission: (kind)", "unpair: ()", "if (m && m.res)", "muted: false, paused: false, reply: null, heard: null, ui: null"] {
+            assert!(js.contains(f), "the page script has {f}");
+        }
+    }
+
+    #[test]
+    fn pushes_carry_only_known_fields() {
+        let p = |v: Value| clean_push(&v);
+        assert_eq!(p(json!({ "state": "Speaking", "outputLevel": 1.7, "token": "x" })), Some(json!({ "state": "Speaking", "outputLevel": 1.0 })));
+        assert_eq!(p(json!({ "state": "Dancing" })), None);
+        assert_eq!(p(json!({ "muted": true, "paused": false })), Some(json!({ "muted": true, "paused": false })));
+        assert_eq!(p(json!({ "reply": { "id": "r1", "text": "Hello", "final": true, "extra": 1 } })), Some(json!({ "reply": { "id": "r1", "text": "Hello", "final": true } })));
+        assert_eq!(p(json!({ "reply": null })), Some(json!({ "reply": null })));
+        assert_eq!(p(json!({ "reply": { "text": "no id" } })), None);
+        assert_eq!(p(json!({ "heard": { "text": "what's my balance" } })), Some(json!({ "heard": { "text": "what's my balance", "final": false } })));
+        let long = "a".repeat(30_000);
+        assert_eq!(p(json!({ "heard": { "text": long, "final": true } })).unwrap()["heard"]["text"].as_str().unwrap().len(), 20_000);
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/money?tx=1", "at": 3 } })), Some(json!({ "ui": { "kind": "navigate", "href": "/money?tx=1", "at": 3 } })));
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "//evil.com/" } })), None, "never another site");
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "https://evil.com/" } })), None);
+        assert_eq!(p(json!({ "ui": { "kind": "setScope", "scope": "ugc" } })), Some(json!({ "ui": { "kind": "setScope", "scope": "ugc", "at": 0 } })));
+        assert_eq!(p(json!({ "ui": { "kind": "setScope", "scope": "work" } })), None);
+        assert_eq!(p(json!({ "ui": { "kind": "openPanel", "param": "tx", "value": "abc" } })), Some(json!({ "ui": { "kind": "openPanel", "param": "tx", "value": "abc", "at": 0 } })));
+        assert_eq!(p(json!({ "ui": { "kind": "eval", "code": "x" } })), None);
+        assert_eq!(p(json!({ "res": { "id": 9, "result": { "ok": true } }, "state": "Asleep" })), Some(json!({ "res": { "id": 9, "result": { "ok": true } } })), "an answer goes alone");
+        assert_eq!(p(json!({ "res": { "id": "9" } })), None);
+    }
 
     #[test]
     fn the_bridge_and_pushes_only_answer_hydra() {

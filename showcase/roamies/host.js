@@ -542,6 +542,7 @@
   window.__roamieHost = (m) => {
     Roamie.wake?.(); // the frame loop naps while the sidekick is hidden
     if (m.kind === 'speech') { Roamie.voiceOut?.handle(m); return; } // plays on, even while it changes screens
+    if (m.kind === 'voice_pause') { Roamie.voiceOut?.pause?.(m.on); return; }
     if (m.kind === 'volume') { Roamie.voiceOut?.setVolume(m.v); if (Roamie.sfx) Roamie.sfx.volume = m.v; return; }
     if (held) { held.q.push(m); return; }
     if (m.kind === 'notch') { if (Roamie.notch) { Roamie.notch.enabled = !!m.on; if (m.style) Roamie.notch.style = m.style; if (!m.on) Roamie.notch.close(); } return; }

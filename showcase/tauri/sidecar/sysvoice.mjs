@@ -38,19 +38,9 @@ export class SystemVoice {
     this.busy = true;
     const file = path.join(this.tmp, `hydra-say-${process.pid}-${Math.random().toString(36).slice(2)}.wav`);
     try {
-      await new Promise((resolve, reject) => {
-        // The text goes in on stdin, never in the arguments (other processes can read those).
-        const args = ['-o', file, '--file-format=WAVE', `--data-format=LEI16@${SYSTEM_RATE}`, '-f', '-', ...(this.voice ? ['-v', this.voice] : [])];
-        const c = this.child = this.run('/usr/bin/say', args, { stdio: ['pipe', 'ignore', 'pipe'] });
-        let err = '';
-        c.stderr?.on('data', (d) => { err += d; });
-        c.on('error', reject);
-        c.on('close', (code) => (code === 0 ? resolve() : reject(new Error(err.trim() || `say exited ${code}`))));
-        c.stdin.end(text);
-      });
+      const out = await this.render(text, file);
       if (this.done) return;
-      const pcm = wavPcm(await fs.readFile(file));
-      if (pcm?.length) this.onAudio?.(pcm, SYSTEM_RATE);
+      if (out?.pcm?.length) this.onAudio?.(out.pcm, out.rate);
     } catch (e) {
       if (!this.done) { this.done = true; this.onError?.({ reason: 'error', message: `The Mac's voice failed: ${e.message}` }); }
       return;
@@ -59,6 +49,20 @@ export class SystemVoice {
       fs.unlink(file).catch(() => {});
     }
     this.next();
+  }
+  /** One sentence as { pcm, rate }, made with the Mac's `say` into `file` (deleted by the caller). */
+  async render(text, file) {
+    await new Promise((resolve, reject) => {
+      // The text goes in on stdin, never in the arguments (other processes can read those).
+      const args = ['-o', file, '--file-format=WAVE', `--data-format=LEI16@${SYSTEM_RATE}`, '-f', '-', ...(this.voice ? ['-v', this.voice] : [])];
+      const c = this.child = this.run('/usr/bin/say', args, { stdio: ['pipe', 'ignore', 'pipe'] });
+      let err = '';
+      c.stderr?.on('data', (d) => { err += d; });
+      c.on('error', reject);
+      c.on('close', (code) => (code === 0 ? resolve() : reject(new Error(err.trim() || `say exited ${code}`))));
+      c.stdin.end(text);
+    });
+    return { pcm: wavPcm(await fs.readFile(file)), rate: SYSTEM_RATE };
   }
 }
 

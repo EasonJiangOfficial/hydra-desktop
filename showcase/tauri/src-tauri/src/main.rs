@@ -1772,8 +1772,72 @@ fn login_item(app: &AppHandle, set: Option<bool>) {
     to_sidecar(app, &json!({ "type": "login_item_status", "supported": supported, "on": on, "approval": approval }));
 }
 
+/// macOS permission states in the bridge's words (W3 bridge v3): granted, denied or not_determined.
+fn perm_word(v: Option<&str>) -> &'static str {
+    match v { Some("granted") => "granted", Some("denied") => "denied", _ => "not_determined" }
+}
+/// One permission's state now. mic counts speech recognition too, where this Mac still needs it.
+fn perm_now(kind: &str) -> &'static str {
+    if !cfg!(target_os = "macos") { return "not_determined"; }
+    if kind == "accessibility" { return perm_word(Some(accessibility(false))); }
+    let v = helper_perms(&["--perms"]);
+    let s = |k: &str| perm_word(v.get(k).and_then(Value::as_str));
+    match kind {
+        "mic" => {
+            let speech = if v.get("speechNeeded").and_then(Value::as_bool) == Some(true) { s("speech") } else { "granted" };
+            if s("mic") == "denied" || speech == "denied" { "denied" } else if s("mic") == "granted" && speech == "granted" { "granted" } else { "not_determined" }
+        }
+        _ => s("screen"),
+    }
+}
+
+/// window.hydraDesktop.setup(): the permissions here, the rest (paired, Claude, version) from the sidecar, which
+/// answers the page (bridge_req setup).
+pub(crate) fn bridge_setup(app: &AppHandle, id: u32) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let perms = json!({ "mic": perm_now("mic"), "accessibility": perm_now("accessibility"), "screen": perm_now("screen") });
+        to_sidecar(&app, &json!({ "type": "bridge_req", "id": id, "cmd": "setup", "perms": perms }));
+    });
+}
+
+/// window.hydraDesktop.requestPermission(kind): the macOS prompt, or the right System Settings pane when it was
+/// already refused; then the new state once it changes, or after 2 minutes.
+pub(crate) fn bridge_permission(app: &AppHandle, id: u32, kind: String) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let before = perm_now(&kind);
+        if cfg!(target_os = "macos") && before != "granted" {
+            let pane = match kind.as_str() { "mic" => "Privacy_Microphone", "screen" => "Privacy_ScreenCapture", _ => "Privacy_Accessibility" };
+            match (kind.as_str(), before) {
+                ("accessibility", _) => { accessibility(true); }
+                (_, "denied") => open_settings(pane.into()),
+                ("mic", _) => {
+                    helper_perms(&["--request", "mic"]);
+                    let v = helper_perms(&["--perms"]);
+                    if v.get("speechNeeded").and_then(Value::as_bool) == Some(true) && v.get("speech").and_then(Value::as_str) != Some("granted") {
+                        helper_perms(&["--request", "speech"]);
+                    }
+                }
+                _ => { helper_perms(&["--request", "screen"]); }
+            }
+            let until = Instant::now() + Duration::from_secs(120);
+            while perm_now(&kind) == before && Instant::now() < until {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        hydra::answer(&app, id, json!(perm_now(&kind)));
+    });
+}
+
 fn handle_sidecar(app: &AppHandle, msg: Value) {
     match msg.get("type").and_then(Value::as_str) {
+        // The Hydra window's bridge (hydra.rs): reply and heard text, muted and paused, UI actions, promise answers.
+        Some("hydra_push") => {
+            if let Some(m) = msg.get("msg") {
+                hydra::push(app, m);
+            }
+        }
         Some("login_item") => login_item(app, msg.get("on").and_then(Value::as_bool)),
         Some("menu") => {
             if let Some(items) = msg.get("items").and_then(Value::as_array) {

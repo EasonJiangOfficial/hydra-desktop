@@ -869,7 +869,11 @@
       ctx.restore();
     };
 
-    const hitBubble = (bb, x, y) => bb && !bb.closing && x >= bb.x.x && x <= bb.x.x + bb.w.x && y >= bb.y.x && y <= bb.y.x + bb.h.x;
+    // Attached to the Hydra window (bridge v3): the reply and the words heard show in the window's orb card, so no
+    // speech, thinking or listening bubble floats on the desktop. A question that needs an answer (Allow, a typed
+    // reply) still shows: it can only be answered here.
+    const shown = (bb) => !!bb && (!R.orbAttached || (!!bb.input && !bb.input.listen));
+    const hitBubble = (bb, x, y) => shown(bb) && !bb.closing && x >= bb.x.x && x <= bb.x.x + bb.w.x && y >= bb.y.x && y <= bb.y.x + bb.h.x;
 
     // Back beside the cursor wherever it is now (they may have moved on meanwhile), else where it was when taken.
     const penHome = () => R.sidebar?.dock?.() ?? (presence.ptr && besideCursor(fol.side < 0 ? 'left' : 'right', presence.ptr)) ?? pen.home ?? [m.x, m.y];
@@ -1344,7 +1348,7 @@
         if (!stage()) return null;
         let e = null;
         const add = (x0, y0, x1, y1) => { e = e ? [Math.min(e[0], x0), Math.min(e[1], y0), Math.max(e[2], x1), Math.max(e[3], y1)] : [x0, y0, x1, y1]; };
-        for (const bb of [b, ...dying]) if (bb) { add(bb.x.x - 8, bb.y.x - 8, bb.x.x + bb.w.x * 1.08 + 8, bb.y.x + bb.h.x * 1.08 + 8); add(bb.tail.x.x - 8, bb.tail.y.x - 8, bb.tail.x.x + 8, bb.tail.y.x + 8); }
+        for (const bb of [b, ...dying]) if (shown(bb)) { add(bb.x.x - 8, bb.y.x - 8, bb.x.x + bb.w.x * 1.08 + 8, bb.y.x + bb.h.x * 1.08 + 8); add(bb.tail.x.x - 8, bb.tail.y.x - 8, bb.tail.x.x + 8, bb.tail.y.x + 8); }
         if (tool) { const g = tagBox(tool); add(g.x, g.y - 10, g.x + g.w, g.y + g.h); }
         if (DOCKED && pen.held) add(pen.tip[0] - 14, pen.tip[1] - 14, pen.tip[0] + 14, pen.tip[1] + 14);
         return e;
@@ -1366,8 +1370,8 @@
         // The tag goes under every bubble, so it can never cover the words or the Allow and Don't allow buttons of the
         // open one, nor sit on one that's fading out (the tag takes its usual spot back as soon as a bubble closes).
         if (tool) drawTag(ctx, tool);
-        for (const bb of dying) { drawBubble(ctx, bb); drawText(ctx, env, bb); }
-        if (b) { drawBubble(ctx, b); drawText(ctx, env, b); }
+        for (const bb of dying) if (shown(bb)) { drawBubble(ctx, bb); drawText(ctx, env, bb); }
+        if (shown(b)) { drawBubble(ctx, b); drawText(ctx, env, b); }
       },
     };
     return self;
