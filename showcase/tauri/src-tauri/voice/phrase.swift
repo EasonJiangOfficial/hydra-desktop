@@ -6,7 +6,8 @@
 // - a sound key per word (a small Metaphone: "hydra", "hydro", "hidra" -> "HTR"; "three" -> "0R"; "tree" -> "TR");
 // - a word matches when it's the same word, has the same sound key, or (5 letters or more) differs by one sound and
 //   at most two letters ("tree" for "three"). A sound more or less never matches: "compute" isn't "computer",
-//   "hydrate" isn't "hydra". Words of 4 letters or fewer need the same sound key ("Nora" isn't "Nova").
+//   "hydrate" isn't "hydra". Words of 4 letters or fewer need the same sound key and the same vowel sound: "keel" and
+//   "gill" are "kill", but "call", "cool" and "goal" aren't (the sleep word "3 kill" fired on "their call").
 import Foundation
 
 enum Spoken {
@@ -103,6 +104,16 @@ enum Spoken {
         return out
     }
 
+    /// The word's first vowel sound, roughly: "kill", "keel", "kiel" -> "i"; "call" -> "a"; "cool", "goal" -> "o".
+    static func vowel(_ word: String) -> String {
+        let w = Array(word.lowercased().filter { $0.isLetter && $0.isASCII })
+        let vowels: Set<Character> = ["a", "e", "i", "o", "u", "y"]
+        guard let s = w.indices.first(where: { vowels.contains(w[$0]) && (w[$0] != "y" || $0 > 0) }) else { return "" }
+        let two = s + 1 < w.count ? String(w[s ... s + 1]) : String(w[s])
+        if ["ee", "ea", "ie", "ey"].contains(two) || w[s] == "y" { return "i" }
+        return String(w[s])
+    }
+
     static func edits(_ a: String, _ b: String) -> Int {
         let a = Array(a), b = Array(b)
         if a.isEmpty || b.isEmpty { return max(a.count, b.count) }
@@ -123,7 +134,7 @@ enum Spoken {
         if heard.count > want.count, heard.hasSuffix("s"), !want.hasSuffix("s"), same(String(heard.dropLast()), want) { return true }
         let kh = key(heard), kw = key(want)
         guard !kw.isEmpty else { return false }
-        if kh == kw { return true }
+        if kh == kw { return want.count >= 5 || vowel(heard) == vowel(want) }
         guard want.count >= 5 else { return false }
         if heard.count >= 4, heard.first == want.first, heard.last == want.last, edits(heard, want) <= 1 { return true }
         guard kh.count == kw.count, kw.count >= 2 else { return false }
@@ -132,16 +143,18 @@ enum Spoken {
     }
 
     /// A looser match, for one word of a longer phrase whose other words are heard well ("Good night, Heidler",
-    /// "Three girl"): the same first sound, and one sound more, less or different. A word's first "h" is often lost in
-    /// a noisy room ("Good night, Idler" for "Good night, Hydra"), so that counts as the same first sound.
+    /// "Three girl"): the same first and last sound, and one sound more or less in between. Never a different sound:
+    /// "Heather" isn't "Hydra", "call" isn't "kill"; nor a last sound lost: "idea" isn't "Hydra". A word's first "h" is
+    /// often lost in a noisy room ("Good night, Idler" for "Good night, Hydra"), so that counts as the same first sound.
     static func near(_ heard: String, _ want: String) -> Bool {
         if same(heard, want) { return true }
-        let kh = Array(key(heard)), kw = Array(key(want))
+        var kh = Array(key(heard)), kw = Array(key(want))
         guard kw.count >= 2 else { return false }
-        if kh.first == kw.first { return edits(String(kh), String(kw)) <= 1 }
-        // Without its h, only a sound more or less, never a different one ("every" isn't "hydra").
-        if kw.first == "H", kh.first == "A" { let bare = "A" + String(kw.dropFirst()); return kh.count != bare.count ? edits(String(kh), bare) <= 1 : String(kh) == bare }
-        return false
+        // Without its h ("idra" for "hydra"), or with it and one sound more or less ("idler"); "every" isn't "hydra".
+        let lostH = kw.first == "H" && kh.first == "A"
+        if lostH { kw[0] = "A"; if kh == kw { return true } }
+        guard kh.first == kw.first, kh.last == kw.last, kh.count != kw.count else { return false }
+        return edits(String(kh), String(kw)) <= 1
     }
 
     /// Where `want` is heard in `words`, starting at word `i`: the index just past it, or nil. A wanted word may be heard
@@ -176,7 +189,9 @@ enum PhraseTest {
                              ("compute", "computer", false), ("computr", "computer", true), ("nora", "nova", false), ("jervis", "jarvis", true),
                              ("travis", "jarvis", false), ("keel", "kill", true), ("skill", "kill", false), ("killed", "kill", false),
                              ("slip", "sleep", true), ("goodnight", "goodnight", true), ("hey", "hydra", false), ("hyra", "hydra", true),
-                             ("gill", "kill", true), ("header", "hydra", true), ("heather", "hydra", false)] {
+                             ("gill", "kill", true), ("header", "hydra", true), ("heather", "hydra", false),
+                             ("call", "kill", false), ("cool", "kill", false), ("goal", "kill", false), ("coal", "kill", false),
+                             ("calls", "kill", false), ("kiel", "kill", true)] {
             check("\(h) \(want ? "is" : "isn't") \(w)", Spoken.same(h, w) == want)
         }
         let w = { (s: String) in Spoken.words(s).map(\.word) }
@@ -189,6 +204,9 @@ enum PhraseTest {
         check("a lost h, loosely: good night, Idler", Spoken.follows(w("goodnight hydra"), in: w("Good night, Idler."), at: 0, loose: true) == 3)
         check("never for the name alone: either isn't Hydra", !Spoken.same("either", "hydra"))
         check("good night, every one isn't good night, Hydra", Spoken.follows(w("goodnight hydra"), in: w("Good night, every one."), at: 0, loose: true) == nil)
+        check("a different sound isn't near: good night, Heather", Spoken.follows(w("goodnight hydra"), in: w("Good night, Heather."), at: 0, loose: true) == nil)
+        check("a lost last sound isn't near: good night idea", Spoken.follows(w("goodnight hydra"), in: w("good night idea"), at: 0, loose: true) == nil)
+        check("call isn't near kill: their call", Spoken.follows(w("3 kill"), in: w("it's their call"), at: 1, loose: true) == nil)
         check("a near word alone isn't a strong one: hey Harry", Spoken.follows(w("hey hydra"), in: w("hey harry"), at: 0, loose: true) == nil)
         return bad == 0 ? 0 : 1
     }

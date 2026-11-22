@@ -511,6 +511,8 @@ final class AutoGain {
 enum WakeWord {
     // Greetings as the recogniser writes "Hey" ("hay", "a", "high"...), and the stray words that may come before it.
     static let greetings: Set<String> = ["hey", "hi", "hay", "heya", "hiya", "hei", "high", "hello", "a", "ay", "eh", "okay", "ok", "yo", "they", "he"]
+    /// Greetings that are everyday words too ("a heater", "they're cool", "high power"): only before the name itself.
+    static let weakGreetings: Set<String> = ["a", "ay", "eh", "he", "they", "high", "yo"]
     static let fillers: Set<String> = ["um", "uh", "erm", "er", "oh", "so", "and", "well", "okay", "ok", "hm", "hmm", "the", "a"]
     static let defaultNames = ["hydra"]
     // Set and read on the main thread.
@@ -566,6 +568,11 @@ enum WakeWord {
     static func endsOpen(_ text: String) -> Bool { text.trimmingCharacters(in: .whitespaces).last.map { $0.isLetter || $0.isNumber } ?? false }
 
     private static func isName(_ w: String) -> Bool { names.contains { Spoken.same(w, $0) } }
+    /// How many letters off the closest name a heard word is, a plural's s aside ("hydras" is 0).
+    private static func off(_ w: String) -> Int { names.map { Spoken.edits(w.count > $0.count && w.hasSuffix("s") ? String(w.dropLast()) : w, $0) }.min() ?? Int.max }
+    /// The name after a greeting: two letters off at most ("Hey Heidra"; not "Hey hider"), the name itself after a weak
+    /// greeting ("A Hydra"; not "a hotter", "a header", "a hydro plant").
+    private static func isGreeted(_ w: String, after g: String) -> Bool { isName(w) && off(w) <= (weakGreetings.contains(g) ? 0 : 2) }
     /// The name alone needs to be closer: two letters off at most ("header" sounds like "hydra" but isn't it).
     private static func isNameAlone(_ w: String) -> Bool { names.contains { Spoken.same(w, $0) && Spoken.edits(w, $0) <= 2 } }
 
@@ -593,17 +600,21 @@ enum WakeWord {
             // A greeting, then the name (or the name split in two: "Hi dra"), with only spaces or a comma between.
             if greetings.contains(ws[i]), i + 1 < ws.count, text[words[i].range.upperBound ..< words[i + 1].range.lowerBound].allSatisfy({ $0 == " " || $0 == "," }) {
                 var hit: Int?
-                if isName(ws[i + 1]) { hit = i + 1 } else if i + 2 < ws.count, isName(ws[i + 1] + ws[i + 2]) { hit = i + 2 }
+                if isGreeted(ws[i + 1], after: ws[i]) { hit = i + 1 } else if i + 2 < ws.count, isGreeted(ws[i + 1] + ws[i + 2], after: ws[i]) { hit = i + 2 }
                 if let j = hit {
                     if atStart(i) { return (rest(after: j), Spoken.edits(ws[i + 1], names[0]), nil) }
                     late = true
                 }
             }
-            // The name alone, first.
+            // The name alone, first. Only near it ("Hydro"), it must stand alone too: a pause mark or nothing after it
+            // ("Hydro, open Mail"; not "hydro power is cheap").
             if isNameAlone(ws[i]) || i + 1 < ws.count && isNameAlone(ws[i] + ws[i + 1]) && !isName(ws[i + 1]) {
                 let j = isNameAlone(ws[i]) ? i : i + 1
-                if nameStarts(i) { return (rest(after: j), Spoken.edits(ws[i], names[0]), nil) }
-                late = true
+                let stands = off(j == i ? ws[i] : ws[i] + ws[j]) == 0 || j + 1 == words.count || !text[words[j].range.upperBound ..< words[j + 1].range.lowerBound].allSatisfy { $0 == " " }
+                if stands {
+                    if nameStarts(i) { return (rest(after: j), Spoken.edits(ws[i], names[0]), nil) }
+                    late = true
+                }
             }
         }
         if late { return (nil, closest, "the phrase came after other words") }
@@ -726,7 +737,11 @@ final class Voice {
     /// A chunk of Hydra's voice: it plays in the mic's engine when that runs with echo cancellation (the echo
     /// reference), opening the mic for it when it can; else on an output-only engine.
     func play(id: String, pcm: Data, rate: Double) {
-        if !out.busy, bargeCan, !hub.echoCancel, micAllowed { hub.open(device: InputDevice.forListening(), echoCancel: true); micReopened() }
+        if #available(macOS 14, *), !out.busy, bargeCan, !hub.echoCancel, micAllowed, hub.echoAllowed(now: uptime()) {
+            let opens = hub.opens
+            hub.open(device: InputDevice.forListening(), echoCancel: true)
+            if hub.opens != opens { micReopened() }
+        }
         out.play(id: id, pcm: pcm, rate: rate)
     }
     // bargeBroken: this mic had no echo cancellation; tried again when the mic changes.
@@ -735,11 +750,25 @@ final class Voice {
     func setSpeaking(_ on: Bool) { shellSpeaking = on }
     private var bargeCan: Bool { bargeOn && !asleep && (phase == .idle || phase == .wake) && !dryRun && LiveTest.url == nil }
     private var micAllowed: Bool { LiveTest.url != nil || !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
-    /// Echo cancellation on the mic while interrupting is on (Hydra's voice is then its reference), unless Hydra is
-    /// already speaking on its own engine (moving it now would cut the sentence off).
+    /// Echo cancellation on the mic only while Hydra speaks with interrupting on (its voice is then the reference), and
+    /// 3 s after. Not all the time: its noise suppression and level control would work on every clap and wake word too.
+    /// Never moved mid-sentence (Hydra speaking on its own engine) and never dropped mid-take or mid-sentence, so
+    /// turning interrupting on or off doesn't restart the mic.
+    private var spokeAt = -100.0
     private var echoWanted: Bool {
         guard #available(macOS 14, *) else { return false }
-        return bargeOn && !(out.onOwnEngine && out.busy)
+        let take = phase == .armed || phase == .holding || phase == .handsFree || phase == .finishing
+        return Self.echoWanted(barge: bargeOn, speaking: speaking, spokeAgo: uptime() - spokeAt, take: take, echoNow: hub.echoCancel, ownEngineBusy: out.onOwnEngine && out.busy)
+    }
+    static func echoWanted(barge: Bool, speaking: Bool, spokeAgo: Double, take: Bool, echoNow: Bool, ownEngineBusy: Bool) -> Bool {
+        if ownEngineBusy { return false }
+        if echoNow && (take || speaking || spokeAgo < 3) { return true }
+        return barge && speaking
+    }
+    /// Whether the one mic is needed: a take, wake listening, the clap detector, barge-in or Hydra's voice in its engine.
+    /// The recogniser's feed is always attached, so it doesn't count by itself (it kept the mic open with everything off).
+    static func micWanted(allowed: Bool, take: Bool, wake: Bool, clap: Bool, barging: Bool, playingInMic: Bool) -> Bool {
+        allowed && (take || wake || clap || barging || playingInMic)
     }
     private func talkedOver() {
         guard Trigger.decide(.voice, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take, phase == .idle || phase == .wake else { return }
@@ -877,6 +906,7 @@ final class Voice {
     private static let wakeRecycle = 30.0 // a fresh wake recogniser this often, so memory stays bounded
     private static let wakePause = 1.2 // words stopped this long without the phrase: start fresh for the next thing said
     private static let wakeCooldown = 2.0
+    static let phraseWait = 8.0 // a take started by the wake phrase waits this long for words, as one from the keys
 
     var engineName: String { useAnalyzer ? "speechanalyzer" : "sfspeech" }
 
@@ -983,7 +1013,8 @@ final class Voice {
         let clapWanted = clapOn || bargeOn && speaking || calibrateUntil != nil || clapMeter
         if clapWanted != hub.has("clap") { if clapWanted { hub.add("clap", claps.feed) } else { hub.remove("clap") } }
         let take = phase == .armed || phase == .holding || phase == .handsFree || phase == .finishing
-        let wanted = micAllowed && (hub.hasSpeech || take || phase == .wake || clapWanted || bargeCan && speaking || out.busy && hub.echoCancel)
+        if speaking { spokeAt = now }
+        let wanted = Self.micWanted(allowed: micAllowed, take: take, wake: phase == .wake, clap: clapWanted, barging: bargeCan && speaking, playingInMic: out.busy && hub.echoCancel)
         hub.tick(now: now, wanted: wanted, device: InputDevice.forListening(), echo: echoWanted)
         if clapMeter, hub.running, now - meterAt >= 0.1, let m = claps.meter() {
             meterAt = now
@@ -1000,7 +1031,7 @@ final class Voice {
 
     private func arm(_ now: Double) {
         phase = .armed
-        nothingWait = 8
+        nothingWait = Self.phraseWait
         chordAt = now
         heldAtArm = keysDown()
         if !heldAtArm.isEmpty { log("chord: keys already down don't count toward a shortcut: \(heldAtArm.sorted())") }
@@ -1168,7 +1199,7 @@ final class Voice {
     /// Another mic was picked, or the default input changed: the one mic is rebuilt on it once (debounced, mic.swift).
     func micChanged() {
         retryBarge()
-        hub.changed()
+        hub.newMic()
     }
 
     private func stopWake() {
@@ -1227,6 +1258,8 @@ final class Voice {
         // Same mic, same recogniser: what follows the phrase is already the start of the take.
         woke = true
         wakeWords = max(0, WakeWord.tokens(text).count - WakeWord.tokens(rest).count)
+        // The take's own wait for words, as a key press gives it (an earlier listenNow may have left 3 s).
+        nothingWait = Self.phraseWait
         phase = .handsFree
         chordAt = now
         best = rest
@@ -1490,6 +1523,12 @@ if args.contains("--test-wake") {
     check("Hey", nil)
     check("Hey. Hydra", "")
     check("", nil)
+    // Everyday talk that sounds like the name (the verify pass: each of these woke it).
+    for t in ["It's a hotter day today", "That's a header problem", "A heater is on", "Okay, a hatter", "hydro power is cheap",
+              "Hey hider", "They hydrate a lot", "a hydro plant"] { check(t, nil) }
+    check("Hydro, open Mail", "open Mail")
+    check("Hydro", "")
+    check("Hey Heidra", "")
     // The sleep word, anywhere in what was said.
     func sleeps(_ text: String, _ want: Bool) { let got = SleepWord.heard(in: text); print("\(got == want ? "ok" : "FAIL") sleep \"\(text)\" -> \(got)"); if got != want { bad += 1 } }
     sleeps("Hydra, sleep.", true)
@@ -1501,6 +1540,9 @@ if args.contains("--test-wake") {
     sleeps("Hydra", false)
     SleepWord.set("Goodnight Hydra")
     sleeps("goodnight, Hydra", true)
+    sleeps("Good night, Heather", false)
+    sleeps("good night idea", false)
+    sleeps("Good night, Heidler.", true)
     sleeps("Hydra, sleep", false)
     SleepWord.set("Good night Hydra")
     sleeps("Goodnight Hydra", true)
@@ -1510,6 +1552,10 @@ if args.contains("--test-wake") {
     sleeps("three-kill", true)
     sleeps("We killed three hours", false)
     sleeps("three skills", false)
+    for t in ["I have three calls today", "it's their call", "that's their goal", "they're cool", "free call now",
+              "three goals in the first half", "there's coal"] { sleeps(t, false) }
+    sleeps("Free girl.", true)
+    sleeps("three keel", true)
     SleepWord.set("")
     sleeps("Hydra, sleep", true)
     // A later reading of the take that no longer matches the phrase: its words still come off.

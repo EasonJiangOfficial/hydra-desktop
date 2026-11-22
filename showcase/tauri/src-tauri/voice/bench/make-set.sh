@@ -47,4 +47,16 @@ for t in "I need to hydrate after the run." "My new car is a Hyundai." "Hey ther
   "Okay, compute the total for me." "Hey, hand me that charger."; do
   line negative none "$D" "$S" "$t"
 done
+# Everyday talk that sounds like the name or the sleep word (each fired before the matcher was tightened).
+for t in "It's a hotter day today." "That's a header problem." "A heater is on." "Okay, a hatter." \
+  "Hydro power is cheap." "Hey hider."; do
+  line negative none "$D" "$S" "$t"
+done
+for t in "I have three calls today." "It's their call." "That's their goal." "They're cool." "Free call now." \
+  "Three goals in the first half." "There's coal."; do
+  line negative none "$D" "3 kill" "$t"
+done
+for t in "Good night, Heather." "Good night idea."; do
+  line negative none "$D" "Goodnight Hydra" "$t"
+done
 echo "wrote $n clips and $man"
