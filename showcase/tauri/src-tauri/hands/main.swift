@@ -81,6 +81,14 @@ func runningPick(_ want: String, exact: Bool = false) -> NSRunningApplication? {
 /// naming that app, as resolve picked it. Nothing else is ever unhidden or activated to find 'app:X' (B4-1, B4-2).
 let FORWARD = ProcessInfo.processInfo.environment["ROAMIES_FORWARD"].flatMap { $0.isEmpty ? nil : $0 }
 func mayBringForward(_ picked: String?, _ forward: String?) -> Bool { picked != nil && picked == forward }
+/// One yes, one bring-forward: at most once a run, even when the run looks for the window again (act re-reads it after
+/// a step, and a step may have hidden the app).
+var forwardTaken = false
+func takeForward(_ picked: String?, _ forward: String?) -> Bool {
+    guard !forwardTaken, mayBringForward(picked, forward) else { return false }
+    forwardTaken = true
+    return true
+}
 
 /// Resolves a target to a window. "front" = the frontmost app that isn't Roamies.
 func resolve(_ target: String) -> Win? {
@@ -131,7 +139,7 @@ func resolveWin(_ target: String) -> Win? {
         let name = String(target.dropFirst(4))
         if let w = mainWindow(all.filter { appMatches($0.app, name) }) { return w }
         // Running but no visible window (hidden or minimised): brought forward only when it is the app said yes to.
-        if let app = runningPick(name), mayBringForward(app.localizedName, FORWARD) {
+        if let app = runningPick(name), takeForward(app.localizedName, FORWARD) {
             app.unhide()
             app.activate(options: [.activateAllWindows])
             Thread.sleep(forTimeInterval: 0.6)
@@ -1875,6 +1883,10 @@ case "--self-test":
     // B4-1..B4-3: nothing is brought forward without the yes naming that very app; exact picks only that app.
     check("no app is brought forward without a yes", !mayBringForward("Mail", nil) && !mayBringForward(nil, "Mail"))
     check("a yes to Photos never brings Photoshop forward", !mayBringForward("Adobe Photoshop 2025", "Photos") && mayBringForward("Photos", "Photos"))
+    check("a yes brings its app forward once a run", !takeForward("Mail", nil) && takeForward("Mail", "Mail") && !takeForward("Mail", "Mail"))
+    forwardTaken = false
+    // .whitespaces holds U+200B too (the test fake trims it as well): "Note\u{200B}" is Notes.
+    check("a zero-width space at a name's end is trimmed", pickRunning(["Safari", "Notes"], "Note\u{200B}") == 1 && pickRunning(["Safari", "Notes"], "Browser\u{200B}") == 0)
     check("manage with the name said yes to acts on that app or none", pickRunning(["Xcode"], "Code", exact: true) == nil && pickRunning(["Xcode", "Code"], "Code", exact: true) == 1 && pickRunning(["Xcode"], "Code") == 0)
     let main = Win(id: 2, pid: 1, app: "CapCut", title: "CapCut", x: 0, y: 39, w: 1800, h: 1066), badge = Win(id: 1, pid: 1, app: "CapCut", title: "", x: 1625, y: 1029, w: 183, h: 88)
     check("a capture that also shows a child window maps over both", shotArea(main, [badge, main], [1568, 935]) == CGRect(x: 0, y: 39, width: 1808, height: 1078))

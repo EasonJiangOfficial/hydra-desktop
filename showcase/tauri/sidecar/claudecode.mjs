@@ -598,7 +598,7 @@ export function resumeId(state, messages) {
  */
 export class ClaudeCodeAgent {
   #running = false;
-  #add = null; #early = []; #left = []; #answered = false;
+  #add = null; #early = []; #left = []; #answered = false; #last = null;
   constructor(options) {
     this.options = options;
     this.resume = options.resume ?? null;
@@ -617,10 +617,15 @@ export class ClaudeCodeAgent {
   unanswered() { return [...this.#early, ...this.#left]; }
   /** After a prompt's run: whether that prompt's own turn got its answer (false when the run never got that far). */
   answered() { return this.#answered; }
+  /** After a prompt's run whose words were named unanswered: takes them back out when nothing came after them in the
+   *  history, so no later run sends them again (claudeCodeLoop's first message takes every user message at the end).
+   *  Its Claude Code session isn't resumed then (resumeId: the anchor was those words), since it may hold them. */
+  forget() { if (!this.#running && this.#last && this.messages.at(-1) === this.#last) this.messages.pop(); }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
-    this.messages.push({ role: 'user', content });
+    this.#last = { role: 'user', content };
+    this.messages.push(this.#last);
     // Additions before Claude Code has started wait for it (the stream starts when it is first read).
     this.#early = []; this.#left = []; this.#answered = false;
     this.#add = (t) => { this.#early.push(t); return true; };

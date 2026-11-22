@@ -197,7 +197,8 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
   // carried: this run's prompt is the owner's additions (missed, or held at done), already counted seen. Each run whose
   // own prompt didn't get its answer (an error, max turns, a stream that just ended) says so, once for that run's words;
   // one that answered them never does (R11i-6, B4-4..B4-7). Words a run left (missed) are named by the run they're
-  // carried into, by TOO_MANY_ADDED, or by the error.
+  // carried into, by TOO_MANY_ADDED, or by the error. Words named are never sent again (agent.forget): a run that left
+  // them with no reply at all would otherwise have them in the next run's first message.
   let carried = false;
   const unsaid = () => emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' });
   // R11-2: words the session took (so Hydra counts them seen) but ended before answering (max turns, an error).
@@ -221,7 +222,7 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
     }
     if (signal?.aborted) throw new Error('Stopped.');
     onRound();
-    if (carried && !answered()) unsaid();
+    if (carried && !answered()) { unsaid(); agent.forget?.(); }
     // Taken but not answered (it hit max turns): answered in the same session before the turn ends, capped.
     const missed = left();
     if (missed.length) {

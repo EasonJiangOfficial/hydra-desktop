@@ -387,8 +387,10 @@ pub fn resolve(target: &str) -> Option<Win> {
         return Some(w.clone());
     }
     // Running but minimised: brought back only when it is the app said yes to (ROAMIES_FORWARD), then looked at again.
+    // One yes, one bring-back: at most once a run, even when the run looks for the window again (act's re-reads).
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let (h, w) = minimised(name)?;
-    if !crate::logic::may_bring_forward(&w.app, &std::env::var("ROAMIES_FORWARD").unwrap_or_default()) {
+    if !crate::logic::may_bring_forward(&w.app, &std::env::var("ROAMIES_FORWARD").unwrap_or_default()) || TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return None;
     }
     let pid = w.pid;

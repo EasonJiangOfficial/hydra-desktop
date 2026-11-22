@@ -48,13 +48,14 @@ function main(a) {
   const exe = (w) => String(w.exe ?? w.app.toLowerCase()).replace(/\.exe$/i, '');
   // Swift's String (main.swift): compared Character by Character (grapheme clusters, each up to canonical equivalence),
   // so "Finder‍ Mail" doesn't contain "finder" (r and the joiner are one Character); lowercased scalar by scalar
-  // (no final-sigma rule); trimmed of Zs and tab (.whitespaces); "x".contains("") is false.
+  // (no final-sigma rule); trimmed of .whitespaces (Zs, tab and U+200B: Apple's set still holds it, main.swift's
+  // self-test checks it); "x".contains("") is false.
   const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
   const chars = (s) => [...seg.segment(String(s))].map((g) => g.segment.normalize('NFC'));
   const sEq = (a, b) => { const x = chars(a), y = chars(b); return x.length === y.length && x.every((c, i) => c === y[i]); };
   const sHas = (a, b) => { const x = chars(a), y = chars(b); for (let i = 0; y.length && i + y.length <= x.length; i++) if (y.every((c, j) => c === x[i + j])) return true; return false; };
   const sLow = (s) => [...String(s)].map((c) => c.toLowerCase()).join('');
-  const sTrim = (s) => s.replace(/^[\p{Zs}\t]+|[\p{Zs}\t]+$/gu, '');
+  const sTrim = (s) => s.replace(/^[\p{Zs}\t\u200B]+|[\p{Zs}\t\u200B]+$/gu, '');
   // main.swift appMatches(app, want), word for word.
   const macMatches = (app, want) => {
     const w = sTrim(sLow(want));
@@ -84,7 +85,8 @@ function main(a) {
   const shows = (w, url = true) => (win ? info(w) : { ...info(w), ...(w.doc ? { document: w.doc } : {}), ...(url && w.url ? { url: w.url } : {}) });
   const mainWindow = (ws) => ws[0] ?? null;
   // resolveWin: 'app:X' with no window on screen brings the running app it picks forward (UNHIDE logged) and looks
-  // again, only when that app is the one in ROAMIES_FORWARD; else no window.
+  // again, only when that app is the one in ROAMIES_FORWARD; else no window. Once a run at most (main.swift
+  // takeForward, win.rs TAKEN): once it's forward, the rest of the run finds its window.
   const resolve = (t) => {
     if (t === 'front') return mainWindow(listed.filter((w) => w.pid === st.frontPid)) ?? listed[0] ?? null;
     if (t.startsWith('window:')) return listed.find((w) => w.id === +t.slice(7)) ?? null;
@@ -94,8 +96,11 @@ function main(a) {
     const app = pick(name);
     if (!app || !(win ? app === forward : sEq(app, forward))) return null;
     log(['UNHIDE', app]);
-    fs.writeFileSync(file, JSON.stringify({ ...st, hidden: [...hidden].filter((n) => n !== app) }));
-    return st.wins.find((x) => x.app === app && hidden.has(x.app)) ?? null;
+    const back = st.wins.filter((x) => x.app === app && hidden.has(x.app));
+    hidden.delete(app);
+    onScreen.unshift(...back); listed.unshift(...back.filter((x) => x.listed !== false));
+    fs.writeFileSync(file, JSON.stringify({ ...st, hidden: [...hidden] }));
+    return back[0] ?? null;
   };
   const noWindow = (t) => `No matching window is open${t.startsWith('app:') ? ` for ${t.slice(4)}` : ''}.`;
   const score = (low, q) => (low === q ? 0 : new RegExp(`(?<![\\p{L}\\p{N}_./:@\\\\])${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(low) ? 1 : 2);
