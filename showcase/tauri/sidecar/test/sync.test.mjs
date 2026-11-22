@@ -193,16 +193,16 @@ assert.deepEqual(checkFolder('~/Cloud', TMP), { ok: true, dir: path.join(TMP, 'C
 }
 console.log('sync tests: passed');
 
-// Review m5: the shared folder's "Roamies Sync" becomes "Hydra Sync" once, by a rename in place (nothing lost).
+// The shared folder: an existing "Roamies Sync" keeps its name (renaming it on one Mac would split the others); a new
+// one is "Hydra Sync".
 {
   const { syncSub } = await import('../sync.mjs');
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-syncsub-'));
   fs.mkdirSync(path.join(d, 'Roamies Sync')); fs.writeFileSync(path.join(d, 'Roamies Sync', 'sync.json'), '{"version":1}');
-  assert.equal(syncSub(d), path.join(d, 'Hydra Sync'));
-  assert.equal(fs.readFileSync(path.join(d, 'Hydra Sync', 'sync.json'), 'utf8'), '{"version":1}', 'its files come along');
-  assert.ok(!fs.existsSync(path.join(d, 'Roamies Sync')));
+  assert.equal(syncSub(d), path.join(d, 'Roamies Sync'), 'the existing folder is used as it is');
+  assert.ok(fs.existsSync(path.join(d, 'Roamies Sync', 'sync.json')) && !fs.existsSync(path.join(d, 'Hydra Sync')), 'and never renamed');
   const e = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-syncsub-'));
   assert.equal(syncSub(e), path.join(e, 'Hydra Sync'), 'a new folder uses the new name');
   fs.rmSync(d, { recursive: true, force: true }); fs.rmSync(e, { recursive: true, force: true });
-  console.log('sync folder rename: passed');
+  console.log('sync folder name: passed');
 }

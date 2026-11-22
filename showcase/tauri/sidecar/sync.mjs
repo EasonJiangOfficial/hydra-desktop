@@ -8,17 +8,16 @@
 // the passphrase itself is never stored. Only the random device ids in the file names are readable.
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { existsSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 export const SUBDIR = 'Hydra Sync', OLD_SUBDIR = 'Roamies Sync';
-// The sync folder's own folder, renamed from "Roamies Sync" once (a rename in place: nothing copied, nothing lost). If
-// the rename can't happen, the old one keeps being used.
+// The sync folder's own folder. One that's there already ("Roamies Sync", from before the rename) keeps its name: it is
+// shared with other Macs through iCloud or Dropbox, and renaming it on one would split them. Only a new one is "Hydra Sync".
 export function syncSub(dir) {
-  const sub = path.join(dir, SUBDIR), old = path.join(dir, OLD_SUBDIR);
-  if (!existsSync(sub) && existsSync(old)) { try { renameSync(old, sub); } catch { return old; } }
-  return sub;
+  const old = path.join(dir, OLD_SUBDIR);
+  return existsSync(old) && !existsSync(path.join(dir, SUBDIR)) ? old : path.join(dir, SUBDIR);
 }
 export const HEADER = 'sync.json';
 export const KEY_NAME = 'sync-key'; // the secret store's name for this computer's copy of the key

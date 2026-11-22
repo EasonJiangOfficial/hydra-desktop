@@ -166,13 +166,66 @@ console.log('datadir tests: passed');
   fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
   const { moveRoot } = await import('../datadir.mjs');
   const logs = [];
-  const ok = moveRoot({ base: home, log: (m) => logs.push(m), afterCopy: (tmp) => fs.writeFileSync(path.join(tmp, 'Data', 'memory.json'), 'half') });
-  assert.equal(ok, false, 'a bad copy is never switched to');
+  const ok = moveRoot({ base: home, log: (m) => logs.push(m), afterCopy: (tmp) => fs.writeFileSync(path.join(tmp, 'Data', 'memory.json'), 'half') }).ok;
+  assert.equal(ok, false, 'a bad copy is never switched to (the JSON check reads Data/memory.json)');
   assert.ok(!fs.existsSync(path.join(home, 'HydraAgent')), 'and ~/HydraAgent is not made');
   assert.equal(fs.readFileSync(path.join(R, 'Data', 'memory.json'), 'utf8'), memory, 'the data is untouched');
   assert.ok(!fs.readdirSync(home).some((x) => x.endsWith('.tmp')), 'the temporary copy is removed');
   // migrateData then keeps using ~/Roamies, and a background agent follows it.
   const p = migrateData({ base: home, old: path.join(home, '.gg'), agent: true, log: () => {} });
   assert.equal(p.root, R, 'an agent uses ~/Roamies while it has not been moved');
+}
+// Second review: links stay links, read-only folders keep their modes, a lock, a move another process finished, and
+// both folders there without MOVED.txt.
+{
+  const { moveRoot } = await import('../datadir.mjs');
+  const home = path.join(TMP, `rename${n++}`), R = path.join(home, 'Roamies'), H = path.join(home, 'HydraAgent');
+  fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
+  fs.mkdirSync(path.join(R, 'Agents', 'locked'), { recursive: true }); fs.writeFileSync(path.join(R, 'Agents', 'locked', 'keep.txt'), 'kept');
+  fs.symlinkSync('/etc/hosts', path.join(R, 'Agents', 'hosts-link')); fs.symlinkSync('../Data', path.join(R, 'Agents', 'data-link'));
+  fs.chmodSync(path.join(R, 'Agents', 'locked', 'keep.txt'), 0o444); fs.chmodSync(path.join(R, 'Agents', 'locked'), 0o555);
+  assert.equal(moveRoot({ base: home, log: () => {} }).ok, true);
+  assert.equal(fs.readlinkSync(path.join(H, 'Agents', 'hosts-link')), '/etc/hosts', 'a link is copied as the same link, not followed');
+  assert.equal(fs.readlinkSync(path.join(H, 'Agents', 'data-link')), '../Data');
+  assert.equal(fs.readFileSync(path.join(H, 'Agents', 'locked', 'keep.txt'), 'utf8'), 'kept', 'a read-only folder copies');
+  assert.equal(fs.statSync(path.join(H, 'Agents', 'locked')).mode & 0o777, 0o555, 'and keeps its mode');
+  assert.equal(fs.statSync(path.join(H, 'Agents', 'locked', 'keep.txt')).mode & 0o777, 0o444);
+  assert.ok(!fs.existsSync(path.join(home, '.HydraAgent.lock')), 'the lock is let go');
+  fs.chmodSync(path.join(R, 'Agents', 'locked'), 0o755); fs.chmodSync(path.join(H, 'Agents', 'locked'), 0o755);
+}
+{
+  const { moveRoot } = await import('../datadir.mjs');
+  const home = path.join(TMP, `rename${n++}`), R = path.join(home, 'Roamies');
+  fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
+  // A live process holds the lock: this one waits, then keeps using ~/Roamies rather than moving at the same time.
+  fs.writeFileSync(path.join(home, '.HydraAgent.lock'), String(process.ppid));
+  assert.equal(moveRoot({ base: home, log: () => {}, waitMs: 300 }).ok, false, 'never two moves at once');
+  assert.ok(!fs.existsSync(path.join(home, 'HydraAgent')));
+  // A lock left by a process that's gone is taken over.
+  fs.writeFileSync(path.join(home, '.HydraAgent.lock'), '999999999');
+  assert.equal(moveRoot({ base: home, log: () => {} }).ok, true, 'a stale lock is taken over');
+  assert.ok(fs.existsSync(path.join(home, 'HydraAgent', 'Data', 'memory.json')));
+}
+{
+  const { moveRoot } = await import('../datadir.mjs');
+  const home = path.join(TMP, `rename${n++}`), R = path.join(home, 'Roamies'), H = path.join(home, 'HydraAgent');
+  fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
+  // Another process finishes the move while this one copies: its folder is adopted, this copy dropped.
+  const r = moveRoot({ base: home, log: () => {}, afterCopy: () => { fs.mkdirSync(path.join(H, 'Data'), { recursive: true }); fs.writeFileSync(path.join(H, 'Data', 'memory.json'), memory); } });
+  assert.equal(r.ok, true, 'adopts the finished one');
+  assert.ok(!fs.readdirSync(home).some((x) => x.endsWith('.tmp')), 'and drops its own copy');
+}
+{
+  const home = path.join(TMP, `rename${n++}`);
+  fs.mkdirSync(path.join(home, 'Roamies', 'Data'), { recursive: true }); fs.mkdirSync(path.join(home, 'HydraAgent', 'Data'), { recursive: true });
+  const p = migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} });
+  assert.equal(p.root, path.join(home, 'HydraAgent'), 'both there: HydraAgent is used');
+  assert.equal(p.older, true, 'and the panel is told older data sits in Roamies');
+  fs.writeFileSync(path.join(home, 'Roamies', 'MOVED.txt'), 'moved');
+  assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).older, false, 'not once it was marked moved');
+  // An older Hydra kept saving in ~/Roamies after the move: the panel says so again.
+  const later = (Date.now() + 5000) / 1000;
+  fs.writeFileSync(path.join(home, 'Roamies', 'Data', 'memory.json'), memory); fs.utimesSync(path.join(home, 'Roamies', 'Data', 'memory.json'), later, later);
+  assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).older, true, 'written to after the move');
 }
 console.log('folder rename tests: passed');
