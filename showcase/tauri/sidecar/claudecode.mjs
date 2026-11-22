@@ -343,7 +343,7 @@ export function closeSpare() {
 export const MAX_TOOL_DESCRIPTION = 16_384;
 // The owner's claude.ai connectors (Gmail, Google Calendar...) load only when Claude Code runs on his claude.ai
 // login (W3 contract): nothing in its environment may pick another account or provider, or switch them off.
-const NOT_CLAUDE_AI = /^(ANTHROPIC_|CLAUDE_CODE_OAUTH|CLAUDE_CODE_USE_|AWS_BEARER_TOKEN_BEDROCK$|ENABLE_CLAUDEAI_MCP_SERVERS$|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC$)/;
+export const NOT_CLAUDE_AI = /^(ANTHROPIC_|CLAUDE_CODE_OAUTH|CLAUDE_CODE_USE_|AWS_BEARER_TOKEN_BEDROCK$|ENABLE_CLAUDEAI_MCP_SERVERS$|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC$)/;
 export function claudeAiEnv(env) {
   return Object.fromEntries(Object.entries(env ?? {}).filter(([k, v]) => v !== undefined && !NOT_CLAUDE_AI.test(k)));
 }
@@ -368,6 +368,8 @@ function sdkOptions(o, resume, link) {
     // Ours are allowed here (each runs its own safety checks); a connector's tool is never listed, so every call to
     // one comes to canUseTool and the gate.
     allowedTools: bridge.allowedTools(),
+    // o.disallowedTools: names Claude Code must never run, on top of tools: [] (the server brain lists every built-in).
+    ...(o.disallowedTools?.length ? { disallowedTools: [...o.disallowedTools] } : {}),
     canUseTool: async (name, toolInput, opts) => {
       if (name.startsWith(TOOL_PREFIX)) return { behavior: 'allow', updatedInput: toolInput };
       if (o.connectors && connectorTool(name) && o.gate) {
@@ -378,6 +380,7 @@ function sdkOptions(o, resume, link) {
     },
     includePartialMessages: true,
     pathToClaudeCodeExecutable: o.executable,
+    ...(o.spawn ? { spawnClaudeCodeProcess: o.spawn } : {}), // test seam: sees the exact command line
     // No telemetry from Claude Code. With connectors the environment is the claude.ai login's alone (claudeAiEnv);
     // without them, no non-essential traffic either: only the model requests leave this Mac.
     env: o.connectors
