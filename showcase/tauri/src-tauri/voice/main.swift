@@ -435,6 +435,19 @@ enum InputDevice {
         for d in [current, builtIn] { if let d, !out.contains(d) { out.append(d) } }
         return out
     }
+    /// Opens the first mic in `tries` that `open` gets running. Every engine (a take, wake listening, the clap detector,
+    /// barge-in) goes through this order, so none of them stays stuck on a mic the process lost (AVAudioEngine's start
+    /// then fails with kAudioHardwareBadDeviceError, '!dev', 560227702, from canPerformIO).
+    static func firstOpening<T>(_ tries: [AudioDeviceID?], _ open: (AudioDeviceID?) -> T?) -> T? {
+        for dev in tries { if let t = open(dev) { return t } }
+        return nil
+    }
+    /// When an engine last let go of the mic (barge-in's voice processing, wake listening, the clap detector). Core Audio
+    /// tears the old input down after stop() returns (voice processing's aggregate device most of all), so an engine
+    /// started in the same moment opens a device that's going away. The clap detector waits `settle` after it.
+    static var freedAt = -10.0
+    static let settle = 0.4
+    static func settled(now: Double, freedAt: Double) -> Bool { now - freedAt >= settle }
     static func use(_ dev: AudioDeviceID, on input: AVAudioInputNode) -> Bool {
         guard let unit = input.audioUnit else { return false }
         var id = dev
@@ -875,7 +888,8 @@ final class Voice {
         if clapper.running && !clapAlone && !keepClap { clapper.stop() }
         else if clapAlone && !clapper.running && now >= clapRetryAt && !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
             if engine != nil { stopAudio(close: true) }
-            if !clapper.start(device: InputDevice.forListening()) { clapRetryAt = now + 30 }
+            // Only once the last engine's mic is gone (InputDevice.settle); a failure tries again in 10 s.
+            if InputDevice.settled(now: now, freedAt: InputDevice.freedAt), !clapper.start(device: InputDevice.forListening()) { clapRetryAt = now + 10 }
         }
 
         switch phase {
@@ -1296,6 +1310,7 @@ final class Voice {
         eng.inputNode.removeTap(onBus: 0)
         eng.stop()
         engine = nil
+        InputDevice.freedAt = uptime()
     }
 
     private func onLevel(_ v: Double) {

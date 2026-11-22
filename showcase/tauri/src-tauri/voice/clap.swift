@@ -143,20 +143,28 @@ final class ClapListener {
 
     init(onClap: @escaping () -> Void) { self.onClap = onClap }
 
+    /// The same mics a take tries, in the same order (InputDevice.tries): the system's choice, the default by name,
+    /// the built-in. Only the system's choice, it failed with '!dev' whenever the process's input was stuck on a mic
+    /// that went away, so the double clap never started.
     func start(device: AudioDeviceID?) -> Bool {
         stop()
-        let eng = AVAudioEngine()
-        let input = eng.inputNode
-        if let device, !InputDevice.use(device, on: input) { return false }
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { return false }
-        let det = ClapDetector(rate: format.sampleRate, sensitivity: sensitivity)
-        let fire = onClap
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            guard let ch = buffer.floatChannelData?[0] else { return }
-            if det.feed(ch, count: Int(buffer.frameLength)) { DispatchQueue.main.async { fire() } }
+        let k = sensitivity, fire = onClap
+        let opened = InputDevice.firstOpening(InputDevice.tries(picked: device, current: InputDevice.current(), builtIn: InputDevice.builtIn())) { dev -> AVAudioEngine? in
+            let eng = AVAudioEngine()
+            let input = eng.inputNode
+            if let dev, !InputDevice.use(dev, on: input) { return nil }
+            let format = input.outputFormat(forBus: 0)
+            guard format.sampleRate > 0, format.channelCount > 0 else { return nil }
+            let det = ClapDetector(rate: format.sampleRate, sensitivity: k)
+            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+                guard let ch = buffer.floatChannelData?[0] else { return }
+                if det.feed(ch, count: Int(buffer.frameLength)) { DispatchQueue.main.async { fire() } }
+            }
+            do { eng.prepare(); try eng.start() } catch { input.removeTap(onBus: 0); log("clap listening couldn't start\(dev.map { " on device \($0)" } ?? ""): \(error)"); return nil }
+            if dev != device { log("clap listening on device \(dev ?? 0) after the default one failed") }
+            return eng
         }
-        do { eng.prepare(); try eng.start() } catch { input.removeTap(onBus: 0); log("clap listening couldn't start: \(error)"); return false }
+        guard let eng = opened else { return false }
         engine = eng
         log("clap listening on (sensitivity \(String(format: "%.2f", sensitivity)))")
         return true
@@ -167,6 +175,7 @@ final class ClapListener {
         eng.inputNode.removeTap(onBus: 0)
         eng.stop()
         engine = nil
+        InputDevice.freedAt = uptime()
         log("clap listening off")
     }
 }
