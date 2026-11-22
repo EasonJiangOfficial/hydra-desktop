@@ -158,6 +158,20 @@ const HANDS = process.env.ROAMIES_HANDS || '';
 const runHands = (args, opts) => (HANDS.endsWith('.mjs') ? run(process.execPath, [HANDS, ...args], opts) : run(HANDS, args, opts));
 // A relay turn's whole screen (R11b-B): asked every time, naming it, whatever the helper lists on it.
 const WHOLE_SCREEN = 'Look at your whole screen? Every app and window on it, with banners, pop-ups and alerts, is in it.';
+// The helpers' own act messages that quote nothing from a window (an app's name at most, never a quote): main.swift and
+// hands-win act.rs word for word. A relay turn passes only these on as said (actWords, R11f-4); add one here only when
+// it can't carry a window's words.
+const ACT_APP = '[^"\\n]{1,100}';
+const ACT_FIXED = [
+  `No matching window is open(?: for ${ACT_APP})?\\.`,
+  `Blocked for safety: I can point at things in ${ACT_APP}, but I never type or click in it\\. Show the user where to click instead\\.`,
+  `(?:Step \\d+: )?Couldn't bring ${ACT_APP} to the front, so nothing was typed or clicked\\. Ask the user to click its window once, then try again\\.`,
+  `Blocked for safety: ${ACT_APP} came to the front, and I never type or click in it\\.`,
+  `Blocked for safety: that spot is on ${ACT_APP}, and I never click in it\\.`,
+  'In Finder, clicks and keys can rename, move, open or delete files\\.',
+  'Finder came to the front: clicks and keys there can rename, move, open or delete files\\.',
+  `A Save or Open panel is up in ${ACT_APP}: in it any file in any folder can be picked, uploaded or made\\.`,
+].map((x) => new RegExp(`^${x}$`));
 const STALE_ID = 'The page changed since read_window, so that id is out of date. Call read_window again and use the new ids.';
 // An app named in read_window or act_in_app that isn't open: open it (with the open tool's safety check) and wait
 // up to 6 s for its window. True when it's there. Only plain app names, never paths or links.
@@ -348,6 +362,16 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       return c;
     };
   }
+  // A relay turn, before the window is said yes to (R11c review F4, R11e-1, R11f-2): the helper's words from acting
+  // quote the window (what a hover showed, a click's whole text, what a field shows), in its errors and in why it
+  // stopped. The model gets its fixed messages as said (ACT_FIXED: an allowlist, so a new message fails closed) and
+  // anything else as its step number alone: a quote inside a field's own text defeats any scrub of the words.
+  function actWords(text, inWhat) {
+    const t = String(text ?? '');
+    if (!remote() || ACT_FIXED.some((re) => re.test(t))) return t;
+    const where = !inWhat || inWhat === 'front' ? 'the app in front' : inWhat;
+    return `${/^Step \d+/.exec(t)?.[0] ?? 'A step'} didn't work in ${where}. What its window shows isn't passed on until ${userName} says yes to reading it.`;
+  }
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Hydra app.');
     // Acting in an app may take the real cursor: meanwhile clicks go through the overlay, even where the Sidekick or
@@ -365,15 +389,17 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     } : undefined;
     let r;
     try { r = await runHands(args, { timeout: 120_000, onLine }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
+    // Every act error goes through actWords (every caller of act: act_in_app, draw's typing).
+    const told = (m) => (acting ? actWords(m, (() => { try { return JSON.parse(args[1]).planApp; } catch { return ''; } })()) : m);
     let res;
-    try { res = JSON.parse(r.stdout.trim().split('\n').pop() || '{}'); } catch { throw new Error(`hands helper failed: ${r.stderr.trim().slice(0, 200) || 'no output'}`); }
+    try { res = JSON.parse(r.stdout.trim().split('\n').pop() || '{}'); } catch { throw new Error(told(`hands helper failed: ${r.stderr.trim().slice(0, 200) || 'no output'}`)); }
     if (res.ok === false && !res.cancelled && !res.needsConfirm) {
       if (process.platform === 'darwin' && /Accessibility/i.test(res.error ?? '')) {
         // Open the exact Settings pane (once a minute at most) so the fix is one click away.
         if (Date.now() - axNudged > 60_000) { axNudged = Date.now(); openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'); }
         throw new Error('Accessibility is off for Hydra, so I can\'t read or control other apps yet. I just opened System Settings → Privacy & Security → Accessibility: switch on Hydra there, then ask again. Tell the user exactly that, briefly.');
       }
-      throw new Error(res.error || 'That did not work.');
+      throw new Error(told(res.error || 'That did not work.'));
     }
     return res;
   }
@@ -425,13 +451,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // the helper doesn't list are in it too, R11b-B). It names every window already, so theirs aren't added: a long
   // list ran past the relay's 500 characters and the whole screen could never be asked (R11c-7). A key file still blocks.
   // ok: windows said yes to already (as they showed then), skipped; the ones said yes to now are added.
-  async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null } = {}) {
-    const asks = whole ? [whole] : [], key = (w) => JSON.stringify([w?.id, w?.app, w?.title, w?.document, w?.url]);
+  // blockOnly: a key file still blocks, nothing asks (draw on this Mac, R11f-3).
+  async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null, blockOnly = false } = {}) {
+    const asks = whole && !blockOnly ? [whole] : [], key = (w) => JSON.stringify([w?.id, w?.app, w?.title, w?.document, w?.url]);
     const list = [wins].flat();
     for (const w of list) {
       const v = checkWindow(w, HOME, { viewers: !remote() });
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
-      if (whole || ok?.has(key(w))) continue;
+      if (whole || blockOnly || ok?.has(key(w))) continue;
       if (v.level === ASK && v.app && okApp && !remote() && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
@@ -447,9 +474,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // 'window:<id>' (the window of a screenshot): only that window is read.
   // Returns { front, ids }: the windows checked. The helper's own search can reach others (past its 30-window list, a
   // front app that changed since, R11e-2..4), so draw keeps only what these show.
-  async function searchedShows(spec, ctx, ok = null) {
+  // blockOnly: draw on this Mac, where only a key file stops it (as read_window), R11f-3.
+  async function searchedShows(spec, ctx, ok = null, blockOnly = false) {
     const all = (await hands('windows').catch(() => null))?.windows ?? [];
-    if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN }).then(() => ({}));
+    if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN, blockOnly }).then(() => ({}));
     const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
     const name = spec.startsWith('app:') ? spec.slice(4) : null;
     const app = String(front?.app ?? name ?? '').trim();
@@ -458,7 +486,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // front app's windows.
     const same = (w) => (name != null ? appMatches(w, name) : !!app && String(w.app ?? '').toLowerCase() === app.toLowerCase());
     const wins = [...(front ? [front] : []), ...(one ? [] : all.filter((w) => same(w) && w.id !== front?.id))];
-    await windowShows(wins, ctx, { ok, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
+    await windowShows(wins, ctx, { ok, blockOnly, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
     return { front, ids: new Set(wins.map((w) => w.id)) };
   }
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
@@ -777,7 +805,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         const where = await hands('locate', app.app ? `app:${app.app}` : 'front').then((r) => r?.window?.app ?? null, () => null);
         if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`))) throw new Error(`${userName} said no, so nothing was typed.`);
         const r = await hands('act', JSON.stringify({ steps, ...app, wholeOk: ['plan'], planApp: where ?? app.app ?? '' }));
-        if (r?.needsConfirm) throw new Error(`${r.why} Nothing more was typed; use act_in_app for that.`);
+        if (r?.needsConfirm) throw new Error(`${actWords(r.why, where ?? app.app)} Nothing more was typed; use act_in_app for that.`);
         if (lastShot) lastShot.used = true;
       }
     }
@@ -818,12 +846,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // A relay turn (R11b-A): the windows draw reads words or controls in are checked first, as read_window's are. Again
     // for each beat, where the window each read goes to is resolved anew: the app in front can change between beats (an
     // open or type mark, a click, an alert, R11c-2). A window said yes to, as it showed then, isn't asked about twice.
-    // The whole screen: once a drawing (its question names everything on it).
+    // The whole screen: once a drawing (its question names everything on it). On this Mac nothing asks, but a key file
+    // open in a window draw reads is blocked, as read_window blocks it (R11f-3).
     const okWins = new Set(), gated = new Map();
     const gate = (where = spec) => {
-      if (!remote()) return Promise.resolve();
       const k = where === 'screen' ? where : `${segNo}:${where}`;
-      if (!gated.has(k)) gated.set(k, searchedShows(where, ctx, okWins));
+      if (!gated.has(k)) gated.set(k, searchedShows(where, ctx, okWins, !remote()));
       return gated.get(k);
     };
     try {
@@ -1067,8 +1095,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const plain = (list) => stepsText(list.map(({ shown, ...st }) => st), { clipboard: false }).replace(/^\d+\. /gm, '').replace(/\n/g, ', ');
           const ran = [];
           const told = (before) => (remote() ? plain(ran) : before.join(', '));
-          const unq = (t) => (remote() ? `${/^Step \d+/.exec(String(t ?? ''))?.[0] ?? 'A step'} didn't work in ${inWhat}. What its window shows isn't passed on until ${userName} says yes to reading it.` : t);
-          const actOnce = () => hands('act', JSON.stringify(plan)).catch((e) => { throw remote() ? new Error(unq(e?.message ?? e)) : e; });
+          const unq = (t) => actWords(t, inWhat);
+          const actOnce = () => hands('act', JSON.stringify(plan));
           const act = async () => {
             let r = await actOnce(), before = [];
             ran.length = 0;

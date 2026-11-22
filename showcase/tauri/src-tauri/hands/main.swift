@@ -124,8 +124,10 @@ func resolveWin(_ target: String) -> Win? {
 }
 
 func winInfo(_ w: Win) -> [String: Any] { ["id": w.id, "app": w.app, "title": w.title, "bounds": [Int(w.x), Int(w.y), Int(w.w), Int(w.h)]] }
-/// winInfo plus what the window shows (its file, its address): for every result that carries the window's text or picture.
-func winShows(_ w: Win) -> [String: Any] { winInfo(w).merging(shows(w)) { a, _ in a } }
+/// winInfo plus what the window shows (its file, its address): for every result that carries the window's text or picture,
+/// and for the windows the sidecar checks before it reads any (windows, locate). url: false leaves out a browser's
+/// address (a walk of its window), so the whole window list stays cheap.
+func winShows(_ w: Win, url: Bool = true) -> [String: Any] { winInfo(w).merging(shows(w, url: url)) { a, _ in a } }
 /// The file a window's document is (AXDocument, a file URL), as a path; nil for none.
 func documentPath(_ win: AXUIElement) -> String? {
     guard let d = str(win, "AXDocument") ?? (attr(win, "AXDocument") as? URL)?.absoluteString, let u = URL(string: d), u.isFileURL else { return nil }
@@ -144,13 +146,13 @@ func browserURL(_ win: AXUIElement) -> String? {
 }
 /// What a window shows that the sidecar checks like a file read before any of it reaches the model: its document's
 /// file ("document") and, in a browser, its address ("url": a file:// page is a file).
-func shows(_ w: Win) -> [String: Any] {
+func shows(_ w: Win, url: Bool = true) -> [String: Any] {
     let ax = AXUIElementCreateApplication(w.pid)
     AXUIElementSetMessagingTimeout(ax, 0.25)
     guard let win = axWindow(ax, w) else { return [:] }
     var o: [String: Any] = [:]
     if let d = documentPath(win) { o["document"] = d }
-    if BROWSERS.contains(w.app), let u = browserURL(win) { o["url"] = u }
+    if url, BROWSERS.contains(w.app), let u = browserURL(win) { o["url"] = u }
     return o
 }
 /// The files open in the plan's window and in its app's focused window (keys go there): typing, keys and saving in
@@ -2006,7 +2008,11 @@ case "trusted":
 
 case "windows":
     let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    out(["ok": true, "windows": windows().prefix(30).map { var i = winInfo($0); if $0.pid == front { i["frontApp"] = true }; return i }])
+    // Each window's file too (R11f-3): a key file open in an editor is blocked, not asked about as a window with no file.
+    // ponytail: no browser addresses here (a walk per browser window): a file:// page in a browser window other than
+    // the one located isn't blocked (a relay turn asks about it; on this Mac draw reads it). Add a cheap address read
+    // if that matters.
+    out(["ok": true, "windows": windows().prefix(30).map { var i = winShows($0, url: false); if $0.pid == front { i["frontApp"] = true }; return i }])
 
 // Where the user is right now, for each message's live state: the app in front (never Roamies), its focused
 // window's title, and for a browser the page's address. Accessibility for the title and address; the window list
@@ -2035,7 +2041,7 @@ case "locate":
     guard args.count >= 2 else { fail("usage: locate <target>") }
     if args[1] == "screen" { out(["ok": true, "what": "screen"]) }
     guard let w = resolve(args[1]) else { fail("No matching window is open\(args[1].hasPrefix("app:") ? " for \(args[1].dropFirst(4))" : "").") }
-    out(["ok": true, "window": winInfo(w)])
+    out(["ok": true, "window": winShows(w)])
 
 case "capture":
     // capture <out> <target> [max]: with max, the image is shrunk here to at most max px on its long side

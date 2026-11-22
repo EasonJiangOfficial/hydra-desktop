@@ -40,7 +40,7 @@ const te = { id: 3, app: 'TextEdit', title: 'n.txt', document: ${JSON.stringify(
 const term = { id: 7, app: 'Terminal', title: 'ssh prod', bounds: [0, 0, 800, 600] };
 const front = st.front === 'term' ? term : te;
 let o = { ok: true, window: front, controls: [], texts: [], note: '' };
-if (a[0] === 'find-text') o = { ok: true, matches: [{ text: st.front === 'term' ? 'export TOKEN=sk-live-zzz' : 'Hello', role: 'AXStaticText', bounds: [10, 10, 50, 10], window: front }].filter((m) => m.text.includes(a[2])) };
+if (a[0] === 'find-text') o = { ok: true, matches: [{ text: st.front === 'term' ? 'export TOKEN=sk-live-zzz' : 'Hello', role: 'AXStaticText', bounds: [10, 10, 50, 10], window: { id: front.id, app: front.app, title: front.title, bounds: front.bounds } }].filter((m) => m.text.includes(a[2])) };
 if (a[0] === 'ocr-find') o = { ok: true, matches: a[1] === 'window:9' ? [{ text: 'reset code 418-223', bounds: [10, 10, 50, 10] }] : [] };
 if (a[0] === 'windows') o = { ok: true, windows: st.windows ?? [front] };
 if (a[0] === 'locate') o = a[1] === 'window:9' ? { ok: true, window: safari } : a[1] === 'window:7' ? { ok: true, window: term } : a[1] === 'window:404' ? { ok: false, error: 'No matching window' } : { ok: true, window: front };

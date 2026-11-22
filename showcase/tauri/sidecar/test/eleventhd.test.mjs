@@ -30,7 +30,7 @@ let o = { ok: true };
 if (a[0] === 'windows') o = { ok: true, windows: wins };
 if (a[0] === 'locate') { const w = sel(a[1])[0]; o = w ? { ok: true, window: w } : { ok: false, error: 'No matching window' }; }
 if (a[0] === 'front') o = { ok: true, ...wins[0] };
-if (a[0] === 'find-text') o = { ok: true, matches: sel(a[1]).filter((w) => text[w.id].includes(a[2])).map((w) => ({ text: text[w.id], role: 'AXStaticText', bounds: [10, 10, 50, 10], window: w })) };
+if (a[0] === 'find-text') o = { ok: true, matches: sel(a[1]).filter((w) => text[w.id].includes(a[2])).map((w) => ({ text: text[w.id], role: 'AXStaticText', bounds: [10, 10, 50, 10], window: { id: w.id, app: w.app, title: w.title, bounds: w.bounds } })) }; // winInfo: no document
 if (a[0] === 'ocr-find') o = { ok: true, matches: [] };
 // As the helper words them: hover's newly shown labels, click_text's whole text (main.swift:2649, :2368), and a fill
 // that didn't take (:2393).

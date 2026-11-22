@@ -28,7 +28,7 @@ const all = st.wins;
 const m = (app, want) => { const w = want.toLowerCase().trim().normalize('NFC'), x = app.toLowerCase().normalize('NFC'); return !!w && (x === w || x.includes(w) || w.includes(x)); };
 const fa = () => st.front ?? all[0].app;
 const sel = (t) => t === 'front' ? all.filter((w) => w.app === fa()) : t.startsWith('app:') ? all.filter((w) => m(w.app, t.slice(4))) : t.startsWith('window:') ? all.filter((w) => w.id === +t.slice(7)) : [];
-const hit = (ws) => ws.slice(0, 12).filter((w) => (st.text[w.id] ?? '').includes(a[2])).map((w) => ({ text: st.text[w.id], role: 'AXStaticText', bounds: [10, 10, 50, 10], window: w }));
+const hit = (ws) => ws.slice(0, 12).filter((w) => (st.text[w.id] ?? '').includes(a[2])).map((w) => ({ text: st.text[w.id], role: 'AXStaticText', bounds: [10, 10, 50, 10], window: { id: w.id, app: w.app, title: w.title, bounds: w.bounds } })); // winInfo: no document
 let o = { ok: true };
 if (a[0] === 'windows') o = { ok: true, windows: all.slice(0, 30) };
 if (a[0] === 'locate') { const w = sel(a[1]).find((x) => x.title) ?? sel(a[1])[0]; o = w ? { ok: true, window: w } : { ok: false, error: 'No matching window' }; if (a[1] === 'front' && st.flip) { st.front = st.flip; delete st.flip; fs.writeFileSync(${JSON.stringify(state)}, JSON.stringify(st)); } }

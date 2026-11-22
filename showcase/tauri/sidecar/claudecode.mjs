@@ -454,6 +454,18 @@ async function* claudeCodeLoop(messages, o) {
   // only what came before it; a message that merely started after an addition (a tool step) did not (R11b-G).
   let step = 0, addedAt = 0, answeredAt = 0, finalAt = 0, msgAt = 0, streamed = false, cut = false, byUuid = false;
   const added = []; // [{ at, text }]: what was not answered when the run ends goes to o.onLeft (R11-2)
+  // turnAt: the step the turn under way started after (the last result). turnTook: what Claude Code's stream stamps say
+  // this turn took so far (user_message_uuids on its replies): all a crash leaves to go by (R11f-1).
+  let turnAt = 0, turnTook = null;
+  const tookOf = (m) => (Array.isArray(m?.user_message_uuids) ? m.user_message_uuids : typeof m?.user_message_uuid === 'string' ? [m.user_message_uuid] : null);
+  // Claude Code named what a turn took (R11c-B1): from then on, whatever it didn't take is unanswered. A turn that
+  // ended well answered all it took; one cut short (an error result, max turns, a crash) only if its last message was
+  // its final answer, as all it took was folded in before that (R11f-1).
+  const settle = (took, ok) => {
+    if (!took) return;
+    byUuid = true;
+    if (ok || (finalAt === answeredAt && finalAt > turnAt)) for (const a of added) if (took.includes(a.uuid)) a.done = true;
+  };
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
   // After begin(): the first message is on the input already, so an addition always comes after it.
   o.takeInput?.((text) => {
@@ -480,10 +492,11 @@ async function* claudeCodeLoop(messages, o) {
     for await (const item of channel) {
       if (item.kind === 'wake') continue;
       if (item.kind === 'event') { if (!aborted) yield item.event; continue; }
-      if (item.kind === 'end') break;
+      if (item.kind === 'end') { settle(turnTook, false); break; }
       if (item.kind === 'error') {
         // Only a Stop ends quietly: an error that merely says "abort" is an error (R11c-B2), so what was added is named.
         if (aborted) break;
+        settle(turnTook, false);
         throw item.error instanceof Error ? item.error : new Error(String(item.error));
       }
       const message = item.message;
@@ -495,9 +508,14 @@ async function* claudeCodeLoop(messages, o) {
           if (message.type === 'stream_event' && message.event?.type === 'message_start') { streamed = true; answeredAt = msgAt = ++step; }
           else if (message.type === 'stream_event' && message.event?.type === 'message_delta' && message.event.delta?.stop_reason === 'end_turn') finalAt = msgAt;
           else if (message.type === 'assistant' && !streamed) { answeredAt = ++step; if (message.message?.stop_reason === 'end_turn') finalAt = step; }
+          const s = tookOf(message);
+          if (s) turnTook = [...new Set([...(turnTook ?? []), ...s])];
         }
         yield* mapper.handle(message); continue;
       }
+      // Read before an error throws or max turns breaks: an error result names what its turn took too (R11f-1).
+      const took = tookOf(message) ?? turnTook;
+      if (message.subtype !== 'success' || message.is_error) settle(took, false);
       if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
@@ -507,8 +525,9 @@ async function* claudeCodeLoop(messages, o) {
       // Claude Code names the user messages a turn took (R11c-B1): one it didn't take is still queued, and its own turn
       // follows, even when it came before this turn's answer started (sent while the last request was out). An older
       // Claude Code doesn't say: an addition after the last answer started waits for its own answer, as before.
-      const took = Array.isArray(message.user_message_uuids) ? message.user_message_uuids : typeof message.user_message_uuid === 'string' ? [message.user_message_uuid] : null;
-      if (took) { byUuid = true; for (const a of added) if (took.includes(a.uuid)) a.done = true; if (added.some((a) => !a.done)) continue; }
+      settle(took, true);
+      turnAt = step; turnTook = null;
+      if (took) { if (added.some((a) => !a.done)) continue; }
       else if (addedAt > answeredAt) continue;
       break;
     }
