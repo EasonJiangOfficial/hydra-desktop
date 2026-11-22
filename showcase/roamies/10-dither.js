@@ -107,25 +107,24 @@
         if ((jbuf.get(key) ?? -1) < l) jbuf.set(key, l);
       };
       const jflush = () => { for (const [key, l] of jbuf) put(key % 8192, Math.floor(key / 8192), l); jbuf.clear(); };
-      // The Hydra orb's dots this frame (x, y, r in cells, shade 0 ink..1 pale), and its disc [x, y, r] in px.
+      // The Hydra orb's dots this frame (x, y, r in cells, shade 0 ink..1 pale), and how far it reaches [x, y, r] in px.
       const vdots = [];
-      let vdisc = null;
+      let vreach = null;
       const SHADES = ['#1D1D1F', '#424245', '#6E6E73', '#A1A1A6', '#C7C7CC'];
       const drawOrb = (ctx) => {
         if (!vdots.length || look !== 'hydra') return;
         ctx.save();
-        if (vdisc) {
-          ctx.beginPath(); ctx.arc(vdisc[0], vdisc[1], vdisc[2], 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.94)'; ctx.fill();
-          ctx.lineWidth = 1; ctx.strokeStyle = '#E5E5EA'; ctx.stroke();
-        }
-        // Far dots first, so the near (ink) ones sit on top.
+        // No disc behind it (owner, 2026-11-22). Each dot gets a thin white rim instead, like the Mac cursor: lost on a
+        // light page, it keeps the ink dots readable on a dark wallpaper. Rims first, so none covers a dot.
         const order = [];
         for (let i = 0; i < vdots.length; i += 4) order.push(i);
-        order.sort((a, b) => vdots[b + 3] - vdots[a + 3]);
+        order.sort((a, b) => vdots[b + 3] - vdots[a + 3]); // far dots first, so the near (ink) ones sit on top
+        const at = (i, grow) => { ctx.beginPath(); ctx.arc(vdots[i] * P + P / 2, vdots[i + 1] * P + P / 2, Math.max(0.7, vdots[i + 2] * P) + grow, 0, Math.PI * 2); };
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        for (const i of order) { at(i, 1); ctx.fill(); }
         for (const i of order) {
           ctx.fillStyle = SHADES[Math.min(SHADES.length - 1, Math.round(vdots[i + 3] * (SHADES.length - 1)))];
-          ctx.beginPath(); ctx.arc(vdots[i] * P + P / 2, vdots[i + 1] * P + P / 2, Math.max(0.7, vdots[i + 2] * P), 0, Math.PI * 2); ctx.fill();
+          at(i, 0); ctx.fill();
         }
         ctx.restore();
       };
@@ -512,15 +511,15 @@
           brow: pose ? pose.brow : A === 'upset' ? 'angry' : A === 'motivate' ? 'determined' : A === 'remind' ? 'raised' : null,
           rest: pose?.rest ?? null, feel: pose?.feel ?? null, // the voice's feeling
         });
-        // The orb: round dots drawn on the page's canvas in draw() (vdots), over a translucent white disc. The cells
+        // The orb: round dots drawn on the page's canvas in draw() (vdots), with nothing behind them. The cells
         // it covers are marked, so the patch shown (and wiped next frame) holds all of it.
         vdots.length = 0;
         const dot = (x, y, r, shade) => vdots.push(x, y, r, shade);
         Object.assign(jst, { asleep: !!Roamie.asleep, dt: jst.dt });
-        vdisc = form === 'cursor' ? null : [bx, by, R * 1.42];
+        vreach = form === 'cursor' ? null : [bx, by, R * 1.42];
         if (form === 'cursor') J.cursor({ dot, L, th }, bx / P, by / P, bx / P - AX, by / P - AY, jst);
         else J.body({ dot, L, th }, bx / P, by / P, R / P, jst);
-        const ext = vdisc ? vdisc[2] / P + 1 : 6;
+        const ext = vreach ? vreach[2] / P + 1 : 6;
         const gx0 = Math.floor(bx / P - ext), gx1 = Math.ceil(bx / P + ext), gy0 = Math.floor(by / P - ext), gy1 = Math.ceil(by / P + ext);
         if (gx0 < dx0) dx0 = Math.max(0, gx0); if (gx1 > dx1) dx1 = Math.min(gw - 1, gx1);
         if (gy0 < dy0) dy0 = Math.max(0, gy0); if (gy1 > dy1) dy1 = Math.min(gh - 1, gy1);

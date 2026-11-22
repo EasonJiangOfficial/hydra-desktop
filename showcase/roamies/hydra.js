@@ -1,5 +1,5 @@
 // The Hydra orb, the Hydra Agent's only look (DESIGN.md section 7 and 6.9): an open sphere of ink dots, not a solid
-// ball. Ink #1D1D1F and grays on a translucent white disc; no glow, no gradient, no colour. It ripples with the owner's
+// ball. Ink #1D1D1F and grays, nothing behind it (each dot a thin white rim, for dark wallpapers); no glow, no gradient, no colour. It ripples with the owner's
 // microphone level while he talks and with Hydra's voice while it speaks; at rest it barely breathes; asleep it is
 // pale and still; under prefers-reduced-motion it holds still. Behaviour after Roamies' JARVIS globe (jarvis.js, by
 // Ken Kai, AGPL-3.0); the look is Hydra's.
