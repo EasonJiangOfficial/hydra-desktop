@@ -44,8 +44,8 @@ for (const t of ['~/', 'hello world', 'and/or', 'https://example.com/a/b', 'Docu
   assert.equal(call('list_directory', { path: '/' }), 'block');
   assert.equal(call('get_page', { body: 'x'.repeat(9000) }), 'block', 'too long to check, to a tool that reads unasked');
   assert.equal(lv(checkMcpCall({ name: 'create_page', annotations: {}, args: { body: 'x'.repeat(9000) }, home: HOME })), 'ask', 'a write with a long body still just asks');
-  assert.equal(call('read_file', { path: '~/Documents/a.md' }), 'safe');
-  assert.equal(call('search_issues', { query: 'login bug', url: 'https://x.com/a' }), 'safe');
+  assert.equal(call('read_file', { path: '~/Documents/a.md' }), 'ask', 'a server read asks (R10-3)');
+  assert.equal(call('search_issues', { query: 'login bug', url: 'https://x.com/a' }), 'ask');
 }
 
 // V8-8: key files outside dot folders are never read.

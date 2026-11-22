@@ -101,7 +101,7 @@ for (const n of ['update_file', 'execute_sql', 'run_query', 'archive_thread', 'a
 // Review M4: connected apps' tools that change, send or delete ask every time.
 for (const name of ['trash_message', 'trash_file', 'create_payment', 'execute_sql', 'apply_migration', 'reset_branch', 'merge_branch', 'update_doc'])
   assert.equal(checkMcpCall({ name }).always, true, `${name} always asks`);
-assert.equal(checkMcpCall({ name: 'list_files', annotations: { readOnlyHint: true } }).level, 'safe', 'a read-only tool runs');
+assert.equal(checkMcpCall({ name: 'list_files', annotations: { readOnlyHint: true } }).level, 'ask', 'a read-only tool asks too (tenth review R10-3)');
 console.log('risky labels and chords: passed');
 
 // act_in_app against a fake helper that stops before a risky click_at or Return (needsConfirm), as the real one does.
@@ -142,12 +142,14 @@ console.log(JSON.stringify(o));
   }
   // click_at on a risky spot: the helper stops there; a no stops the plan, a yes goes on from that step.
   fs.writeFileSync(log, '');
+  // A Finder window has no file to check: looking at it asks too (tenth review R10-11).
+  answer = (q) => (q.startsWith('Look at the Finder window') ? 'Allow' : null);
   await shot();
   answer = planYes;
   await assert.rejects(act.execute({ target: 'Finder', steps: [{ do: 'type', text: 'a' }, { do: 'click_at', x: 10, y: 10 }, { do: 'type', text: 'b' }] }, { toolCallId: 'c1' }), /said no/);
   assert.equal(calls().length, 1, 'no: the plan stops at the risky spot');
   // A no to the whole plan: nothing reaches the helper.
-  answer = null; fs.writeFileSync(log, ''); await shot();
+  answer = (q) => (q.startsWith('Look at') ? 'Allow' : null); fs.writeFileSync(log, ''); await shot(); answer = null;
   await assert.rejects(act.execute({ target: 'Finder', steps: [{ do: 'type', text: 'a' }] }, { toolCallId: 'c0' }), /said no/);
   assert.equal(calls().length, 0, 'no to the plan: nothing ran');
   assert.ok(asked.at(-1).placeholder.includes('1. type "a"'), 'the plan question shows the step');

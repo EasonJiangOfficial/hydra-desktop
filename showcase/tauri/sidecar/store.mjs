@@ -544,6 +544,24 @@ export async function supersedeFact(oldId, newId) {
   return f;
 }
 
+/** What the memory pass learned, saved only with the owner's yes (tenth review R10-7): one question for the batch,
+ *  each fact in full and the one it replaces. yes(question) → true or false. Returns the facts saved. */
+export async function learnFactsAsked(facts, yes) {
+  const list = (Array.isArray(facts) ? facts : []).filter((f) => String(f?.text ?? '').trim());
+  if (!list.length) return [];
+  const had = new Map(listFacts().map((f) => [f.id, f.text]));
+  const line = (f) => `- ${String(f.text).trim()}${f.replaces && had.has(f.replaces) ? ` (instead of "${had.get(f.replaces)}")` : ''}`;
+  if (!(await Promise.resolve().then(() => yes(`Remember ${list.length === 1 ? 'this' : `these ${list.length}`}?\n${list.map(line).join('\n')}`)).catch(() => false))) return [];
+  const added = [];
+  for (const f of list) {
+    // A correction is added and the old fact kept, marked replaced: nothing is deleted without the owner's yes.
+    const nf = await addFact(f.text);
+    if (f.replaces) await supersedeFact(f.replaces, nf.id);
+    added.push(nf);
+  }
+  return added;
+}
+
 export async function forgetFact(id) {
   const facts = loadMemory().facts, i = facts.findIndex((f) => f.id === id);
   if (i < 0) return null;

@@ -338,8 +338,8 @@ console.log('safety loophole tests: passed');
   assert.match(checkMcpServer(servers[0][0]).reason, /^Run npx -y @modelcontextprotocol\/server-everything$/, 'the question shows the exact command');
   assert.match(checkMcpServer(servers[3][0]).reason, /^Connect to https:\/\/mcp\.linear\.app\/mcp$/, 'or the exact address');
   const callsTable = [
-    [{ name: 'search_notes', annotations: { readOnlyHint: true } }, SAFE, undefined],
-    [{ name: 'listIssues', annotations: { readOnlyHint: true, openWorldHint: true } }, SAFE, undefined],
+    [{ name: 'search_notes', annotations: { readOnlyHint: true } }, ASK, true], // tenth review R10-3: a server's read asks too
+    [{ name: 'listIssues', annotations: { readOnlyHint: true, openWorldHint: true } }, ASK, true],
     [{ name: 'create_issue', annotations: {} }, ASK, true], // review M4: anything not read-only always asks
     [{ name: 'get_weather' }, ASK, true],
     [{ name: 'update_page', annotations: { readOnlyHint: false } }, ASK, true],
@@ -351,8 +351,8 @@ console.log('safety loophole tests: passed');
     [{ name: 'create_payment', annotations: {} }, ASK, true],
     [{ name: 'pay_invoice' }, ASK, true],
     [{ name: 'post' }, ASK, true],
-    [{ name: 'list_posts', annotations: { readOnlyHint: true } }, SAFE, undefined],
-    [{ name: 'get_sender', annotations: { readOnlyHint: true } }, SAFE, undefined],
+    [{ name: 'list_posts', annotations: { readOnlyHint: true } }, ASK, true],
+    [{ name: 'get_sender', annotations: { readOnlyHint: true } }, ASK, true],
   ];
   for (const [c, want, always] of callsTable) { const v = checkMcpCall(c); if (v.level !== want || v.always !== always) bad.push(`call: ${JSON.stringify(c)} → ${v.level}/${v.always}, wanted ${want}/${always}`); }
   assert.equal(bad.length, 0, `\n${bad.join('\n')}`);

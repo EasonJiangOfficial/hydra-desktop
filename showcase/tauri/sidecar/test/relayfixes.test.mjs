@@ -188,7 +188,7 @@ function relayServer(queue) {
   await ht.refresh();
   const checked = [];
   let ok = true;
-  const [add, list] = ht.tools({ beforeRun: async (n) => { checked.push(n); return ok; } });
+  const [add, list] = ht.tools({ beforeRun: async (n) => { checked.push(n); return ok; }, confirm: async () => true });
   assert.equal(await add.execute({}), 'ok');
   ok = false;
   await assert.rejects(add.execute({}), /This turn is over/);

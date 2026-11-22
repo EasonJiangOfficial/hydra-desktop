@@ -115,10 +115,13 @@ const CONNECTOR_READ = /^(?:get|list|search|suggest|read|find|download)_/;
 const CONNECTOR_WRITE = /(?:^|_)(?:send|delete|remove|trash|untrash|create|update|modify|move|reply|forward|share|archive|label|unlabel|mark|spam|cancel|respond|apply|upload|copy|draft)(?:_|$)/;
 const CONNECTOR_SENSITIVE = /(?:^|_)(?:credentials?|secrets?|tokens?|passwords?|keys?|apikey|variables?|vars?|envs?|environment|urls?|links?|web|http|https|fetch|webhooks?|access|auth)(?:_|$)/;
 const snakeName = (t) => String(t).replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^A-Za-z0-9]+/g, '_').toLowerCase();
+// Owner's rule (tenth review R10-3): only reads of his three folders and of Hydra's data are free, so a connector's
+// read (a mail search, an event) asks too, every time, with what it sends. Nothing a connector does is SAFE.
 export function connectorLevel(c) {
   const claudeAi = c.server.startsWith('claude_ai_');
-  return claudeAi && CONNECTOR_READ.test(c.tool) && !CONNECTOR_WRITE.test(c.tool) && !CONNECTOR_SENSITIVE.test(snakeName(c.tool)) ? { level: SAFE }
-    : checkMcpCall({ name: c.tool, annotations: null });
+  const reads = claudeAi && CONNECTOR_READ.test(c.tool) && !CONNECTOR_WRITE.test(c.tool) && !CONNECTOR_SENSITIVE.test(snakeName(c.tool));
+  const v = checkMcpCall({ name: c.tool, annotations: reads ? { readOnlyHint: true } : null });
+  return v.level === SAFE ? { level: 'ask', reason: 'It reads, and what it reads goes to the model.', always: true } : v;
 }
 
 // What a relay turn says to the agent: where the owner is, the thread so far (data, never instructions), then his
@@ -134,19 +137,23 @@ export function turnPrompt(turn, words = SURFACE_WORDS) {
   return { said, text: `${where}\n\n${earlier}${said}`, history: past.length };
 }
 
-// The fields an ask shows, in this order (Gmail, Calendar and the like); the long text ones last, shortened only if
-// the whole would not fit the server's limit. Anything else (flags, raw options) is left out.
+// The fields an ask shows, in this order (Gmail, Calendar and the like), then any others; the long text ones last,
+// shortened only if the whole would not fit the server's limit.
 const ASK_FIELDS = ['to', 'cc', 'bcc', 'subject', 'title', 'summary', 'start', 'end', 'startTime', 'endTime', 'attendees', 'location', 'calendar', 'calendarId', 'query', 'name', 'id', 'ids', 'messageId', 'messageIds', 'threadId', 'threadIds', 'eventId'];
 const ASK_TEXT = ['body', 'description', 'message', 'text', 'content'];
-/** A connector ask in words: "Gmail: send message; to: a@b.c; subject: Hi; body: ...", never raw JSON. */
+/** A connector ask in words: "Gmail: send message; to: a@b.c; subject: Hi; body: ...", never raw JSON. Every
+ *  recipient and target field is shown whole (tenth review R10-2); only the long text (a body) is shortened to fit max.
+ *  When the fields alone don't fit, it's longer than max: a relay approval then refuses it (approve) rather than cut. */
 export function askSummary(app, action, input, max = LIMITS.confirmSummary) {
   const flat = (v) => (Array.isArray(v) ? v.map(flat).filter(Boolean).join(', ')
-    : v && typeof v === 'object' ? flat(v.email ?? v.dateTime ?? v.date ?? v.name ?? v.address ?? '')
+    : v && typeof v === 'object' ? (['email', 'dateTime', 'date', 'name', 'address'].some((k) => v[k] != null) ? flat(v.email ?? v.dateTime ?? v.date ?? v.name ?? v.address) : JSON.stringify(v))
       : String(v ?? '').replace(/\s+/g, ' ').trim());
-  const label = (k) => k.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+  const label = (k) => k.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase();
   const o = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
   const part = (k) => { const v = flat(o[k]); return v ? `${label(k)}: ${v}` : ''; };
-  let out = [`${app}: ${String(action).replace(/_/g, ' ')}`, ...ASK_FIELDS.map(part)].filter(Boolean).join('; ');
+  // Any other field too, after the known ones: a target under another name (forward_to, recipients) is never hidden.
+  const rest = Object.keys(o).filter((k) => !ASK_FIELDS.includes(k) && !ASK_TEXT.includes(k) && typeof o[k] !== 'boolean'); // a flag is never a target
+  let out = [`${app}: ${String(action).replace(/_/g, ' ')}`, ...ASK_FIELDS.map(part), ...rest.map(part)].filter(Boolean).join('; ');
   for (const k of ASK_TEXT) {
     const v = flat(o[k]);
     if (!v) continue;
@@ -154,7 +161,7 @@ export function askSummary(app, action, input, max = LIMITS.confirmSummary) {
     if (room < 20) break;
     out += `; ${label(k)}: ${v.length <= room ? v : `${v.slice(0, room - 1).replace(/\s+\S*$/, '')}\u2026`}`;
   }
-  return out.length <= max ? out : `${out.slice(0, max - 1)}\u2026`;
+  return out;
 }
 
 /** The stopped turns kept on disk: [[id, at]], or none when the file is missing or unreadable. */
@@ -303,7 +310,14 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
     // 'expired'. Anything that goes wrong is not a yes.
     const approve = async ({ summary, danger = true } = {}) => {
       if (lost || closed || turnCtrl.signal.aborted) return 'expired';
-      const s = str(summary, LIMITS.confirmSummary).trim() || 'Needs your yes.';
+      // Never cut (tenth review R10-1): a yes must cover only what was shown. A question longer than the server takes
+      // isn't asked there at all; the owner is told to ask on the Mac, where it shows whole.
+      const s = String(summary ?? '').trim() || 'Needs your yes.';
+      if (s.length > LIMITS.confirmSummary) {
+        log('relay_approval', { id: turn.id, refused: 'too_long', chars: s.length });
+        emit({ type: 'text', delta: `\n(That needs your yes, but the whole request is ${s.length} characters, more than I can show here, so I didn't do it. Ask me on your Mac to see all of it.)\n` });
+        return 'declined';
+      }
       let r;
       // 429: not made yet, so asked again after its Retry-After. A 5xx may have made it: never asked twice.
       for (let i = 0; ; i++) {

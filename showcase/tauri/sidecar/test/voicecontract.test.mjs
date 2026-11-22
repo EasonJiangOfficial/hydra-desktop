@@ -323,21 +323,20 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
     assert.doesNotMatch(src, /'claude-(?:opus|sonnet|haiku)-5-5'/, `${name} hard-codes no model (agentsettings.mjs holds the contract's default)`);
   }
   assert.match(side, /const FAST = \{ openai: 'gpt-6-luna', gemini: 'gemini-3\.8-flash' \};/, 'no stale Haiku default for Claude');
-  assert.match(side, /const want = agentSettings\.current\.model;\n  if \(!routed && canRun\('anthropic', want\)\)/, 'the local agent runs Hydra\'s model');
+  assert.match(side, /const pick = hydraModelPick\(\{ provider: config\.provider, model: config\.model, want: agentSettings\.current\.model, routed, canRun \}\);/, 'the local agent runs Hydra\'s model (hydraModelPick: behavior in voiceturn.test.mjs)');
   assert.match(side, /const setting = hydra \? agentSettings\.current\.effortLive : config\.efforts\?\.\[slot\]/, 'and its live effort');
   assert.match(side, /const \{ model, thinking \} = brainFor\(agentSettings\.current, turn\.surface\);/, 'relay turns too');
   assert.match(side, /agentSettings\.start\(\);/, 'read when paired');
   assert.match(side, /m\.type === 'hydra_settings_changed'\) agentSettings\.refresh\(\);/, 'and on a change push from the window');
-  assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: agentSettings\.current\.wakePhrase,/, 'the wake phrase reaches the helper; it listens asleep too');
+  assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: wakePhraseFor\(agentSettings\),/, 'the wake phrase reaches the helper; it listens asleep too');
   assert.match(side, /if \(!asleep && why !== 'talk' && why !== 'phrase'\)/, 'a phrase wake keeps its own take (no greeting over the owner)');
   assert.match(side, /state === 'listening' && busy && m\.mode === 'wake'\) \{ addOnTake = true;/, 'the phrase while thinking adds on');
   assert.match(side, /if \(addOnTake\) \{ addOnTake = false; if \(addOn\(text\)\) return; \}/);
-  assert.match(side, /agent\?\.addInput\?\.\(`\$\{INPUT_PREFIX\}\$\{text\}`\)/);
+  assert.match(side, /const into = addOnTo\(text, \{ busy, addInput: \(t\) => agent\?\.addInput\?\.\(t\), enqueue \}\);/, 'addOnTo (behavior in voiceturn.test.mjs)');
   assert.match(side, /onInput\(\(text\) => agentRun\.addInput\(`\$\{INPUT_PREFIX\}\$\{text\}`\)\);/, 'relay additions into the session');
   assert.match(side, /if \(m\.via === 'barge'\) noteInterrupted\(\);/, 'barge-in notes what was heard');
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');
-  assert.match(side, /setTimeout\(\(\) => \{ if \(busy && turnVoice === voice && !voiceMuted\) voice\.beat\(\); \}, FILLER_MS\)/, 'a filler after 1.1 s, never muted');
-  assert.match(side, /const FILLER_MS = 1100;/);
+  assert.match(side, /const noFiller = startFiller\(\{ voice: !intro && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \}\);/, 'a filler after 1.1 s, never muted (startFiller: behavior in voiceturn.test.mjs)');
   assert.match(side, /if \(!voiceMuted\) voice\?\.beat\(\); \/\/ a tool starts/, 'or when a tool starts');
   assert.match(side, /listensAfter\(lastReply, true\)/, 'a follow-up window after every answer');
   assert.match(side, /const tts = \(\) => \(MAC && hydraKey && !hydraRevoked \? TTS\.voicestudio :/, 'paired: every sentence from /api/voice/tts');

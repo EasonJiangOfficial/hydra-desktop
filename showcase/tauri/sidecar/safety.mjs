@@ -237,6 +237,9 @@ function readCheck(p, home, { recursive = false } = {}) {
   return { ...verdict(SAFE), path: real };
 }
 
+/** A hidden or app-data file (which can hold sign-ins): one that reads only with a yes naming it, whatever folder. */
+export const isHiddenRead = (p, home) => readCheck(p, home).level === ASK;
+
 // Owner's rule (DESIGN.md decision "Mac actions"): only plain reads run without asking, and only inside these three
 // folders. Everything else asks, every time, naming the real target; there is no setting that skips it.
 const FREE_ZONES = ['desktop', 'documents', 'downloads'];
@@ -255,7 +258,34 @@ export function checkRead(p, home, opts = {}) {
   if (v.level !== SAFE) return v;
   const { all } = pathsOf(p, home), homes = homesOf(home);
   if (all.every((a) => inFreeZone(a, homes))) return v;
+  // A background agent's own folder (own), as it really leads, no dot part: its inputs and the files it made (R10-16).
+  if (opts.own) {
+    const top = canonical(norm(opts.own, home));
+    if (all.every((a) => { const r = rel(a, top); return r !== a && r !== '' && !r.split('/').some((x) => x.startsWith('.')); })) return v;
+  }
   return { ...verdict(ASK, `Read ${v.path}? It's outside your Documents, Desktop and Downloads folders.`), path: v.path, always: true };
+}
+
+// Apps whose windows only show a page or a document: one of their windows with no file behind it is looked at freely.
+const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint)|safari|google chrome|chrome|arc|firefox|microsoft edge|brave browser|opera|vivaldi|orion|zen|hydra)$/i;
+/** What a window shows (take_screenshot, read_window) before its text or picture reaches the model: each file it has
+ *  open (its document, a file:// page) is read like read_file; a window with no file is free only in a viewer app,
+ *  any other (Terminal, a password manager, Messages) asks, naming the app (tenth review R10-11). { level, reason }. */
+export function checkWindow(win, home) {
+  const app = String(win?.app ?? '').trim(), files = [];
+  if (win?.document) files.push(String(win.document));
+  if (win?.url) { try { const u = new URL(String(win.url).replace(/^view-source:/i, '')); if (u.protocol === 'file:') files.push(decodeURIComponent(u.pathname)); } catch { /* not a URL */ } }
+  let worst = verdict(SAFE);
+  for (const f of files) {
+    const v = checkRead(f, home);
+    if (v.level === BLOCK) return verdict(BLOCK, `${app || 'That window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
+    if (v.level === ASK) worst = verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`);
+  }
+  if (!files.length && !WINDOW_VIEWERS.test(app)) {
+    const title = String(win?.title ?? '').trim();
+    worst = { ...verdict(ASK, `Look at ${app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name"}? It has no file I can check, so it could show anything (a password, a message, a terminal).`), app };
+  }
+  return worst;
 }
 
 // Files other programs run or load later (scripts, app bundles, Python's .pth, property lists, workflows): a name
@@ -324,6 +354,8 @@ const inAppDir = (a) => APP_DIRS.some((d) => fold(a).startsWith(fold(d)));
 // Apps that run what they're given (shells, script hosts, interpreters, installers) or hold the Mac's settings: never
 // the app something is opened in (seventh review F5; Windows' Start-Process runs the target with it).
 const RUNNERS = /^(terminal|iterm2?|warp|ghostty|kitty|alacritty|wezterm|hyper|tabby|rio|script editor|automator|python launcher( \d+)?|pythonw?[\d.]*|py|java|javaw|jar launcher|installer|shortcuts( events)?|osascript|mshta|wscript|cscript|powershell(_ise)?|pwsh|cmd|conhost|wt|windows terminal|bash|sh|zsh|fish|wsl|node|deno|bun|perl|ruby|php|lua|rundll32|regsvr32|msiexec|regedit|reg|certutil|bitsadmin|curl|wget|explorer|xcode|visual studio code|code|cursor|zed|windsurf|vscodium|antigravity|sublime text|nova|bbedit|textmate|macvim|vim|emacs|alfred( \d+)?|raycast|swift playgrounds?|playgrounds|wave|warp preview|archive utility|keychain access|system settings|system preferences|disk utility|console|activity monitor|launchctl|open|start)$/i;
+// Editors are runners only for what they're given (a folder's tasks run when it opens): by name alone they open empty.
+const EDITORS = /^(xcode|visual studio code|code|cursor|zed|windsurf|vscodium|antigravity|sublime text|nova|bbedit|textmate|macvim|explorer)$/i;
 // Apps that only show a file: opening one there needs no yes. Any other app asks, naming the file and the app.
 const VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|finder|microsoft (word|excel|powerpoint)|word|excel|powerpoint|notepad|safari|google chrome|chrome|arc|firefox|microsoft edge|edge|brave browser|brave|opera|vivaldi|orion|zen)$/i;
 
@@ -374,9 +406,17 @@ export function checkOpen(target, home, { executable = false, app = null } = {})
     return verdict(SAFE);
   }
   if (/[/\\]|\.\./.test(t)) return verdict(BLOCK, `"${t}" isn't an app name.`);
+  // An app by name is judged like the app= argument (tenth review R10-10): never a shell, script host or settings app.
+  const named = bare(t).replace(/\.(app|exe)$/i, '').replace(/\s+/g, ' ');
+  if ((RUNNERS.test(named) && !EDITORS.test(named)) || runnable(t) && !/\.app$/i.test(t)) return verdict(BLOCK, `${t} runs what it's given or holds the Mac's settings, so I won't open it. Open it yourself if you need it.`);
   return verdict(SAFE);
 }
 
+// Schemes a browser, a file panel or the system acts on by opening a file or running script.
+const RUN_SCHEMES = /(?:^|[^a-z0-9+.-])(javascript|vbscript|livescript|data|file|view-source|blob|about|chrome|chrome-extension|edge|brave|opera|vivaldi|x-apple[a-z0-9.-]*|applescript|shortcuts|ms-[a-z0-9-]+|search-ms|smb|afp|nfs|ftp|vnc|ssh|telnet|itms[a-z-]*|steam|vscode|cursor|jetbrains)\s*:/i;
+/** A key that moves the caret (arrows, Home, End, Page Up/Down, with any modifiers): what is typed after it can land
+ *  anywhere in the text, so the joined text no longer says what the field holds (tenth review R10-9). */
+export const movesCaret = (combo) => { const p = parseKey(combo); return !!p && ['left', 'right', 'up', 'down', 'home', 'end', 'pageup', 'pagedown'].includes(p.key); };
 /** Text the hands tools type (act_in_app type, fill and set; draw's type): never a link to a file or a page's
  *  source, never a scheme a browser or the system acts on, and a path in it is checked like a read (F2). */
 export function checkTyped(text, home) {
@@ -384,8 +424,11 @@ export function checkTyped(text, home) {
   const t = String(text ?? '').normalize('NFKC').replace(/\p{Cf}/gu, '');
   const lead = /^\s*([a-z][a-z0-9+.-]*):(?=\S)/i.exec(t)?.[1]?.toLowerCase();
   const port = /^\s*[a-z0-9.-]+:\d+(?:[/?#\s]|$)/i.test(t); // localhost:3000
-  if ((lead && !port && !['http', 'https', 'mailto'].includes(lead)) || /(?:^|[^a-z0-9+.-])(file|view-source)\s*:/i.test(t)) {
-    return verdict(BLOCK, `I only type web and mail addresses, not ${lead && !port ? `${lead}:` : 'file:'} links: they open files or run things.`);
+  // A scheme that opens files or runs script, anywhere in the text (tenth review R10-9: "alert(1)" typed, Home pressed,
+  // then "javascript:" leaves a javascript: link in the field), even with nothing after the colon yet.
+  const inner = RUN_SCHEMES.exec(t)?.[1]?.toLowerCase();
+  if ((lead && !port && !['http', 'https', 'mailto'].includes(lead)) || inner) {
+    return verdict(BLOCK, `I only type web and mail addresses, not ${inner ? `${inner}:` : `${lead}:`} links: they open files or run things.`);
   }
   let worst = verdict(SAFE);
   // A path after = (--key=~/.ssh/id_rsa) is a token too; one without a leading ~ or / (.ssh/id_rsa) is checked from
@@ -591,7 +634,8 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
     if (n.length > MAX_ARG) { tooBig = 'One of its values is too long to check.'; continue; }
     // A value that names a file (from / or ~, a drive, $HOME, or a file-like link) is read like read_file: outside
     // Documents, Desktop and Downloads it asks. Other words are only checked against the deny rules.
-    const named = !!u || /^(~|\/|[a-z]:[\\/]|\$\{?HOME)/i.test(p);
+    // A relative path (Projects/notes.txt: one word with a slash) is read from home too (tenth review R10-3).
+    const named = !!u || /^(~|\/|[a-z]:[\\/]|\$\{?HOME)/i.test(p) || /^[^\s/\\][^\s]*[\\/][^\s]*$/.test(p);
     const read = named ? checkRead : readCheck;
     const v = read(p, home, { recursive });
     const v2 = u && u.host ? read(decodeURIComponent(u.pathname), home, { recursive }) : null;
@@ -604,9 +648,11 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
   // and nothing in it writes. Everything else asks.
   const words = snake(name).split('_').filter(Boolean);
   if (a.readOnlyHint === true && words.some((w) => MCP_READS.has(w)) && !MCP_WRITES.test(snake(name))) {
-    // What can't be checked never goes to a tool that would read with no yes (V8-6: blocked, not skipped).
-    if (tooBig) return verdict(BLOCK, `${tooBig} A tool that reads with no yes is never sent what I can't check.`);
-    return pathAsk ?? verdict(SAFE);
+    // What can't be checked never goes to it (V8-6: blocked, not skipped).
+    if (tooBig) return verdict(BLOCK, `${tooBig} I don't send what I can't check.`);
+    // Owner's rule (tenth review R10-3): only reads of his three folders and Hydra's own data are free. A connected
+    // server's read sends its answer to the model (a password manager's item, a mail search), so it asks too.
+    return pathAsk ?? { ...verdict(ASK, 'It only reads, but what it reads goes to the model.'), always: true };
   }
   // Owner: anything that might change, send or delete asks every time.
   return { ...verdict(ASK, "The server doesn't say it only reads."), always: true };

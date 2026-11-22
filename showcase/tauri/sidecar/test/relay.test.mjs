@@ -133,7 +133,7 @@ let liveDoneWhileRoutineWaiting = null, macAnswer = null;
 async function runTurn(t, { emit, signal, approve }) {
   seen.push(t.id); signals[t.id] = signal;
   const may = toolFilter(t.allowedTools);
-  const tools = hydra.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), waitFor: fastWait }).filter((x) => may('hydra', x.name));
+  const tools = hydra.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), waitFor: fastWait, confirm: async () => true }).filter((x) => may('hydra', x.name));
   assert.equal(tools[0].rawInputSchema.properties.approvalId, undefined, 'the model never sends the approval id itself');
   assert.deepEqual(tools[0].rawInputSchema.required, ['id']);
   const del = tools.find((x) => x.name === 'hydra_delete_task');

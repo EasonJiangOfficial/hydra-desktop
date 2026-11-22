@@ -32,8 +32,9 @@ await assert.rejects(tool('update_commitment').execute({ id: c.id, status: 'drop
 assert.equal(asked.pop()?.always, true, 'dropping a commitment asks, always');
 assert.equal(getCommitment(c.id).status, 'open', 'a no keeps it');
 asked.length = 0;
-await tool('update_commitment').execute({ id: c.id, status: 'done' }, undefined);
-assert.equal(asked.length, 0, 'ticking one off needs no yes');
+await assert.rejects(tool('update_commitment').execute({ id: c.id, status: 'done' }, undefined), /said no/);
+assert.equal(asked.pop()?.placeholder, 'Change "call mum": mark it done?', 'ticking one off asks too (tenth review R10-7)');
+assert.equal(getCommitment(c.id).status, 'open');
 
 // The job and skill tools: the asks are in place before anything is removed.
 const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');

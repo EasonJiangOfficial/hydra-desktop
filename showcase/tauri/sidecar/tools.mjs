@@ -7,8 +7,8 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isYes } from './safety.mjs';
-import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isYes } from './safety.mjs';
+import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
 import { addCommitment, binKind, binLine, forgetFact, getBin, getCommitment, keepOldFile, listBin, listFacts, parseDue, parseRepeat, repeatLabel, restoreFromBin, updateCommitment } from './store.mjs';
@@ -33,15 +33,18 @@ export const run = (cmd, args, { onLine, ...opts } = {}) => new Promise((res) =>
 // search_files: every file under root it may read, walked here so it never goes into secrets, other apps' data or
 // symlinks (rg and grep -r would), then searched with rg or grep given those files by name. At most 20,000 files.
 const SKIP_DIRS = new Set(['node_modules', '.git']);
-export async function searchFiles(pattern, root, home, { max = 20_000, asked = false } = {}) {
+export async function searchFiles(pattern, root, home, { max = 20_000, asked = false, own = null } = {}) {
   const files = [], stack = [root];
+  // A yes for a folder outside the three covers its plain files, not the hidden ones in it (tenth review R10-5: a
+  // .sentryclirc token the question never named). Those only when the folder asked about is itself hidden or app data.
+  const hiddenOk = asked && isHiddenRead(root, home);
   while (stack.length && files.length < max) {
     const dir = stack.pop();
     for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
       const p = path.join(dir, e.name);
       // Secrets never; hidden and app-data files only under a folder the user said yes to.
-      const lv = e.isSymbolicLink() ? BLOCK : checkRead(p, home).level;
-      if (lv === BLOCK || (lv === ASK && !asked)) continue;
+      const lv = e.isSymbolicLink() ? BLOCK : checkRead(p, home, { own }).level;
+      if (lv === BLOCK || (lv === ASK && !asked) || (!hiddenOk && isHiddenRead(p, home))) continue;
       if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) stack.push(p); } else if (e.isFile()) files.push(p);
     }
   }
@@ -269,6 +272,15 @@ const defaultClipboard = async () => {
 
 /** act_in_app steps as the owner reads them in a question: every one, numbered, with all the text it types, what
  *  each click is on and what a paste puts in (D4, V9-6). clipboard: its text, or null when it can't be read. */
+/** The question for web_search and web_fetch: the whole query, or every address in full. A fetch by link number
+ *  (follow) can't say where it goes, so it's refused. */
+export function webQuestion(name, a = {}) {
+  if (name === 'web_search') return `Search the web for ${JSON.stringify(String(a.query ?? ''))}?`;
+  if (a.follow != null) throw new Error('Give the link itself as url (follow by number is off: the question must show where it goes).');
+  const urls = [a.url, ...(Array.isArray(a.urls) ? a.urls : [])].filter((u) => u != null && String(u).trim());
+  if (!urls.length) throw new Error('Give url.');
+  return `Fetch ${urls.length === 1 ? String(urls[0]) : `these pages:\n${urls.map((u) => `- ${u}`).join('\n')}`}?`;
+}
 export function stepsText(steps, { clipboard } = {}) {
   const q = (t) => JSON.stringify(String(t ?? ''));
   const one = (s) => {
@@ -375,25 +387,33 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal);
     return isYes(answer);
   }
+  /** A tool that asks before it runs: question(args) is the whole question, or throws when it can't say what runs. */
+  const askFirst = (t, question) => ({ ...t, execute: async (args, ctx) => {
+    const q = question(t.name, args ?? {});
+    if (!(await confirm(q, ctx))) throw new Error(`${userName} said no, so ${t.name} didn't run.`);
+    return t.execute(args, ctx);
+  } });
   /** read_file, list_files and search_files: secrets never; a hidden or app-data file asks, naming its real path,
    *  every time (eighth review V8-11: no yes is remembered). */
   async function readable(p, ctx, opts) {
-    const v = checkRead(p, HOME, opts);
+    const v = checkRead(p, HOME, { ...opts, own });
     const f = allowed(v);
     if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
     return f;
   }
-  /** What a window shows (its document's file, or a browser's file:// page) is checked like read_file before any of
-   *  its text or picture reaches the model: a key file open in an editor or a browser is refused, a hidden one asks. */
-  async function windowShows(win, ctx) {
-    const files = [];
-    if (win?.document) files.push(String(win.document));
-    if (win?.url) { try { const u = new URL(String(win.url).replace(/^view-source:/i, '')); if (u.protocol === 'file:') files.push(decodeURIComponent(u.pathname)); } catch { /* not a URL */ } }
-    for (const f of files) {
-      const v = checkRead(f, HOME);
-      if (v.level === BLOCK) throw new Error(`Blocked for safety: ${win.app ?? 'that window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
-      if (v.level === ASK && !(await confirm(`${v.reason} (${win.app ?? 'A window'} has it open.)`, ctx))) throw new Error(`${userName} said no, so I didn't read what ${win.app ?? 'that window'} shows.`);
+  /** What windows show (each one's document, a browser's file:// page, or the app when there's no file) is checked
+   *  before any of their text or picture reaches the model (checkWindow): a key file is refused, anything that isn't
+   *  a plain read of the three folders or a viewer's page asks, once for all of them. */
+  // okApp: the app the owner just said yes to acting in; its window after the steps needs no second yes (its files do).
+  async function windowShows(wins, ctx, { okApp = null } = {}) {
+    const asks = [];
+    for (const w of [wins].flat()) {
+      const v = checkWindow(w, HOME);
+      if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
+      if (v.level === ASK && v.app && okApp && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
+      if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
+    if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
   }
 
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
@@ -408,7 +428,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // the front one.
     try {
       const shown = res.window ? [res.window] : Array.isArray(res.shown) ? res.shown : [await hands('front').catch(() => null)];
-      for (const w of shown) await windowShows(w, ctx);
+      await windowShows(shown, ctx);
     } catch (e) { await fs.unlink(file).catch(() => {}); throw e; }
     const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
     const bounds = res.window?.bounds ?? res.bounds;
@@ -672,14 +692,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
       }
     }
-    // Pictures and favicons are fetched all at once (each is a network round trip).
+    // A picture from a link the model gave asks first, naming it: the link itself can carry words out (tenth review
+    // R10-6). A query's picture comes from Wikipedia. Favicons aren't fetched: the site's name alone would go out.
+    const links = [...new Set(marks.filter((m) => m.kind === 'photo' && m.url && !photos.has(m) && checkDrawAction({ kind: 'photo', url: m.url }).level !== BLOCK).map((m) => String(m.url)))];
+    if (links.length && !(await confirm(`Fetch ${links.length === 1 ? `the picture at ${links[0]}` : `these pictures:\n${links.map((u) => `- ${u}`).join('\n')}`}?`))) throw new Error(`${userName} said no, so nothing was drawn.`);
     await Promise.all(marks.map(async (m) => {
       if (m.kind === 'photo') {
         try { Object.assign(m, await photos.get(m)); } catch (e) { m.missing = true; notes.push(`No photo for ${m.query ?? 'that link'} (${e.message}); drew its frame and caption only.`); }
       } else if (m.kind === 'sources' || m.sources?.length) {
-        m.sources = await Promise.all(m.sources.map(async (x) => ({ ...x, icon: checkDrawAction({ kind: 'favicon', url: x.url }).level === BLOCK ? null : await faviconFor(x.url).catch(() => null) })));
+        m.sources = m.sources.map((x) => ({ ...x, icon: null }));
       }
     }));
+    // Replacing the clipboard loses what was on it and can stage a command: asked, with the whole text (R10-12).
+    for (const m of marks) if (m.kind === 'copy' && !(await confirm(`Put this on your clipboard (it replaces what's there)?\n${m.text}`))) throw new Error(`${userName} said no, so nothing was copied or drawn.`);
     for (const b of beats) for (const m of b.marks) {
       if (m.kind === 'copy') { if (!(await toClipboard(m.text))) notes.push("Couldn't copy to the clipboard."); }
       else if (m.kind === 'open') { await tools.find((x) => x.name === 'open').execute({ target: m.url }); }
@@ -922,15 +947,20 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 typed = clipboard ?? '';
               } else {
                 const ch = keyChar(s.key);
-                // ponytail: backspace undoes one character of the join; arrow keys that move the caret aren't followed.
+                // ponytail: backspace undoes one character of the join.
                 if (ch === '\b') { if (typedSoFar.turn === turn) typedSoFar.text = typedSoFar.text.slice(0, -1); }
                 else if (ch) typed = ch;
               }
             }
+            if (typedSoFar.turn !== turn) typedSoFar = { turn, text: '', moved: false };
+            // A caret moved (an arrow, Home, End) after typing: what's typed next can go anywhere in that text, so the
+            // join no longer says what the field holds (tenth review R10-9). More typing is refused.
+            // ponytail: a click_at inside the same field moves it too; such a plan still shows every step in the question.
+            if (s.do === 'key' && movesCaret(s.key) && typedSoFar.text) typedSoFar.moved = true;
+            if (typed != null && typed !== '' && typedSoFar.moved) throw new Error(`Blocked for safety: step ${mapped.indexOf(s) + 1} types after the caret moved, so I can't check what the field will hold. Type the whole text in one step (or fill the field). Nothing ran.`);
             if (typed != null) {
               // What this request typed so far is checked joined with it too: "~/" then ".ssh/id_rsa" is one path
               // (eighth review V8-4).
-              if (typedSoFar.turn !== turn) typedSoFar = { turn, text: '' };
               const joined = typedSoFar.text + typed;
               let tv = checkTyped(typed, HOME);
               const jv = checkTyped(joined, HOME);
@@ -1022,7 +1052,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
               if (plan.app && /No matching window/.test(String(err?.message ?? err))) {
                 if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
-                if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); await windowShows(res.window, ctx); return finish(res); }
+                if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); await windowShows(res.window, ctx, { okApp: plan.planApp }); return finish(res); }
               }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
               if (!plan.window || !/No matching window/.test(String(err?.message ?? err))) throw err;
@@ -1034,7 +1064,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           } finally {
             if (lastShot && mapped.some((s) => s.do !== 'wait')) lastShot.used = true;
           }
-          await windowShows(res.window, ctx);
+          await windowShows(res.window, ctx, { okApp: plan.planApp });
           return finish(res);
           function finish(res) {
             if (!res.controls) return `In ${res.window.app}: ${res.done.join(', ')}.`;
@@ -1101,7 +1131,9 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       name: 'see_photo',
       description: "Look at a picture before naming its parts: the same query or url as draw's photo mark. Needed once before a photo with labels.",
       parameters: z.object({ query: z.string().max(100).optional(), url: z.string().max(2000).optional() }),
-      execute: async ({ query, url }) => {
+      execute: async ({ query, url }, ctx) => {
+        if (url) { const v = checkDrawAction({ kind: 'photo', url }); if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`); }
+        if (url && !photos.has({ url }) && !(await confirm(`Fetch the picture at ${url}?`, ctx))) throw new Error(`${userName} said no, so I didn't fetch it.`);
         const p = await photos.see({ query, url });
         return { content: [
           { type: 'text', text: `This is the picture a photo mark with ${url ? 'this url' : `query "${query}"`} shows${p.title ? ` (${p.title})` : ''}. To name its parts, draw that photo with labels [{text, x, y}]: x and y are fractions of this picture, x from 0 at its left edge to 1 at its right, y from 0 at its top to 1 at its bottom. Put each point on the middle of the part it names, and only name parts you can see here.` },
@@ -1129,7 +1161,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       parameters: z.object({ pattern: z.string(), dir: z.string() }),
       execute: async ({ pattern, dir }, ctx) => {
         const root = await readable(at(dir), ctx, { recursive: true });
-        return clip(await searchFiles(pattern, root, HOME, { asked: checkRead(root, HOME).level === ASK }) || 'No matches.', 12_000);
+        return clip(await searchFiles(pattern, root, HOME, { asked: checkRead(root, HOME, { own }).level === ASK, own }) || 'No matches.', 12_000);
       },
     },
     {
@@ -1153,11 +1185,13 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     // GG Coder's own web tools: search with a side search or keyless engines, pages as Markdown with offset to read on.
-    createWebSearchTool(undefined, async (req) => {
+    // Each asks first, showing the whole query or every address (tenth review R10-6): a search or a fetch sends words
+    // out, so text read from a file could carry what it read to any site in a link.
+    askFirst(createWebSearchTool(undefined, async (req) => {
       const side = sideSearchFor(await Promise.resolve().then(sideSearch).catch(() => null));
       return side ? side(req) : null;
-    }),
-    createWebFetchTool(undefined, { guardUrl: guardFetch }),
+    }), webQuestion),
+    askFirst(createWebFetchTool(undefined, { guardUrl: guardFetch }), webQuestion),
     {
       name: 'open', description: 'Open a website, a file or folder, or an app by name (e.g. "Safari", "https://hydra-olive-one.vercel.app", "~/Documents"). Links open in the default browser; set app to open one in a particular browser or app (e.g. app "Safari" when the user says "in Safari").',
       parameters: z.object({ target: z.string(), app: z.string().optional() }),
@@ -1196,12 +1230,14 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       name: 'remember_commitment',
       description: `Save what ${userName} commits to doing or asks to be reminded about (never small talk or what you'll do yourself). Saving shows their reminders list on screen by itself, so don't also draw one. kind: 'reminder' only for a plain "remind me to X at/in …" (clears once nudged); 'commitment' (default) for anything they say they'll do ("I'll finish the slides by Friday", "hold me to it"), open until they say it's done. due: "in 90s", "in 5m", "in 1h30m", "in 2 days", or local YYYY-MM-DDTHH:mm[:ss] or YYYY-MM-DD; none if no time. Resolve "Thursday", "at 2" or "tonight" from their message's timestamp. repeat, only when asked again and again: daily, weekdays, weekends, weekly, monthly, yearly, "every N minutes|hours|days|weeks|months" (5 minutes at least) or days like "mon,wed,fri", with due as the first time. A repeating reminder moves on as it fires, a repeating commitment (a habit, like the gym) when marked done. One saved item covers the whole series: never save one per day.`,
       parameters: z.object({ text: z.string().min(2).max(200), due: z.string().optional(), kind: z.enum(['reminder', 'commitment']).optional(), repeat: z.string().max(60).optional() }),
-      execute: async ({ text, due, kind, repeat }) => {
+      execute: async ({ text, due, kind, repeat }, ctx) => {
         const ms = parseDue(due);
         if (ms === undefined) throw new Error(`Couldn't read the time "${due}". Use YYYY-MM-DDTHH:mm or YYYY-MM-DD.`);
         const r = repeat === undefined ? null : parseRepeat(repeat);
         if (r === undefined) throw new Error(`Couldn't read the repeat "${repeat}". Use daily, weekdays, weekly, monthly, "every 2 hours" (5 minutes or more) or days like "mon,wed,fri".`);
         if (r && !ms) throw new Error('A repeating reminder needs due: the first time it should go off.');
+        // Owner's rule: a memory change asks, showing what is saved (tenth review R10-7).
+        if (!(await confirm(`Save the ${ms && kind === 'reminder' ? 'reminder' : 'commitment'} "${text}"${ms ? `, due ${fmtWhen(ms)}` : ''}${r ? `, repeating ${repeatLabel(r.spec)}` : ''}?`, ctx))) throw new Error(`${userName} said no, so nothing was saved.`);
         // A plain reminder with no time has nothing to fire, so it's kept like a commitment.
         const c = await addCommitment(text, ms, ms ? kind : 'commitment', r?.spec);
         onCommitments(c);
@@ -1224,6 +1260,14 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (ms === undefined && due !== undefined) throw new Error(`Couldn't read the time "${due}".`);
         const r = repeat === undefined ? undefined : parseRepeat(repeat);
         if (r === undefined && repeat !== undefined) throw new Error(`Couldn't read the repeat "${repeat}".`);
+        // Any other change asks too, saying what changes (tenth review R10-7).
+        if (status !== 'dropped') {
+          const old = getCommitment(id);
+          if (!old) throw new Error(`No commitment with id ${id}. Call list_commitments to see the ids.`);
+          const what = [status && `mark it ${status}`, ms !== undefined && (ms === null ? 'clear its time' : `make it due ${fmtWhen(ms)}`), repeat !== undefined && (r ? `repeat it ${repeatLabel(r.spec)}` : 'stop it repeating')].filter(Boolean);
+          if (!what.length) throw new Error('Nothing to change: give status, due or repeat.');
+          if (!(await confirm(`Change "${old.text}": ${what.join(', ')}?`, ctx))) throw new Error(`${userName} said no, so "${old.text}" stays as it was.`);
+        }
         const c = await updateCommitment(id, { status, dueMs: ms, repeat: repeat === undefined ? undefined : r?.spec ?? null });
         if (!c) throw new Error(`No commitment with id ${id}. Call list_commitments to see the ids.`);
         onCommitments(c);
@@ -1303,13 +1347,14 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       name: 'snooze_reminder',
       description: `Snooze a reminder that just went off ("snooze", "remind me again in an hour", "move it to tomorrow"). until: "in 10m" (the default), "1h", "tomorrow" (same time), "tonight" (8 pm) or local YYYY-MM-DDTHH:mm. Leave id out for the one that just went off. It also brings back a plain reminder that cleared itself.`,
       parameters: z.object({ until: z.string().max(40).optional(), id: z.string().optional() }),
-      execute: async ({ until = 'in 10m', id }) => {
+      execute: async ({ until = 'in 10m', id }, ctx) => {
         const target = snoozeTarget(id, firedReminders());
         if (!target) throw new Error('Nothing went off in the last 30 minutes. Call list_commitments and pass the id.');
         const c = getCommitment(target);
         if (!c) throw new Error(`No reminder with id ${target}. Call list_commitments to see the ids.`);
         const ms = snoozeUntil(until, c.due);
         if (ms === undefined) throw new Error(`Couldn't read "${until}" as a time ahead. Use "in 10m", "tomorrow", "tonight" or YYYY-MM-DDTHH:mm.`);
+        if (!(await confirm(`Snooze "${c.text}" until ${fmtWhen(ms)}?`, ctx))) throw new Error(`${userName} said no, so "${c.text}" stays as it was.`);
         // keepSeries: a repeating one (where that's supported) moves only this time, not its whole series.
         const u = await updateCommitment(target, { status: 'open', dueMs: ms, keepSeries: true });
         onCommitments(u);
@@ -1328,7 +1373,11 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         title: z.string().min(1).max(60), brief: z.string().min(1).max(8000), due: z.string().max(40), repeat: z.string().max(60).optional(),
         type: z.enum(['maker', 'researcher', 'organizer']).optional(), returns: z.enum(['files', 'answer']).optional(), subagent: z.string().max(40).optional(),
       }),
-      execute: async (args) => {
+      execute: async (args, ctx) => {
+        // A background agent that runs later on its own: asked, with the whole brief and when (tenth review R10-7).
+        const ms = parseDue(args.due), r = args.repeat ? parseRepeat(args.repeat) : null;
+        const when = `${ms ? `first at ${fmtWhen(ms)}` : `at "${args.due}"`}${args.repeat ? `, then ${r ? repeatLabel(r.spec) : `"${args.repeat}"`}` : ''}`;
+        if (!(await confirm(`Schedule a background ${args.subagent ? `${args.subagent} ` : ''}${args.type ?? 'researcher'} agent "${args.title}", ${when}? Each run does this on its own:\n${args.brief}`, ctx))) throw new Error(`${userName} said no, so nothing was scheduled.`);
         const j = await addJob(args);
         jobs.changed(j);
         return `Scheduled ${j.id} "${j.title}": first run ${fmtWhen(j.due)}${j.repeat ? `, then ${repeatLabel(j.repeat)}` : ''}. It shows on the Abilities page's Routines tab.${allowActions() ? '' : ' Agents need "Allow File Edits & Commands", which is off: tell them it won\'t run until they turn it on.'}`;
@@ -1342,6 +1391,11 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (action === 'remove' && !reason?.trim()) throw new Error('Removing deletes it: say why in reason, so the question shows it.');
         if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so the job stays.`);
         if (action === 'remove') { const j = await removeJob(id); jobs.changed(null); return `Removed the job "${j.title}".`; }
+        // Every other change asks too, saying what changes; running it now shows the brief it runs (R10-7).
+        const job = getJob(id);
+        const what = [action && action !== 'remove' && { pause: 'pause it', resume: 'resume it', run_now: 'run it now' }[action], due !== undefined && `next run ${due}`, repeat !== undefined && (repeat === 'none' ? 'make it a one-off' : `repeat ${repeat}`)].filter(Boolean);
+        if (!what.length) throw new Error('Nothing to change: give action, due or repeat.');
+        if (!(await confirm(`Scheduled job "${job.title}": ${what.join(', ')}?${action === 'run_now' || action === 'resume' ? ` It runs this on its own:\n${job.brief}` : ''}`, ctx))) throw new Error(`${userName} said no, so the job stays as it was.`);
         if (action === 'run_now') { const a = await jobs.run(id); return `Started ${a.id} for "${getJob(id).title}"; it reports back when it's done. The schedule is unchanged.`; }
         const j = await updateJob(id, { ...(action ? { paused: action === 'pause' } : {}), ...(due !== undefined ? { due } : {}), ...(repeat !== undefined ? { repeat } : {}) });
         jobs.changed(j);

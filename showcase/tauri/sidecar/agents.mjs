@@ -315,7 +315,7 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     if (deliverTo) {
       to = path.resolve(String(deliverTo).replace(/^~(?=$|\/|\\)/, home));
       const v = safety.checkWrite(path.join(to, 'x'), home);
-      // Copies land unasked, so only where write_file makes a new file unasked (Desktop, Documents, Downloads).
+      // Only a folder in Desktop, Documents or Downloads; even there each copy asks, naming where it lands (deliver).
       if (v.level !== 'safe') throw new Error(`Can't deliver to ${deliverTo}: ${v.level === 'block' ? v.reason : 'copies only go to a folder in Desktop, Documents or Downloads.'}`);
     }
     let a;
@@ -436,22 +436,35 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     tell(a.state === 'done' ? 'done' : a.state === 'failed' ? 'fail' : 'gone', a);
     log('agent_end', { id: a.id, state: a.state, reason: a.reason ?? null, turns: a.turns, in: a.tokens.in, out: a.tokens.out, ms: a.workMs });
   }
-  // A copy of each file it made goes where they asked; nothing there is overwritten.
+  // A copy of each file it made goes where they asked; nothing there is overwritten. Asked first, once, naming every
+  // path a copy would land at (tenth review R10-4: the agent's own write_file only named its folder).
   async function deliver(a) {
     a.delivered = [];
-    try { await fs.promises.mkdir(a.deliverTo, { recursive: true }); } catch { return; }
+    const plan = [];
     for (const f of a.result.files) {
       if (!f.path.startsWith(fs.realpathSync.native(a.dir) + path.sep)) continue;
       const ext = path.extname(f.name), stem = f.name.slice(0, f.name.length - ext.length);
       let dest = path.join(a.deliverTo, f.name);
-      for (let i = 2; await exists(dest); i++) dest = path.join(a.deliverTo, `${stem} ${i}${ext}`);
+      for (let i = 2; await exists(dest) || plan.some((x) => x.dest === dest); i++) dest = path.join(a.deliverTo, `${stem} ${i}${ext}`);
       // Every file a folder holds is checked where it would land, not only the folder's name (F12): one that would need
       // a yes (a link file, a script, a dotfile) keeps the whole folder back.
       const each = (await fs.promises.stat(f.path).catch(() => null))?.isDirectory() ? (await fs.promises.readdir(f.path, { recursive: true }).catch(() => [])).map((r) => path.join(dest, r)) : [];
       if ([dest, ...each].some((d) => safety.checkWrite(d, home).level !== 'safe')) { log('agent_deliver', { id: a.id, skipped: dest }); continue; }
-      try { await fs.promises.cp(f.path, dest, { recursive: true, errorOnExist: true, force: false }); a.delivered.push(dest); } catch (e) { log('agent_deliver', { id: a.id, error: String(e.message) }); }
+      plan.push({ from: f.path, dest, each });
+    }
+    if (!plan.length) return;
+    const shown = plan.flatMap((x) => [x.dest, ...x.each]);
+    const q = `${a.title} (${a.id}) is done. Copy what it made to ${a.deliverTo}? ${shown.length === 1 ? 'It lands at' : 'They land at'}:\n${shown.map((d) => `- ${d}`).join('\n')}`;
+    if (!(await yes(q))) { log('agent_deliver', { id: a.id, declined: shown.length }); return; }
+    try { await fs.promises.mkdir(a.deliverTo, { recursive: true }); } catch { return; }
+    for (const { from, dest } of plan) {
+      try { await fs.promises.cp(from, dest, { recursive: true, errorOnExist: true, force: false }); a.delivered.push(dest); } catch (e) { log('agent_deliver', { id: a.id, error: String(e.message) }); }
     }
   }
+  // The owner's yes (config.confirm: an Allow bubble); none to ask is a no.
+  const yes = (q, signal) => (config.confirm ? Promise.resolve(config.confirm(q, signal)).then((r) => r === true, () => false) : Promise.resolve(false));
+  /** The question before work starts: the type, the title, the whole brief, its inputs and where copies go. */
+  const startQuestion = ({ type, subagent, title, brief, inputs, deliver_to: to }, again = null) => `${again ? `Start ${again.id} "${again.title}" again in its folder` : `Start a background ${subagent ? `${subagent} ` : ''}${type ?? ''} agent "${title}"`.replace(/\s+/g, ' ')}? It works on its own with files and the web. Its brief:\n${brief}${inputs?.length ? `\n\nGiven: ${inputs.join(', ')}` : ''}${to ? `\n\nCopies of what it makes go to ${path.resolve(String(to).replace(/^~(?=$|\/|\\)/, home))} (asked again then, naming each).` : ''}`;
 
   function stop(id, { state = 'stopped', reason = 'Stopped by you' } = {}) {
     const a = agents.get(String(id)), p = procs.get(String(id));
@@ -578,7 +591,10 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
         returns: z.enum(RETURNS).optional(),
         model: z.string().max(80).optional(),
       }),
-      execute: async (args) => {
+      execute: async (args, ctx) => {
+        // Owner's rule: starting work asks, showing the whole brief (tenth review R10-4).
+        const again = args.continue ? agents.get(String(args.continue)) : null;
+        if (!(await yes(startQuestion(args, again), ctx?.signal))) throw new Error(`${userName} said no, so no agent started. Say so in one short sentence.`);
         let a;
         try { a = await start(args); }
         catch (e) { throw new Error(`${e.message} The launch failed, so there is no agent: say so right away in one short sentence and what you will do instead (do it yourself if you can), and never go quiet.`); }
@@ -589,7 +605,12 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     {
       name: 'tell_agent', description: 'Give an agent more instructions ("make the logo bigger"). A working one takes them on board; a finished one carries on in the same folder.',
       parameters: z.object({ id: z.string().max(12), message: z.string().min(1).max(2000) }),
-      execute: async ({ id, message }) => steer(id, message),
+      execute: async ({ id, message }, ctx) => {
+        const a = agents.get(String(id));
+        // A finished one starts working again: asked like send_agent, with the new instructions.
+        if (a && !(a.state === 'working' || a.state === 'waiting') && !(await yes(startQuestion({ brief: message }, a), ctx?.signal))) throw new Error(`${userName} said no, so ${a.id} didn't start again.`);
+        return steer(id, message);
+      },
     },
     {
       name: 'stop_agent', description: 'Stop a working agent. What it made so far stays in its folder.',

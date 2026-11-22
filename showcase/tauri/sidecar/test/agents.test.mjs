@@ -242,8 +242,9 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const config = {
     model: async () => ({ provider, model: 'm1', route: 'api' }), creds: async () => ({ accessToken: 'k', accountId: 'acc' }),
     allowActions: () => allow, image: () => ({ type: 'image', mediaType: 'image/png', data: Buffer.from('png').toString('base64') }),
-    open: async (p) => opened.push(p), reveal: async (p) => revealed.push(p),
+    open: async (p) => opened.push(p), reveal: async (p) => revealed.push(p), confirm: async (q) => { confirmed.push(q); return true; },
   };
+  const confirmed = [];
   // macOS keeps temp folders under /private/var, a system path to checkOpen: the rule sees them under a plain home.
   const openRule = (p, h, o) => checkOpen(String(p).replace(home, '/Users/ken'), '/Users/ken', o);
   const mk = () => createAgents({ fork, ui: (m) => { if (m.kind === 'hands') hands.push(m); else events.push(m.e); }, config, root, userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen: openRule, checkLink }, home, now: () => T });
@@ -403,6 +404,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   gc.emit('message', { t: 'end', ok: true }); gc.emit('close', 0, null); await tick();
   assert.equal(fs.readFileSync(path.join(desk, 'card.txt'), 'utf8'), 'theirs', 'nothing is overwritten');
   assert.equal(fs.readFileSync(path.join(desk, 'card 2.txt'), 'utf8'), 'made');
+  assert.ok(confirmed.at(-1).includes(path.join(desk, 'card 2.txt')), 'the copy was asked, naming where it lands (tenth review R10-4)');
   assert.ok(await mgr.openFile(g.id, path.join(desk, 'card 2.txt')), 'its delivered copy opens too');
   await assert.rejects(mgr.start({ type: 'maker', title: 'x', brief: 'x', deliver_to: '~/.ssh' }), /Can't deliver/);
   // Next launch: one still marked working was cut off when Roamies closed.

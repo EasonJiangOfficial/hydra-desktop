@@ -30,6 +30,15 @@ export function cleanSettings(raw, before = SETTINGS_DEFAULTS) {
     effortRoutine: EFFORTS.includes(routine) ? routine : before.effortRoutine,
   };
 }
+/** The wake phrase for the voice helper: Hydra's own once it has answered, else none, so the Mac's own wake name
+ *  (Settings) keeps working while unpaired (tenth review R10-14: "Hey Hydra" used to override it on every config). */
+export const wakePhraseFor = (watch) => (watch?.known ? watch.current.wakePhrase : undefined);
+/** Hydra's model for the chat: only when the owner's provider is Claude or none is picked yet (R10-15: a pick of
+ *  OpenAI, Gemini or a local model stays). routed: a heavy job's own model has the turn. null: leave the pick. */
+export function hydraModelPick({ provider, model, want, routed = false, canRun }) {
+  if (routed || (provider && provider !== 'anthropic') || !canRun('anthropic', want)) return null;
+  return provider === 'anthropic' && model === want ? { same: true } : { provider: 'anthropic', model: want };
+}
 /** The model and thinking level for one turn: a routine thinks at effort_routine, everything else at effort_live. */
 export const brainFor = (settings, surface) => ({ model: settings.model, thinking: surface === 'routine' ? settings.effortRoutine : settings.effortLive });
 
@@ -38,13 +47,15 @@ export const brainFor = (settings, surface) => ({ model: settings.model, thinkin
  * changed. A failed read (offline, 5xx, unpaired) keeps what it had. current: the last good settings.
  */
 export function createSettingsWatch({ api, onChange = () => {}, log = () => {}, everyMs = SETTINGS_EVERY_MS, setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (h) => clearTimeout(h) }) {
-  let current = { ...SETTINGS_DEFAULTS }, timer = null, running = false, inflight = null;
+  // known: a read answered since start (paired), so the wake phrase is Hydra's own, not the default (R10-14).
+  let current = { ...SETTINGS_DEFAULTS }, timer = null, running = false, inflight = null, known = false;
   const arm = () => { if (!running) return; if (timer) clearTimer(timer); timer = setTimer(() => { timer = null; refresh(); }, everyMs); timer?.unref?.(); };
   async function read() {
     try {
       const r = await api.req('/api/agent/state', { timeout: 20_000 });
       if (!r.ok) { log('agent_settings', { status: r.status }); return current; }
       const next = cleanSettings(await r.json(), current);
+      known = true;
       const changed = Object.keys(next).filter((k) => next[k] !== current[k]);
       const before = current;
       current = next;
@@ -59,8 +70,9 @@ export function createSettingsWatch({ api, onChange = () => {}, log = () => {}, 
   }
   return {
     get current() { return current; },
+    get known() { return known; },
     refresh,
     start() { running = true; return refresh(); },
-    stop() { running = false; if (timer) clearTimer(timer); timer = null; },
+    stop() { running = false; known = false; if (timer) clearTimer(timer); timer = null; },
   };
 }

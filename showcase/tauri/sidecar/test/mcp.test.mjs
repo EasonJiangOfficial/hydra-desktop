@@ -169,9 +169,13 @@ console.log('mcp ok');
   // Tools and calls.
   await m.add({ name: 'notes', command: 'npx', args: ['-y', '@acme/notes-mcp'] });
   assert.match(await T.connection_tools.execute({ server: 'notes' }), /- search_notes \[read-only\]: search_notes things\n {2}args: \{"type":"object"\}/);
-  asked.length = 0;
+  asked.length = 0; answers = [null];
+  await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '{"q":"a"}' }), /Ken said no/);
+  assert.equal(asked.length, 1, 'read-only asks too (tenth review R10-3)');
+  assert.ok(asked[0].placeholder.includes('search_notes {"q":"a"}'), 'with what it sends');
+  answers = ['yes'];
   assert.equal(await T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '{"q":"a"}' }), 'ran search_notes {"q":"a"}');
-  assert.equal(asked.length, 0, 'read-only: no ask');
+  asked.length = 0;
   answers = [null];
   const long = JSON.stringify({ id: 'n1', note: 'x'.repeat(400), alsoDelete: 'everything' });
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'delete_note', args: long }), /Ken said no/);

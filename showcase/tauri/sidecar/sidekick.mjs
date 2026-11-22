@@ -9,7 +9,7 @@ import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
 import { DANGER, HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
 import { INPUT_PREFIX, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, toolFilter, turnPrompt } from './relay.mjs';
-import { brainFor, createSettingsWatch } from './agentsettings.mjs';
+import { brainFor, createSettingsWatch, hydraModelPick, wakePhraseFor } from './agentsettings.mjs';
 import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
@@ -29,7 +29,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
-  addFact, supersedeFact, liveFacts, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
+  addFact, supersedeFact, learnFactsAsked, liveFacts, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
   touchFacts, forDisk, forProvider, binKind, getBin, listBin, restoreFromBin, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
@@ -39,7 +39,7 @@ import { saveCardImage } from './cardimage.mjs';
 import { cleanWakeName, wakeName } from './wakename.mjs';
 import { cleanSleepWord, createPower, DEFAULT_SLEEP_WORD, heardSleepWord } from './power.mjs';
 import { cleanDeviceKey, cleanHydraUrl, createHydraLink, HYDRA_KEY_SECRET } from './hydralink.mjs';
-import { SystemVoice, spokenText, systemStatus } from './sysvoice.mjs';
+import { SystemVoice, systemStatus } from './sysvoice.mjs';
 import { HydraVoice } from './hydravoice.mjs';
 import { KEY_NAME as SYNC_KEY, MIN_PASSPHRASE, checkFolder, folderReady, merge as syncMerge, newDevice, prepareFolder, readRemotes, suggestFolders, tooMuchGone, writeOwn } from './sync.mjs';
 import { EMOTES, EchoFilter, FinalText, ReplyStream, stripEmotes } from './reply.mjs';
@@ -48,6 +48,7 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
+import { addOnTo, createSpokenTrack, startFiller } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -97,8 +98,8 @@ const ui = (msg) => {
   if (msg.kind === 'speech') {
     if (msg.stop) { send({ type: 'onboard', msg }); nativeSpeech(msg); return send({ type: 'ui', msg }); }
     if (guideVoices.has(msg.id)) { if (msg.end) guideVoices.delete(msg.id); return send({ type: 'onboard', msg }); }
-    // What of the reply has been handed to the voice to play (fillers left out): where a barge-in cut it off.
-    if (msg.pcm && !msg.filler && spokenNow?.id === msg.id) spokenNow.audio++;
+    // How much of the reply has played (voiceturn.mjs): where a barge-in cut it off.
+    if (msg.pcm) heardTrack.audio(msg);
     nativeSpeech(msg);
   }
   if (intro && msg.kind === 'agent') return send({ type: 'onboard', msg: { kind: 'chat', e: msg.e } });
@@ -146,14 +147,13 @@ function nativeNow() {
   send({ type: 'ui', msg: { kind: 'voice_native', on } });
   if (on) nativeSpeech({ volume: voiceMuted ? 0 : volumeNow() / 100 });
 }
-// The reply being spoken (W5 contract 3): its sentences, how many reached the voice, and whether it has all been said.
-let spokenNow = null, interruptedAfter = '';
-const FILLER_MS = 1100;
+// The reply being spoken (W5 contract 3): its sentences, how much has played, and whether it has all been said.
+const heardTrack = createSpokenTrack();
+let interruptedAfter = '';
 function noteInterrupted() {
-  const s = spokenNow;
-  if (!s || s.finished || !s.audio) return;
-  interruptedAfter = spokenText(s.said.slice(0, s.audio).join(' ')).slice(0, 1000);
-  spokenNow = null;
+  const heard = heardTrack.interrupted();
+  if (!heard) return;
+  interruptedAfter = heard;
   logLine('barge', { heard: interruptedAfter.length });
 }
 const say = (text, mood) => (onboarding ? ob({ kind: 'say', text, mood }) : ui({ kind: 'say', text, mood }));
@@ -621,9 +621,9 @@ const textOnly = (p) => getModelsForProvider(p).filter((m) => !seesImages(p, m.i
 function ensureModel() {
   // Signed in with Claude: Hydra's model decides (agent_settings.model), not a pick made here. A heavy job's own
   // model (routed) keeps its turn.
-  const want = agentSettings.current.model;
-  if (!routed && canRun('anthropic', want)) {
-    if (config.provider !== 'anthropic' || config.model !== want) { config.provider = 'anthropic'; config.model = want; agentStale = true; saveConfig(); }
+  const pick = hydraModelPick({ provider: config.provider, model: config.model, want: agentSettings.current.model, routed, canRun });
+  if (pick) {
+    if (!pick.same) { config.provider = pick.provider; config.model = pick.model; agentStale = true; saveConfig(); }
     return true;
   }
   if (config.provider && getModel(config.model) && canRun(config.provider, config.model)) return true;
@@ -805,6 +805,8 @@ const agents = createAgents({
     model: agentModel, subagent: (name) => { const s = config.subagents ? findSubagent(name, crewNow()) : null; return s ? { id: s.id, label: s.label, type: s.type, role: s.role, spec: s.spec.spec, slot: s.slot } : null; }, userWords: () => turnWords, openUrl: (u) => openUrl(u), creds: (m) => credsFor(m.provider, m.model), allowActions: () => !!config.allowActions, image: () => turnImage,
     open: (p) => (process.platform === 'win32' ? winOpen(p) : new Promise((r) => execFile(MAC ? 'open' : 'xdg-open', [p], () => r()))),
     reveal: async (p) => reveal(p),
+    // Starting an agent and copying what it made ask the owner (agents.mjs; owner's rule, DESIGN.md "Mac actions").
+    confirm: async (question, signal) => isYes(await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, signal)),
   },
 });
 tools.push(...agents.tools);
@@ -1257,7 +1259,9 @@ function maybeCompact() {
       const facts = liveFacts();
       const { text, model } = await oneShot({ ...(await sideRoute()), system: foldPrompt(userName), text: foldInput({ facts, summary: plan.summary, turns: transcript(plan.folded, userName, stripNote), name: userName }) });
       const out = parseBrain(text, { knownIds: facts.map((f) => f.id), wantSummary: true });
-      const learned = await learnFacts(out.facts);
+      // Asked in the background: the fold never waits on the owner's answer.
+      learnFacts(out.facts).catch((e) => logLine('memory_failed', { why: 'fold', error: String(e?.message ?? e).slice(0, 200) }));
+      const learned = out.facts;
       if (s !== session) { logLine('compact_dropped', { session: s.id, why: 'new conversation' }); return; }
       pendingFold = { session: s, plan, summary: out.summary, model, ms: Date.now() - t0, facts: learned.length };
       // A request that started meanwhile only appends turns: the fold lands when it's saved.
@@ -1283,15 +1287,10 @@ function applyPendingFold() {
 async function sideRoute() {
   return { provider: config.provider, model: config.model, cc: await claudeCodeRoute(), credsFor: (m) => credsFor(config.provider, m), cwd: WORKDIR, chatThinking: CHAT_THINKING };
 }
+// Owner's rule: a memory change asks (store.mjs learnFactsAsked shows each fact and what it replaces).
+const memoryYes = async (question) => isYes(await ask({ placeholder: question, choices: ['Remember', "Don't remember"], always: true }));
 async function learnFacts(facts) {
-  const added = [];
-  for (const f of facts) {
-    // A correction is added and the old fact kept, marked replaced (not used, shown as replaced in Memory): nothing is
-    // deleted without the owner's yes.
-    const nf = await addFact(f.text);
-    if (f.replaces) await supersedeFact(f.replaces, nf.id);
-    added.push(nf);
-  }
+  const added = await learnFactsAsked(facts, memoryYes);
   if (added.length) menu();
   return added;
 }
@@ -1345,6 +1344,8 @@ async function skillPass(p, why) {
     if (!k) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false }); return; }
     // The background pass only makes new skills: changing one that exists replaces it, which asks the owner first.
     if (skillExists(k.name)) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false, skipped: 'exists' }); return; }
+    // A new skill too is saved only with the owner's yes, showing its steps (owner's rule: skill changes ask).
+    if (!(await memoryYes(`Save the skill "${k.name}"? ${k.description ?? ''}\n\nIts steps:\n${k.steps ?? ''}`))) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false, skipped: 'declined' }); return; }
     const s = await saveSkill(k); // checkSkill and key scrubbing happen here; an unsafe one throws
     activity.learned(s.name, !s.created); panel();
     logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: s.slug, updated: !s.created });
@@ -1394,8 +1395,9 @@ async function lessonPass(r, correction) {
     const { text, model } = await oneShot({ ...(await sideRoute()), system: lessonPrompt(userName), text: lessonInput({ facts, index: skillIndex(), used, turns: transcript(r.messages, userName, stripNote).slice(-12_000), correction }) });
     const out = parseLesson(text, { knownIds: facts.map((f) => f.id) });
     let skill = null;
-    if (out.fact) { await learnFacts([out.fact]); activity.noted(out.fact.text); }
-    if (out.skill && !skillExists(out.skill.name)) {
+    if (out.fact && (await learnFacts([out.fact])).length) activity.noted(out.fact.text);
+    // A skill it learned is saved only with the owner's yes, showing its steps (owner's rule: skill changes ask).
+    if (out.skill && !skillExists(out.skill.name) && await memoryYes(`Save the skill "${out.skill.name}"? ${out.skill.description ?? ''}\n\nIts steps:\n${out.skill.steps ?? ''}`)) {
       try { const s = await saveSkill(out.skill); activity.learned(s.name, !s.created); skill = s.slug; } // checkSkill runs here
       catch (e) { logLine('lesson_skill_refused', { error: String(e?.message ?? e).slice(0, 300) }); }
     }
@@ -1593,11 +1595,10 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   const voice = VOICE_ON() ? speech.start() : (speech.stop(), null);
   turnVoice = voice;
   if (voice && intro) guideVoices.add(voice.id);
-  const said = voice ? (spokenNow = { id: voice.id, said: [], audio: 0, finished: false }) : null;
-  const spoken = voice && new SpeechText((t) => { said.said.push(t); voice.say(t); }, speech.localOpts?.());
+  if (voice) heardTrack.start(voice.id);
+  const spoken = voice && new SpeechText((t) => { heardTrack.line(t); voice.say(t); }, speech.localOpts?.());
   // A filler ("Let me check.") when no answer has started within 1.1 s (W5 contract 3); never while muted.
-  let filler = voice && !intro ? setTimeout(() => { if (busy && turnVoice === voice && !voiceMuted) voice.beat(); }, FILLER_MS) : null;
-  const noFiller = () => { clearTimeout(filler); filler = null; };
+  const noFiller = startFiller({ voice: !intro && voice, live: () => busy && turnVoice === voice, muted: () => voiceMuted });
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null;
   try {
     // Voice: a short first line before a tool ("On it, checking Paris.") is a beat: it's spoken, but not
@@ -2449,7 +2450,7 @@ const voiceConfig = () => {
   if (!enabled) voiceHelperUp = false; // the helper stops; it says when it's up again
   nativeNow();
   // The key phrase listens asleep too (it wakes Hydra, W5 contract 4); it's Hydra's own (agent_settings.wake_phrase).
-  send({ type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: agentSettings.current.wakePhrase, lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
+  send({ type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: wakePhraseFor(agentSettings), lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
   // The native listening pill beside the cursor stays hidden while the notch capsule is where I appear.
   send({ type: 'pill', on: notchMode() === 'off' });
 };
@@ -2903,12 +2904,10 @@ async function onSpoken(text, area) {
 // answers them right after this turn. False when nothing runs any more (they are a new request then).
 let addOnTake = false;
 function addOn(text) {
-  if (!busy) return false;
-  turnWords = turnWords ? `${turnWords}\n${text}` : text;
-  if (agent?.addInput?.(`${INPUT_PREFIX}${text}`)) { logLine('add_on', { chars: text.length, into: 'turn' }); return true; }
-  logLine('add_on', { chars: text.length, into: 'next' });
-  enqueue(text, { byVoice: true });
-  return true;
+  if (busy) turnWords = turnWords ? `${turnWords}\n${text}` : text;
+  const into = addOnTo(text, { busy, addInput: (t) => agent?.addInput?.(t), enqueue });
+  if (into) logLine('add_on', { chars: text.length, into });
+  return !!into;
 }
 // A pending snap goes with the next spoken question, if it comes within two minutes.
 function takeSnap() {
@@ -3097,7 +3096,7 @@ function applyHydraSettings(next, before) {
 function localHydraTools() {
   if (!hydraKey) return [];
   return [
-    ...hydraTools.tools({ onConfirm: ({ summary }) => say(`That needs your yes in Hydra: ${summary}`, 'concerned') }),
+    ...hydraTools.tools({ onConfirm: ({ summary }) => say(`That needs your yes in Hydra: ${summary}`, 'concerned'), confirm: async (q, signal) => isYes(await ask({ placeholder: q, choices: ['Allow', "Don't allow"], always: true }, signal)) }),
     showTool({ onUi: (action) => { send({ type: 'main_show' }); pushWeb({ ui: { ...action, at: Date.now() } }); } }),
   ];
 }
@@ -3156,7 +3155,7 @@ async function relayTurn(turn, { emit, signal, approve, alive = async () => true
       if (!MAC_READS.has(t.name) && !(await alive())) throw new Error(TURN_OVER);
       return inRelay(() => t.execute(a, ctx));
     } })),
-    ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive }).filter((t) => may('hydra', t.name)),
+    ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive, confirm: async (q) => (await approve({ summary: q, danger: DANGER.test(q) })) === 'approved' }).filter((t) => may('hydra', t.name)),
     showTool({ onUi: (action) => emit({ type: 'ui', action }) }),
   ];
   const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
@@ -3293,7 +3292,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   // Talking over Hydra (barge-in): the helper already cut its voice off; the next turn knows what was heard.
   else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); if (m.via === 'barge') noteInterrupted(); power.talked(); }
   else if (m.type === 'hydra_settings_changed') agentSettings.refresh();
-  else if (m.type === 'reply_said') { if (spokenNow) spokenNow.finished = true; power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
+  else if (m.type === 'reply_said') { heardTrack.finished(); power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on
   // A link clicked on the research card: web and mail links only.
   else if (m.type === 'open_link') { const v = checkLink(m.url); if (v.level === SAFE) openUrl(String(m.url)); else console.error('open_link blocked:', v.reason); }

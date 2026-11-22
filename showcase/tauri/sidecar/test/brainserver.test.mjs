@@ -120,12 +120,14 @@ await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
 
 // ---- 3. A connector write is a relay approval: it runs only after "approved"; a read runs; a decline never runs.
 {
-  // The gate alone: a read needs no approval, a send waits for it.
+  // The gate alone: a read asks too (tenth review R10-3: only reads of Hydra's data are free), a send waits for it.
+  const readAsks = [];
+  assert.equal(await brainGate({ approve: async (a) => { readAsks.push(a.summary); return 'approved'; } })('mcp__claude_ai_Gmail__search_threads', { query: 'invoice' }), true, 'an approved read runs');
+  assert.deepEqual(readAsks, ['Gmail: search threads; query: invoice'], 'a read asks, showing what it sends');
+  assert.equal(await brainGate({ approve: async () => 'declined' })('mcp__claude_ai_Gmail__search_threads', { query: 'invoice' }), false, 'a declined read never runs');
   const asked = [];
   let answer;
   const gate = brainGate({ approve: (a) => { asked.push(a); return new Promise((r) => { answer = r; }); } });
-  assert.equal(await gate('mcp__claude_ai_Gmail__search_threads', { query: 'invoice' }), true, 'a read runs');
-  assert.equal(asked.length, 0, 'a read asks nothing');
   let done = false;
   const p = gate('mcp__claude_ai_Gmail__send_message', { to: 'a@b.c', subject: 'Hi', body: 'Hello' }).then((v) => { done = true; return v; });
   await wait(20);
@@ -157,7 +159,7 @@ await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
   for (const tool of ['get-bucket-credentials', 'list-variables', 'get_project_env', 'web_fetch_vercel_url', 'get_access_to_vercel_url', 'fetch_url', 'get_api_key', 'list_tokens', 'getSecret']) {
     assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'ask', `${tool} asks`);
   }
-  for (const tool of ['search_threads', 'get_thread', 'list_events', 'read_file_content', 'download_gmail_attachment']) assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'safe', `${tool} is a read`);
+  for (const tool of ['search_threads', 'get_thread', 'list_events', 'read_file_content', 'download_gmail_attachment']) assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'ask', `${tool} is a read, and asks (R10-3)`);
 
   // End to end through the relay and a fake Hydra (the server's own schemas), with Claude Code stubbed.
   const T = [randomUUID(), randomUUID()];
@@ -213,11 +215,11 @@ await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
   await until(() => posted.filter((e) => e.turn === T[1] && e.type === 'done').length === 1);
   await relay.stop();
   assert.deepEqual(order, [
-    'read allow', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner approved', 'SENT',
-    'read allow', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner declined', 'not sent',
-  ], 'sent only after the owner approved; never after a decline');
+    'asked Gmail: search threads; query: Ann', 'owner approved', 'read allow', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner approved', 'SENT',
+    'asked Gmail: search threads; query: Ann', 'owner declined', 'read deny', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner declined', 'not sent',
+  ], 'read and sent only after the owner approved; never after a decline');
   const confirms = posted.filter((e) => e.type === 'confirm');
-  assert.equal(confirms.length, 2, 'each ask showed as a confirm on the owner\'s surfaces');
+  assert.equal(confirms.length, 4, 'each ask showed as a confirm on the owner\'s surfaces');
   assert.ok(confirms.every((c) => approvals.has(c.id) && c.danger === true));
 }
 

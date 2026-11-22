@@ -569,6 +569,8 @@ export function createPhotos({ fetchImpl = fetch, max = 12 } = {}) {
       }
       return null;
     },
+    /** Whether that picture was looked at already (fetched once, with a yes for a link). */
+    has: (m) => seen.has(key(m)),
     /** The picture for a photo mark: the one looked at, else fetched now. */
     get: async (m) => seen.get(key(m)) ?? photoFor({ query: m.query, url: m.url }, { fetchImpl }),
   };
