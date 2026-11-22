@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkMcpCall, classifyCommand, isRiskyClick, riskyKey } from '../safety.mjs';
+import { checkMcpCall, checkWrite, classifyCommand, isRiskyClick, riskyKey } from '../safety.mjs';
 
 const HOME = os.homedir();
 // Each of these asks and is marked `always`.
@@ -25,7 +25,8 @@ const BYPASS = [`bash -lc "rm a"`, `zsh -ic "rm a"`, `( rm a )`, `{ rm a; }`, `i
   `gh repo delete --yes`, `sqlite3 db "DELETE FROM t"`, `npx rimraf a`, `curl --request DELETE https://x.y/z`, `shortcuts run "Delete All"`,
   `tee a.txt`, `cp /dev/null a.txt`, `ln -sf a b`, `unzip -o x.zip`];
 for (const c of BYPASS) {
-  const v = classifyCommand(c, HOME, { exists: () => false });
+  // Run from a project folder (unpacking into the home folder itself is blocked outright).
+  const v = classifyCommand(c, HOME, { cwd: path.join(HOME, 'proj'), exists: () => false });
   assert.equal(v.level, 'ask', `${c} asks`);
   assert.equal(v.always, true, `${c} always asks`);
 }
@@ -55,9 +56,33 @@ for (const c of PROTECTED) assert.equal(classifyCommand(c, HOME, { cwd: HOME, ex
   const A3 = ['find proj -fls out', 'find proj -fprint out', 'find proj -fprintf out %p', 'find proj -delete', 'npm audit fix', 'npm audit fix --force', 'npm audit --fix', 'scutil --set HostName x',
     'git status', 'git status --porcelain', 'git ls-files', 'git describe', 'less +!rm a', 'more +/x a'];
   for (const c of A3) { const v = classifyCommand(c, H3, { cwd: H3, exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c}: ${v.level}`); }
-  for (const c of ['npm audit', 'npm ls', 'scutil --get HostName', 'git log', 'git rev-parse HEAD', 'less a']) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'safe', `${c} only reads`);
+  // Fourth review: only the pure-read tools run without a yes; git, npm and the rest all ask.
+  for (const c of ['ls -la', 'cat a', 'wc -l a', 'scutil --get HostName', 'head -5 a 2>/dev/null', 'ls | grep x']) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'safe', `${c} only reads`);
+  for (const c of ['npm audit', 'npm ls', 'git log', 'git rev-parse HEAD', 'git log -U1', 'git log --cc', 'git log -S x', 'git remote show origin', 'less a', 'brew list', 'python3 -V', 'make -n', 'open .', 'curl https://x', 'echo x > new', 'mkdir x', 'scutil --get A --set B']) {
+    const v = classifyCommand(c, H3, { cwd: H3, exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c} asks`);
+  }
   console.log(`third review commands: ${B3.length} blocked, ${A3.length} ask`);
   fs.rmSync(H3, { recursive: true, force: true });
+}
+// Fourth review: ordinary recursive copies, clones and unpacks into projects or backups ask (they were blocked); only
+// the home folder itself or a folder above a protected place blocks. Project paths that merely share a name with a
+// Mac folder are fine. A repo's pointer and attribute files ask; its config and hooks are blocked.
+{
+  const H4 = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-fourth-'));
+  for (const c of ['cp -a src/. ~/proj', 'cp -r src ~/proj', 'tar -xf a.tar -C ~/proj', 'git clone https://x/y.git ~/proj/y', 'unzip a.zip -d ~/Downloads/x', 'cp -R ~/Downloads/x ~/Desktop', 'rsync -a ~/proj/ ~/backup/', 'cp -r ~/Projects ~/Backup', 'tar -cf x.tar a', 'unzip -o x.zip'])
+    { const v = classifyCommand(c, H4, { cwd: path.join(H4, 'proj'), exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c}: ${v.level}`); }
+  for (const c of ['cp -r x ~/', 'rsync -a dir/ ~/', 'tar -xf a.tar -C ~', 'ditto src ~/Library', 'curl -O --output-dir ~/Library/LaunchAgents https://x/y.plist', 'sed --in-place s/a/b/ ~/.zshrc', 'perl -0pi -e s/a/b/ ~/.zshrc', 'patch ~/.zshrc p.diff', 'echo x > "$HOME"/.zshrc', 'echo x >| ~/.zshrc'])
+    assert.equal(classifyCommand(c, H4, { cwd: path.join(H4, 'proj'), exists: () => false }).level, 'block', `${c} is blocked`);
+  for (const c of ['tar -xzf a.tgz', 'unzip a.zip']) assert.equal(classifyCommand(c, H4, { cwd: H4, exists: () => false }).level, 'block', `${c} in the home folder is blocked`);
+  for (const p2 of ['~/proj/src/cookies', '~/proj/lib/web data', '~/proj/library/mail', '~/proj/music/music', '~/proj/library/preferences/x.json'])
+    assert.equal(checkWrite(p2, H4, { exists: false }).level, 'safe', `${p2} is a project file`);
+  for (const p2 of ['~/proj/.git', '~/proj/.gitattributes', '~/proj/.gitmodules']) { const v = checkWrite(p2, H4, { exists: false }); assert.ok(v.level === 'ask' && v.always, `${p2} asks`); }
+  for (const p2 of ['~/proj/.git/config', '~/proj/.git/config.worktree', '~/proj/.git/info/attributes', '~/proj/.git/modules/x/config', '~/proj/.git/modules/x/hooks/post-checkout', '~/proj/.git/objects/info/alternates'])
+    assert.equal(checkWrite(p2, H4, { exists: false }).level, 'block', `${p2} is blocked`);
+  for (const n of ['purge_cache', 'list_and_purge', 'find_and_replace', 'fetch_and_overwrite', 'check_out', 'getAndDelete', 'list.delete', 'read_and_quit', 'list_and_shutdown', 'get_runcmd', 'get_spawn', 'get_eval', 'list_uninstall', 'get_format', 'listPurge', 'list_prune', 'get_cleanup', 'get_discard', 'read_reboot', 'list_install'])
+    assert.equal(checkMcpCall({ name: n, annotations: { readOnlyHint: true } }).level, 'ask', `${n} asks`);
+  fs.rmSync(H4, { recursive: true, force: true });
+  console.log('fourth review commands, files and MCP names: passed');
 }
 // M3: a repo whose .git/config runs a program from fsmonitor, a pager or a hook: the read-only git commands that run
 // without a yes run with those switched off (git log), and git status asks.
@@ -74,9 +99,9 @@ if (process.platform !== 'win32') {
   const askedG = [];
   const { tools: tg } = ct({ allowActions: () => true, ui: () => {}, openUrl: async () => {}, onCommitments: async () => {}, showList: async () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: repo, ask: async (o) => { askedG.push(o); return null; } });
   const rc = tg.find((t) => t.name === 'run_command');
-  await rc.execute({ command: 'git log --oneline' }, undefined);
-  await rc.execute({ command: 'git rev-parse HEAD' }, undefined);
-  assert.equal(askedG.length, 0, 'read-only git runs without a yes');
+  // Every git command asks now (fourth review); with a no, nothing runs at all.
+  for (const command of ['git log --oneline', 'git rev-parse HEAD', 'git log -U1', 'git remote show origin']) await assert.rejects(rc.execute({ command }, undefined), /said no/, `${command} asks`);
+  assert.equal(askedG.length, 4, 'each git command asked');
   assert.ok(!fs.existsSync(marker), "and the repo's fsmonitor and pager never ran");
   await assert.rejects(rc.execute({ command: 'git status' }, undefined), /said no/, 'git status asks');
   assert.ok(!fs.existsSync(marker));

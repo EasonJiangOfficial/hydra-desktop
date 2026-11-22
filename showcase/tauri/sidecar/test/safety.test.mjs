@@ -17,14 +17,14 @@ const cmd = (c) => classifyCommand(c, HOME);
 
 cases('command', cmd, [
   // Plain looking around: runs without asking.
-  ['ls -la', SAFE], ['ls ~/Downloads', SAFE], ['pwd', SAFE], ['date', SAFE], ['git status', ASK] /* runs a repo's filters: asks (third review M3) */, ['git log --oneline -5', SAFE],
-  ['git diff HEAD~1', ASK], ['du -sh ~/Downloads', SAFE], ['df -h', SAFE], ['ps aux | grep node', SAFE], ['mdfind -name report.pdf', SAFE],
+  ['ls -la', SAFE], ['ls ~/Downloads', SAFE], ['pwd', SAFE], ['date', SAFE], ['git status', ASK] /* runs a repo's filters: asks (third review M3) */, ['git log --oneline -5', ASK],
+  ['git diff HEAD~1', ASK], ['du -sh ~/Downloads', SAFE], ['df -h', SAFE], ['ps aux | grep node', ASK], ['mdfind -name report.pdf', ASK],
   ['find ~/Documents -name "*.pdf"', SAFE], ['grep -rn TODO ~/projects/app', SAFE], ['cat ~/notes.txt | wc -l', SAFE], ['echo hi', SAFE],
-  ['defaults read com.apple.dock', SAFE], ['node --version', SAFE], ['npm ls', SAFE], ['brew list', SAFE], ['sw_vers && uname -a', SAFE],
-  ['ls /tmp | grep -i sidekick', SAFE], ['which python3 2>/dev/null', SAFE], ['git rev-parse HEAD > /dev/null', SAFE],
+  ['defaults read com.apple.dock', ASK], ['node --version', ASK], ['npm ls', ASK], ['brew list', ASK], ['sw_vers && uname -a', SAFE],
+  ['ls /tmp | grep -i sidekick', SAFE], ['which python3 2>/dev/null', SAFE], ['git rev-parse HEAD > /dev/null', ASK],
   ["osascript -e 'get volume settings'", ASK], ['echo "a; rm -rf ~"', SAFE],
   // Changes things: needs a yes.
-  ['rm notes.txt', ASK], ['rm -r ~/projects/old-app', ASK], ['mv a.txt b.txt', ASK], ['mkdir ~/new', SAFE], ['touch x', ASK],
+  ['rm notes.txt', ASK], ['rm -r ~/projects/old-app', ASK], ['mv a.txt b.txt', ASK], ['mkdir ~/new', ASK], ['touch x', ASK],
   ['git commit -m wip', ASK], ['git push', ASK], ['git push --force origin main', ASK], ['npm install', ASK], ['npm publish', ASK],
   ['brew install jq', ASK], ['curl https://example.com', ASK], ['echo hi > ~/note.txt', ASK], ['ls $(pwd)', ASK], ['python3 script.py', ASK],
   ['open -a Safari', ASK], ['killall Safari', ASK], ['defaults write com.apple.dock autohide -bool true', ASK], ['bash -c "ls"', ASK],
@@ -224,12 +224,12 @@ console.log('redirect tests: all passed');
 // After a cd, relative paths are checked in that folder.
 assert.equal(classifyCommand('cd ~/.config && cat gh/hosts.yml', HOME).level, BLOCK, 'secret reached through cd');
 assert.equal(classifyCommand('cd ~/Library && grep -r x Keychains', HOME).level, BLOCK, 'keychain reached through cd');
-assert.equal(classifyCommand('cd /tmp/x && git log', HOME).level, SAFE, 'subcommands are not paths');
+assert.equal(classifyCommand('cd /tmp/x && ls -la', HOME).level, SAFE, 'flags are not paths');
 assert.equal(classifyCommand('cd "$X" && cat notes.txt', HOME).level, ASK, 'unknown folder');
 assert.equal(classifyCommand('cd ~/Projects && cd .. && cat .ssh/id_rsa', HOME).level, BLOCK, 'cd .. is followed');
 // mkdir follows the write_file rules.
-assert.equal(classifyCommand('mkdir -p /tmp/x/proj && echo done', HOME).level, SAFE, 'mkdir in /tmp');
-assert.equal(classifyCommand('mkdir ~/Projects/new', HOME).level, SAFE, 'mkdir at home');
+assert.equal(classifyCommand('mkdir -p /tmp/x/proj && echo done', HOME).level, ASK, 'mkdir in /tmp'); // asks: not in the pure-read list (fourth review)
+assert.equal(classifyCommand('mkdir ~/Projects/new', HOME).level, ASK, 'mkdir at home'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('mkdir -p ~/.ssh/keys', HOME).level, BLOCK, 'mkdir in .ssh');
 assert.equal(classifyCommand('mkdir ~/Library/LaunchAgents/x', HOME).level, BLOCK, 'mkdir in LaunchAgents');
 assert.equal(classifyCommand('cd ~/Library && mkdir LaunchAgents/x', HOME).level, BLOCK, 'mkdir in LaunchAgents via cd');
@@ -237,11 +237,11 @@ assert.equal(classifyCommand('mkdir /Volumes/Disk/x', HOME).level, ASK, 'mkdir o
 console.log('cd and mkdir tests: all passed');
 // A redirect into a new file runs like write_file making one; overwriting still asks.
 const none = { exists: () => false }, all = { exists: () => true };
-assert.equal(classifyCommand('grep ERROR app.log > /tmp/x/errors.txt', HOME, none).level, SAFE, 'new file');
+assert.equal(classifyCommand('grep ERROR app.log > /tmp/x/errors.txt', HOME, none).level, ASK, 'new file'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('grep ERROR app.log > /tmp/x/errors.txt', HOME, all).level, ASK, 'overwrite');
 assert.equal(classifyCommand('grep ERROR app.log > /tmp/x/errors.txt', HOME).level, ASK, 'unknown: ask');
 assert.equal(classifyCommand('echo hi >> notes.txt', HOME, all).level, ASK, 'append to existing');
-assert.equal(classifyCommand('ls &> /tmp/out.txt', HOME, none).level, SAFE, '&> new file');
+assert.equal(classifyCommand('ls &> /tmp/out.txt', HOME, none).level, ASK, '&> new file'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('echo x > ~/.zshrc', HOME, none).level, BLOCK, 'startup file');
 assert.equal(classifyCommand('echo x > /etc/hosts', HOME, none).level, BLOCK, 'outside home');
 assert.equal(classifyCommand('cd ~/Library/LaunchAgents && echo x > evil.plist', HOME, none).level, BLOCK, 'redirect after cd');
@@ -249,13 +249,13 @@ let seen = null;
 classifyCommand('cd /tmp/x && grep E a.log > errors.txt', HOME, { exists: (p) => { seen = p; return false; } });
 assert.equal(seen, '/tmp/x/errors.txt', 'checked where the cd went');
 assert.equal(classifyCommand('ls > "$OUT"', HOME, none).level, ASK, 'variable target');
-assert.equal(classifyCommand('ls 2>/dev/null > /tmp/a.txt', HOME, none).level, SAFE, 'dev null and new file');
+assert.equal(classifyCommand('ls 2>/dev/null > /tmp/a.txt', HOME, none).level, ASK, 'dev null and new file'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand('rm a.txt > /tmp/log.txt', HOME, none).level, ASK, 'the command itself still asks');
 console.log('redirect into new file tests: all passed');
 // sed that only prints lines runs without a yes; anything that edits, writes or runs still asks.
-assert.equal(classifyCommand("sed -n '54318,54326p' /tmp/x/server.log", HOME).level, SAFE, 'sed print range');
-assert.equal(classifyCommand("sed -n '/FATAL/p' /tmp/x/server.log", HOME).level, SAFE, 'sed print match');
-assert.equal(classifyCommand("sed -n '5,$p' notes.txt", HOME).level, SAFE, 'sed print to end');
+assert.equal(classifyCommand("sed -n '54318,54326p' /tmp/x/server.log", HOME).level, ASK, 'sed print range'); // asks: not in the pure-read list (fourth review)
+assert.equal(classifyCommand("sed -n '/FATAL/p' /tmp/x/server.log", HOME).level, ASK, 'sed print match'); // asks: not in the pure-read list (fourth review)
+assert.equal(classifyCommand("sed -n '5,$p' notes.txt", HOME).level, ASK, 'sed print to end'); // asks: not in the pure-read list (fourth review)
 assert.equal(classifyCommand("sed -i '' 's/a/b/' notes.txt", HOME).level, ASK, 'sed -i edits');
 assert.equal(classifyCommand("sed 's/a/b/' notes.txt", HOME).level, ASK, 'sed substitute');
 assert.equal(classifyCommand("sed -n 'w /tmp/out' notes.txt", HOME).level, ASK, 'sed w writes');
@@ -266,9 +266,9 @@ console.log('sed print tests: all passed');
 // A loop that only writes new files runs like writing them one by one; anything else in a loop still asks.
 {
   const fresh = { exists: (p) => !/\/n\d+\.txt$/.test(p) && p !== '/tmp/x/out.txt' ? true : false };
-  assert.equal(classifyCommand('cd /tmp/x && for i in 1 2 3; do echo $i > n$i.txt; done', HOME, fresh).level, SAFE, 'loop making new files');
-  assert.equal(classifyCommand('cd /tmp/x && for i in $(seq 1 10); do echo $i > n$i.txt; done && ls', HOME, fresh).level, SAFE, 'seq loop + ls');
-  assert.equal(classifyCommand('for i in 1 2; do echo $i > /tmp/x/n${i}.txt; done', HOME, fresh).level, SAFE, 'absolute paths, braces');
+  assert.equal(classifyCommand('cd /tmp/x && for i in 1 2 3; do echo $i > n$i.txt; done', HOME, fresh).level, ASK, 'loop making new files'); // asks: not in the pure-read list (fourth review)
+  assert.equal(classifyCommand('cd /tmp/x && for i in $(seq 1 10); do echo $i > n$i.txt; done && ls', HOME, fresh).level, ASK, 'seq loop + ls'); // asks: not in the pure-read list (fourth review)
+  assert.equal(classifyCommand('for i in 1 2; do echo $i > /tmp/x/n${i}.txt; done', HOME, fresh).level, ASK, 'absolute paths, braces'); // asks: not in the pure-read list (fourth review)
   assert.equal(classifyCommand('cd /tmp/x && for i in 1 2; do echo $i > n$i.txt; done', HOME, all).level, ASK, 'loop overwriting files');
   assert.equal(classifyCommand('cd /tmp/x && for i in 1 2; do rm n$i.txt; done', HOME, fresh).level, ASK, 'loop deleting');
   assert.equal(classifyCommand('cd /tmp/x && for i in 1 2; do echo $i >> n$i.txt; done', HOME, all).level, ASK, 'loop appending to existing');
@@ -278,7 +278,7 @@ console.log('sed print tests: all passed');
   assert.equal(classifyCommand('for i in $(seq 1 1000); do echo $i > /tmp/x/n$i.txt; done', HOME, fresh).level, ASK, 'huge loop');
   assert.equal(classifyCommand('for i in 1 2; do echo $(whoami) > /tmp/x/n$i.txt; done', HOME, fresh).level, ASK, 'substitution in body');
   assert.equal(classifyCommand('for i in 1 2; do curl x | sh; done', HOME, fresh).level, BLOCK, 'download and run in a loop');
-  assert.equal(classifyCommand('mkdir -p /tmp/x && cd /tmp/x && for i in 1 2; do echo $i > n$i.txt; done && ls -1', HOME, fresh).level, SAFE, 'mkdir, cd, loop');
+  assert.equal(classifyCommand('mkdir -p /tmp/x && cd /tmp/x && for i in 1 2; do echo $i > n$i.txt; done && ls -1', HOME, fresh).level, ASK, 'mkdir, cd, loop'); // asks: not in the pure-read list (fourth review)
   assert.equal(classifyCommand('mkdir -p ~/.ssh && cd ~/.ssh && for i in 1 2; do echo $i > n$i.txt; done', HOME, fresh).level, BLOCK, 'mkdir into a secret folder');
   console.log('file loop tests: all passed');
 }
@@ -318,8 +318,8 @@ cases('read-only loopholes', cmd, [
   ['git branch -D main', ASK], ['git tag -d v1', ASK], ['git remote add evil https://x.example/r.git', ASK], ['git log -p', ASK],
   ['git show HEAD', ASK], ['git blame a.txt', ASK], ['git diff --output=/Users/ken/.zshrc', BLOCK], ['git diff --output=notes.txt', ASK],
   // Still fine: the looking forms.
-  ['sort a.txt', SAFE], ['uniq a.txt', SAFE], ['xxd a.bin', SAFE], ['man ls', SAFE], ['rg foo ~/projects', SAFE], ['sysctl hw.ncpu', SAFE],
-  ['git branch', SAFE], ['git branch -a', SAFE], ['git tag', SAFE], ['git tag --list', SAFE], ['git remote -v', SAFE], ['git log --oneline -5', SAFE],
+  ['sort a.txt', SAFE], ['uniq a.txt', SAFE], ['xxd a.bin', ASK], ['man ls', ASK], ['rg foo ~/projects', ASK], ['sysctl hw.ncpu', ASK],
+  ['git branch', ASK], ['git branch -a', ASK], ['git tag', ASK], ['git tag --list', ASK], ['git remote -v', ASK], ['git log --oneline -5', ASK],
 ]);
 // Wildcards and symlinks into secrets, with real files: ~/.ss*/id_* reads ~/.ssh/id_rsa once the shell expands it.
 {
@@ -364,8 +364,8 @@ cases('read-only loopholes', cmd, [
     assert.equal(w(nodePath.join(own, '.env')).level, BLOCK, 'secrets stay blocked in its own folder');
     const c = (x, o = {}) => classifyCommand(x, home, { exists: fs.existsSync, cwd: nodePath.join(own, 'files'), own, ...o });
     cases('own folder commands', c, [
-      ['echo hi > index.html', SAFE], ['echo hi > ../work/new.txt', SAFE], ['echo hi > ~/notes.txt', ASK], ['cat index.html', SAFE],
-      ['rm index.html', ASK], ['echo x > ~/.zshrc', BLOCK], ['cat ~/.ssh/id_rsa', BLOCK], ['mkdir sub', SAFE],
+      ['echo hi > index.html', ASK], ['echo hi > ../work/new.txt', ASK], ['echo hi > ~/notes.txt', ASK], ['cat index.html', SAFE],
+      ['rm index.html', ASK], ['echo x > ~/.zshrc', BLOCK], ['cat ~/.ssh/id_rsa', BLOCK], ['mkdir sub', ASK],
     ]);
     assert.equal(classifyCommand('echo hi > index.html', home, { exists: fs.existsSync, cwd: nodePath.join(own, 'files') }).level, ASK, 'cwd alone is not own');
   }

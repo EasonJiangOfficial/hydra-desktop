@@ -32,11 +32,12 @@ const PRIVATE = [
 ];
 // Writing here could let something run on its own later, or break the Mac.
 const NO_WRITE = [
-  // A repo's hooks and config run programs on the next git command.
-  /(^|\/)\.git\/(hooks|config)(\/|$)/,
+  // A repo's hooks, config and attributes (its own, a worktree's or a submodule's) run programs on the next git command.
+  /(^|\/)\.git\/(.*\/)?hooks(\/|$)/i, /(^|\/)\.git\/(.*\/)?config(\.worktree)?$/i,
+  /(^|\/)\.git\/(.*\/)?(info\/attributes|objects\/info\/alternates|commondir)$/i,
   /(^|\/)\.(zshrc|zprofile|zshenv|zlogin|bashrc|bash_profile|profile|login|inputrc)$/, /(^|\/)\.config\/fish(\/|$)/,
   /(^|\/)Library\/(LaunchAgents|LaunchDaemons|StartupItems|Preferences|Keychains|Application Support\/com\.apple)(\/|$)/,
-  /(^|\/)\.gitconfig$/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gg(\/|$)/, /(^|\/)(Roamies|HydraAgent)\/(Skills|Data)(\/|$)/i, /(^|\/)\.tauri(\/|$)/, /\.app(\/|$)/, /(^|\/)crontab$/,
+  /(^|\/)\.gitconfig$/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gg(\/|$)/, /(^|\/)(Roamies|HydraAgent)\/(Skills|Data)(\/|$)/i, /(^|\/)\.tauri(\/|$)/, /\.app(\/|$)/i, /(^|\/)crontab$/,
   /\/Start Menu\/Programs\/Startup(\/|$)/i, /(^|\/)Documents\/(Windows)?PowerShell\/.*profile\.ps1$/i, /^[a-z]:\/(Windows|Program Files( \(x86\))?|ProgramData)(\/|$)/i,
   // Linux: what starts at login (autostart entries, systemd user units, session environment), app launchers and
   // D-Bus services (each names a program the desktop runs), and the X session's startup files.
@@ -45,11 +46,17 @@ const NO_WRITE = [
   /(^|\/)\.(xprofile|xinitrc|xsession|xsessionrc|pam_environment|bash_login|bash_logout)$/,
 ];
 // Mac (APFS) and Windows file names ignore case: ~/.ZSHENV is ~/.zshenv and ~/library/launchagents is
-// ~/Library/LaunchAgents, even before the folder exists. Every protected-place rule matches without case.
-const anyCase = (list) => list.map((re) => (re.flags.includes('i') ? re : new RegExp(re.source, re.flags + 'i')));
-SECRET.splice(0, SECRET.length, ...anyCase(SECRET));
-PRIVATE.splice(0, PRIVATE.length, ...anyCase(PRIVATE));
-NO_WRITE.splice(0, NO_WRITE.length, ...anyCase(NO_WRITE));
+// ~/Library/LaunchAgents, even before the folder exists. So each rule also matches without case, but only from the
+// home folder down (anchored at ~): a project's own src/cookies or library/mail is not the Mac's.
+const homeCase = (list) => list.map((re) => new RegExp(`^(?:${re.source})`, re.flags.replace('i', '') + 'i'));
+const CI = new Map([[SECRET, homeCase(SECRET)], [PRIVATE, homeCase(PRIVATE)], [NO_WRITE, homeCase(NO_WRITE)]]);
+/** Whether a path (absolute, normalized) meets a rule list: as written anywhere, or without case from ~ down. */
+const ruleHit = (list, a, home) => {
+  const r = rel(a, home);
+  return list.some((re) => re.test(r) || re.test(a)) || (!isAbs(r) && CI.get(list).some((re) => re.test(r)));
+};
+// A repo's own settings that make git run programs, or point it at others: asked for, whoever writes them.
+const GIT_ASK = [/(^|\/)\.git$/, /(^|\/)\.gitattributes$/i, /(^|\/)\.gitmodules$/i];
 const SYSTEM_ROOTS = ['/System', '/usr', '/bin', '/sbin', '/etc', '/private', '/Library', '/Applications', '/var', '/opt', '/cores'];
 
 const norm = (p, home) => {
@@ -153,8 +160,8 @@ export function redactArgs(name, args = {}) {
 export function checkRead(p, home, { recursive = false } = {}) {
   home = slash(home);
   const abs = norm(p, home), all = bothOf(abs), hit = (list) => all.some((a) => list.some((re) => re.test(rel(a, home)) || re.test(a)));
-  if (hit(SECRET)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: abs };
-  if (hit(PRIVATE)) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: abs };
+  if (all.some((a) => ruleHit(SECRET, a, home))) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: abs };
+  if (all.some((a) => ruleHit(PRIVATE, a, home))) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: abs };
   if (recursive && (abs === home || abs === '/' || /^[a-z]:$/i.test(abs) || abs === path.join(home, 'Library') || abs === path.join(home, 'AppData') || /^(\/Users|\/Volumes|\/home|[a-z]:\/Users)$/i.test(abs))) {
     return { ...verdict(BLOCK, `Searching all of ${p} reaches into other apps' data and sets off macOS privacy prompts. Pick a specific folder, or use Spotlight (mdfind) to find files by name.`), path: abs };
   }
@@ -166,7 +173,7 @@ export function checkRead(p, home, { recursive = false } = {}) {
 export function checkWrite(p, home, { exists = false, own = null } = {}) {
   home = slash(home);
   const abs = norm(p, home), r = rel(abs, home), all = bothOf(abs);
-  if (all.some((a) => [...SECRET, ...NO_WRITE].some((re) => re.test(rel(a, home)) || re.test(a)))) {
+  if (all.some((a) => ruleHit(SECRET, a, home) || ruleHit(NO_WRITE, a, home))) {
     return { ...verdict(BLOCK, `${p} is a protected file (keys, settings, startup scripts or an app), so I won't write to it.`), path: abs };
   }
   const realHome = realOf(home), inside = (a) => [home, realHome].some((h) => a.startsWith(h + '/')) || /^\/(private\/)?tmp\//.test(a);
@@ -178,6 +185,7 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
     if (all.every(within)) return { ...verdict(SAFE), path: abs };
   }
   if (exists) return { ...verdict(ASK, `Overwrite ${r || abs}?`), path: abs, always: true };
+  if (all.some((a) => GIT_ASK.some((re) => re.test(rel(a, home)) || re.test(a)))) return { ...verdict(ASK, `${r || abs} tells git where its settings are, or which programs to run on files: write it?`), path: abs, always: true };
   return { ...verdict(SAFE), path: abs };
 }
 
@@ -193,6 +201,8 @@ export function splitCommand(cmd) {
     if (c === '"' || c === "'") { q = c; cur += c; continue; }
     // 2>&1, <&3 and &>file are redirects, not "run in the background".
     if (c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || (cmd[i + 1] === '>' && cmd[i - 1] !== '&'))) { cur += c; continue; }
+    // >| (write even with noclobber) is a redirect too, not a pipe.
+    if (c === '|' && cmd[i - 1] === '>') { cur += c; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
       if (cur.trim()) parts.push({ text: cur.trim(), pipeIn: false });
       cur = '';
@@ -354,7 +364,7 @@ function checkSimple(text, pipeIn, home, cwd = home, opts = {}) {
     if (!/[/~.]/.test(a) || a.startsWith('-') && !a.includes('=')) continue;
     const t = a.includes('=') ? a.split('=').slice(1).join('=') : a;
     if (/^[a-z]+:\/\//i.test(t)) continue;
-    const isSecret = (x) => bothOf(norm(x, home)).some((n) => SECRET.some((re) => re.test(rel(n, home)) || re.test(n))) || SECRET.some((re) => re.test(x));
+    const isSecret = (x) => bothOf(norm(x, home)).some((n) => ruleHit(SECRET, n, home)) || SECRET.some((re) => re.test(x));
     if (isSecret(t)) return verdict(BLOCK, `${t} holds passwords or keys, so I never touch it.`);
     if (/[*?[]/.test(t)) {
       const hits = globHits(t, home, cwd);
@@ -399,8 +409,9 @@ function globHits(t, home, cwd) {
 }
 
 // Files a command writes with > >> &>, quotes removed; /dev/null and 2>&1 style copies left out.
-const redirectTargets = (text) => [...text.matchAll(/(?:^|[^>])>{1,2}(?!&)\s*("[^"]*"|'[^']*'|[^\s;&|<>]+)/g)]
-  .map((m) => m[1].replace(/^(['"])([\s\S]*)\1$/, '$2')).filter((t) => t && t !== '/dev/null');
+// A whole shell word after > or >>: "$HOME"/.zshrc is one word (quotes glued to the rest), with its quotes taken off.
+const redirectTargets = (text) => [...text.matchAll(/(?:^|[^>])>{1,2}\|?(?!&)\s*((?:"[^"]*"|'[^']*'|[^\s;&|<>"'])+)/g)]
+  .map((m) => m[1].replace(/["']/g, '')).filter((t) => t && t !== '/dev/null');
 
 /** run_command. SAFE runs, ASK needs the user's yes, BLOCK never runs. `exists(path)`, if given, lets a redirect
  *  that makes a new file run like write_file making one; without it every redirect asks. */
@@ -422,11 +433,19 @@ const destPath = (d, cwd) => {
   const t = String(d ?? '').replace(/["']/g, '').replace(/^\$\{?HOME\}?(?=\/|$)/, '~');
   return /^~/.test(t) || isAbs(slash(t)) ? t : path.join(cwd, slash(t));
 };
-// Places under a folder that are protected: copying a whole folder's contents (or unpacking) into a folder above any
-// of them could drop a startup file, a key, an app or a skill there.
-const TREE_PROBES = ['.zshrc', '.zshenv', '.zprofile', '.zlogin', '.bashrc', '.bash_profile', '.profile', '.gitconfig', '.ssh/x', '.config/fish/x',
-  'Library/LaunchAgents/x', 'LaunchAgents/x', 'LaunchDaemons/x', 'Preferences/x', 'StartupItems/x', 'Skills/x', 'HydraAgent/Skills/x', 'Roamies/Skills/x', 'x.app/x', '.git/hooks/x', '.git/config'];
-const protectedTree = (dir, home) => TREE_PROBES.some((x) => checkWrite(path.join(slash(dir), x), home, {}).level === BLOCK && !/only write files inside your home/.test(checkWrite(path.join(slash(dir), x), home, {}).reason));
+// Protected places in the home folder. A folder's contents copied or unpacked into the home folder itself, or into a
+// folder above one of these (~/Library above ~/Library/LaunchAgents), could drop something there: that is blocked.
+// Any other folder (a project, a backup) is an ordinary ask: startup-file names only matter in the home folder.
+const HOME_PLACES = ['.ssh', '.gnupg', '.aws', '.config/fish', '.config/autostart', '.config/gh', '.kube', '.docker', '.gg', '.tauri',
+  'Library/LaunchAgents', 'Library/LaunchDaemons', 'Library/StartupItems', 'Library/Preferences', 'Library/Keychains', 'Library/Cookies',
+  'Library/Application Support/com.apple', 'HydraAgent/Skills', 'HydraAgent/Data', 'Roamies/Skills', 'Roamies/Data', 'Applications'];
+function protectedTree(dir, home) {
+  const abs = norm(dir, home), r = rel(abs, home);
+  if (abs === slash(home) || r === '') return true; // into ~ itself: startup files, keys, everything
+  if (isAbs(r)) return false; // outside home: write_file's own rules (and an ask)
+  const lr = r.toLowerCase();
+  return HOME_PLACES.some((p) => { const lp = p.toLowerCase(); return lp === lr || lp.startsWith(lr + '/') || lr.startsWith(lp + '/'); });
+}
 
 /** The files a copying, unpacking or writing program writes to, checked like write_file: the reason it's refused, or
  *  null. One list of destinations per program, then one check. */
@@ -445,6 +464,7 @@ function writeTargets(text, home, cwd) {
   };
   let dests = [], trees = [];
   const recursive = /(^|\s)-[a-zA-Z]*[rRa]|--recursive|--archive/.test(args.join(' '));
+  const inPlace = (a) => a.some((x) => /^--in-place(=|$)/.test(x) || /^-[a-zA-Z0-9]*i/.test(x));
   if (['cp', 'ditto', 'mv', 'install', 'rsync', 'ln', 'scp'].includes(name)) {
     const target = opt('-t', '--target-directory');
     const srcs = target.length ? plain : plain.slice(0, -1);
@@ -458,11 +478,15 @@ function writeTargets(text, home, cwd) {
   } else if (['tee', 'touch', 'truncate'].includes(name)) dests = plain;
   else if (name === 'git' && /^clone\b/.test(args.join(' '))) { const rest = plain.slice(1); if (rest.length >= 2) { dests = [rest[rest.length - 1]]; trees = dests; } }
   else if (name === 'git') dests = [...opt(null, '--output')];
-  else if (name === 'curl') dests = [...opt('-o', '--output')];
+  else if (name === 'curl') { dests = [...opt('-o', '--output')]; trees = [...opt(null, '--output-dir')]; }
   else if (name === 'wget') { dests = [...opt('-O', '--output-document')]; trees = [...opt('-P', '--directory-prefix')]; }
-  else if (name === 'tar' && /(^|\s)(-?[a-zA-Z]*x|--extract|--get)/.test(args.join(' '))) trees = [...opt('-C', '--directory')];
-  else if (name === 'unzip') trees = [...opt('-d', null)];
-  else if (name === 'sed' || name === 'perl') { if (/(^|\s)-[a-zA-Z]*i/.test(args.join(' '))) dests = args.some((a) => a === '-e' || a.startsWith('-e')) ? plain : plain.slice(1); }
+  // Unpacking with no folder given unpacks where the command runs.
+  else if (['tar', 'bsdtar', 'gtar'].includes(name) && (/^-?[a-wyzA-Z]*x[a-zA-Z]*$/.test(args[0] ?? '') || args.some((x) => /^-[a-zA-Z]*x[a-zA-Z]*$|^--(extract|get)$/.test(x)))) { const c = opt('-C', '--directory'); trees = c.length ? c : [cwd]; }
+  else if (name === 'unzip' || name === 'ditto' && args.includes('-x')) { const d = opt('-d', null); trees = d.length ? d : [cwd]; }
+  else if (name === '7z' || name === '7za' || name === '7zz') { const o = opt('-o', null); trees = o.length ? o : [cwd]; }
+  else if (name === 'cpio') trees = [cwd];
+  else if (name === 'sed' || name === 'perl') { if (inPlace(args)) dests = args.some((a) => a === '-e' || /^-[a-zA-Z0-9]*e$/.test(a)) ? plain.filter((x, i2) => !/^-[a-zA-Z0-9]*e$/.test(args[args.indexOf(x) - 1] ?? '')) : plain.slice(1); }
+  else if (name === 'patch') dests = [...plain.slice(0, 1), ...opt('-o', '--output')];
   for (const d of dests) {
     const w = checkWrite(destPath(d, cwd), home, {});
     if (w.level === BLOCK && w.reason && !/only write files inside your home/.test(w.reason)) return w.reason;
@@ -514,6 +538,30 @@ function alwaysAsk(text, home, cwd) {
   return null;
 }
 
+// The pure-read allowlist (see the last gate in classifyCommand). Per program: which arguments are fine. No
+// environment assignments, no redirect except into /dev/null.
+const PURE_READ = {
+  ls: () => true, cat: () => true, head: () => true, tail: () => true, wc: () => true, stat: () => true, file: (a) => !a.includes('-C'),
+  du: () => true, df: () => true, pwd: () => true, echo: () => true, date: (a) => !a.some((x) => !x.startsWith('+') && !x.startsWith('-')) && !a.includes('-s'),
+  which: () => true, whoami: () => true, uname: () => true, sw_vers: () => true, cd: () => true, true: () => true,
+  // find: tests and printing only; any action, exec or write primary asks.
+  find: (a) => !a.some((x) => /^-(exec|execdir|ok|okdir|delete|fls|fprint\w*|fprintf)$/.test(x)),
+  // grep and rg on the paths given: never a preprocessor, pager or config file of the project's.
+  grep: (a) => !a.some((x) => /^--?(include-from|exclude-from)/.test(x)), egrep: () => true, fgrep: () => true,
+  rg: (a) => !a.some((x) => /^(--pre(-glob)?|--search-zip|-z|--hostname-bin)(=|$)/.test(x)) && a.includes('--no-config'),
+  sort: (a) => !a.some((x) => /^(-o|--output|-T|--temporary-directory|--compress-program)/.test(x)), uniq: (a) => a.filter((x) => !x.startsWith('-')).length < 2,
+  cut: () => true,
+  // scutil: every argument must be part of a read form (so "--get X --set Y" asks).
+  scutil: (a) => /^(--get\s+\w+|-r\s+\S+|--dns|--proxy|--nwi|--nc\s+list)$/.test(a.join(' ')),
+};
+function pureRead(text) {
+  if (/(^|[^>&0-9])\d?>{1,2}(?!\s*\/dev\/null\b)|<|>&?\s*(?!\/dev\/null)\S/.test(text.replace(/\d?>{1,2}\s*\/dev\/null\b|\d?>&\d/g, ''))) return false;
+  const ws = words(text), prog = program(ws);
+  if (prog.assigns || /^(command|builtin|exec|nohup|time|nice|caffeinate|env|xargs|stdbuf)$/.test(ws[0] ?? '')) return false;
+  const ok = PURE_READ[prog.name.toLowerCase()];
+  return !!ok && ok(prog.args);
+}
+
 /** `cwd`: the folder the command starts in (default home); `own`: the runner's own folder (see checkWrite). */
 export function classifyCommand(cmd, home, { exists, cwd: start = null, own = null } = {}) {
   home = slash(home);
@@ -553,6 +601,10 @@ export function classifyCommand(cmd, home, { exists, cwd: start = null, own = nu
   }
   // Command substitution and background jobs change things in ways the parts don't show.
   if (level === SAFE && (/\$\(|`/.test(s) || /(^|\s)&\s*$/.test(s))) level = ASK;
+  // The last gate: only a few plain reading tools run without a yes, and only in forms that can't run other code,
+  // read a repo's or project's own settings, or write anything. Everything else asks (git, npm, brew, pip, cargo,
+  // make, interpreters, curl, open…), whatever the rules above made of it.
+  if (level === SAFE && !parts.every((p) => pureRead(p.text))) { level = ASK; reason = reason || 'Only plain reading runs without a yes.'; }
   // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ASK asks the
   // owner, every time (there is no setting that skips it); `always` stays on the verdict for the code that reads it.
   if (level === ASK) return { ...verdict(level, reason), always: true };
@@ -730,7 +782,7 @@ const snake = (s) => String(s ?? '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').repl
 // Names that write, whatever the server says (a server's readOnlyHint is its own claim, so it's trusted only for a
 // name that reads: get, list, search, read…).
 const MCP_READS = new Set(['get', 'list', 'search', 'read', 'fetch', 'describe', 'find', 'lookup', 'show', 'count', 'view', 'browse', 'retrieve', 'inspect', 'status', 'info', 'details', 'stats', 'summary', 'check']);
-const MCP_WRITES = /(?:^|_)(update|set|write|move|run|invoke|batch|apply|create|add|delete|remove|send|post|publish|execute|exec|sql|query|insert|upsert|patch|put|edit|modify|change|rename|upload|import|deploy|rent|buy|share|label|archive|merge|reset|trash|pay|transfer|request|call|trigger|start|stop|cancel|grant|revoke|invite|assign|close|open|submit|sync|mark|flag|pin|star|snooze|mute|follow|unfollow|like|react|vote|accept|reject|approve|deny|confirm|book|reserve|order|checkout|cart|purchase|subscribe|unsubscribe|enable|disable|toggle|save|block|ban|lock|unlock|schedule|notify|message|email|mail|dm|compose|draft|rm|del|unlink|kill|clear|empty|flush|push|commit|revert|rollback|restore|reply|forward|tweet|comment|review|rate|transfer|withdraw|refund|charge|tip|donate|claim|redeem|register|login|logout|signin|signout)(?:_|$)/;
+const MCP_WRITES = /(?:^|_)(update|set|write|move|run|invoke|batch|apply|create|add|delete|remove|send|post|publish|execute|exec|sql|query|insert|upsert|patch|put|edit|modify|change|rename|upload|import|deploy|rent|buy|share|label|archive|merge|reset|trash|pay|transfer|request|call|trigger|start|stop|cancel|grant|revoke|invite|assign|close|open|submit|sync|mark|flag|pin|star|snooze|mute|follow|unfollow|like|react|vote|accept|reject|approve|deny|confirm|book|reserve|order|checkout|cart|purchase|subscribe|unsubscribe|enable|disable|toggle|save|block|ban|lock|unlock|schedule|notify|message|email|mail|dm|compose|draft|rm|del|unlink|kill|clear|empty|flush|push|commit|revert|rollback|restore|reply|forward|tweet|comment|review|rate|transfer|withdraw|refund|charge|tip|donate|claim|redeem|register|login|logout|signin|signout|replace|overwrite|quit|shutdown|reboot|restart|install|uninstall|prune|discard|cleanup|clean|evict|format|eval|spawn|nuke|runcmd|cmd|checkout|check_out|purge|drop|destroy|wipe|erase|terminate|truncate|expire|scrub|kill|remove|delete|exec|execute|launch|deploy|migrate)(?:_|$)/;
 /** A call to a connected server's tool: { name, annotations }. A read-only tool (readOnlyHint, not destructive, not
  *  named like an action) is SAFE. Anything else ASKs; `always` (destructive, or named send/delete/pay…) means even
  *  only the owner answers it (an agent job's answer_agent can't say yes). */
