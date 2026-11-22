@@ -403,7 +403,8 @@ func sendField(app: String, role: String?, subrole: String?, label: String, inWe
     case "AXTextField", "AXComboBox", "AXSecureTextField": return true
     case "AXTextArea": return inWeb || MESSENGERS.contains(app)
     // Any field in a browser's or a chat app's web content (contenteditable shows as a group) may submit.
-    case "AXGroup": return (inWeb && BROWSERS.contains(app)) || MESSENGERS.contains(app)
+    // A contenteditable box in web content (Notion, Linear, Figma, any browser or Electron app) may submit.
+    case "AXGroup": return inWeb || MESSENGERS.contains(app)
     default: return MESSENGERS.contains(app)
     }
 }
@@ -1307,10 +1308,15 @@ let HANDS_OFF: [String: String] = [
     "com.1password.1password": "1Password", "com.agilebits.onepassword7": "1Password", "com.bitwarden.desktop": "Bitwarden",
     "com.apple.dt.Xcode": "Xcode", "com.apple.Console": "Console", "com.apple.ActivityMonitor": "Activity Monitor",
     "com.apple.DiskUtility": "Disk Utility", "com.apple.MigrateAssistant": "Migration Assistant", "com.apple.installer": "Installer",
+    // Editors with a built-in terminal: typing there could run commands past every check.
+    "com.microsoft.VSCode": "VS Code", "com.microsoft.VSCodeInsiders": "VS Code", "com.todesktop.230313mzl4w4u92": "Cursor", "dev.zed.Zed": "Zed",
+    "dev.zed.Zed-Preview": "Zed", "com.exafunction.windsurf": "Windsurf", "com.vscodium": "VSCodium", "com.google.antigravity": "Antigravity",
 ]
 
 func handsOff(_ pid: pid_t) -> String? {
     guard let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return nil }
+    // JetBrains IDEs (IntelliJ, PyCharm, WebStorm…) all have a terminal.
+    if id.hasPrefix("com.jetbrains.") { return NSRunningApplication(processIdentifier: pid)?.localizedName ?? "a JetBrains IDE" }
     return HANDS_OFF[id]
 }
 
@@ -1804,6 +1810,9 @@ case "--self-test":
     check("a web chat box mentioning search could send", sendField(app: "Google Chrome", role: "AXTextField", subrole: nil, label: "Search or ask anything", inWeb: true))
     check("focus the helper can't see could submit", sendField(app: "SomeElectronApp", role: nil, subrole: nil, label: "", inWeb: false))
     check("a contenteditable box in a browser could send", sendField(app: "Safari", role: "AXGroup", subrole: nil, label: "", inWeb: true))
+    check("a contenteditable box in Notion or Linear could send", sendField(app: "Notion", role: "AXGroup", subrole: nil, label: "", inWeb: true) && sendField(app: "Linear", role: "AXGroup", subrole: nil, label: "", inWeb: true))
+    check("ctrl+j, ctrl+m and ctrl+o read as keys the helper presses", ["ctrl+j", "ctrl+m", "ctrl+o"].allSatisfy { parseKey($0) != nil })
+    check("VS Code and Cursor are hands-off", HANDS_OFF["com.microsoft.VSCode"] != nil && HANDS_OFF["com.todesktop.230313mzl4w4u92"] != nil)
     // B3: menu shortcuts read through parseKey: meta/super chords press nothing anywhere.
     check("meta+q and super+shift+d press nothing", parseKey("meta+q") == nil && parseKey("super+shift+d") == nil && parseKey("meta+shift+d") == nil)
     check("the menu route reads q from cmd+q", parseKey("cmd+q").map { KEY_CHARS[$0.key] } == "q")
@@ -2362,7 +2371,15 @@ case "act":
             guard let pk = parseKey(combo) else { out(["ok": false, "error": "Step \(i + 1): unknown key \(s["key"] ?? "") (use cmd, ctrl, opt, shift and one key)", "done": done]) }
             var needs: [(label: String, why: String)] = []
             if let does = riskyKey(combo) { needs.append((s["key"] as? String ?? "", "Pressing \(s["key"] ?? "") \(does).")) }
-            if pk.key == 36 || pk.key == 49 { needs += sendChecks(app, appName: w.app, returnKey: pk.key == 36) }
+            // Return is also ctrl+j, ctrl+m and ctrl+o in terminals and many editors.
+            let isReturn = pk.key == 36 || (pk.flags.contains(.maskControl) && [38, 46, 31].contains(pk.key))
+            if isReturn || pk.key == 49 { needs += sendChecks(app, appName: w.app, returnKey: isReturn) }
+            // A plain key (or shift+key) outside a text field is an app's shortcut, not typing: web mail and other apps
+            // delete, archive or send on one key ("#", "e"). Arrows, tab, escape, page keys and space are left alone.
+            if !isReturn, pk.flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]), ![36, 48, 49, 51, 53, 115, 116, 117, 119, 121, 123, 124, 125, 126].contains(pk.key),
+               !isEditable(focusedEl(app)) {
+                needs.append((s["key"] as? String ?? "", "\(s["key"] ?? "") outside a text field is a shortcut in \(w.app) (it may delete, archive or send)."))
+            }
             // Cmd+D picks "Don't Save" (or "Delete") in a save or delete sheet.
             if pk.key == 2, pk.flags.contains(.maskCommand), let b = sheetRiskyButton(app) { needs.append((b, "Cmd+D would press \"\(b)\" in \(w.app).")) }
             // Delete or forward delete outside a text field deletes what's selected (mail, photos, files, list rows).

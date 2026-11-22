@@ -634,6 +634,8 @@ final class Voice {
     lazy var clapper = ClapListener { [weak self] in self?.clapHeard() }
     func setClap(_ on: Bool, asleep: Bool? = nil, talk: Bool? = nil) {
         if let asleep { self.asleep = asleep }
+        // Going to sleep: wake (key phrase) listening stops now, not just at its next start.
+        if self.asleep && phase == .wake { stopWake() }
         if let talk { clapTalk = talk }
         guard on != clapOn else { return }
         clapOn = on; clapRetryAt = 0
