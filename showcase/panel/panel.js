@@ -88,12 +88,9 @@
   };
   // A row's tick (done) or X (forget, drop) asks first, like Quit: pressed, it turns into Confirm in place while the
   // row's other button steps aside; pressed again it goes, left alone for 4 s it goes back.
-  const PIX = {
-    tick: [[0, 3], [1, 4], [2, 5], [3, 4], [4, 3], [5, 2], [6, 1]],
-    x: [[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [6, 6], [6, 0], [5, 1], [4, 2], [2, 4], [1, 5], [0, 6]],
-  };
-  const pix = (name) => `<svg viewBox="0 0 14 14" width="14" height="14" shape-rendering="crispEdges" fill="currentColor">${PIX[name].map(([x, y]) => `<rect x="${x * 2}" y="${y * 2}" width="2" height="2"/>`).join('')}</svg>`;
-  // Asking, it has no tooltip: the word on it says what it does.
+  // Line icons: 1.5 px ink strokes with round ends (no pixel art).
+  const ICONS = { tick: 'M2.5 7.5l3 3 6-7', x: 'M3 3l8 8M11 3l-8 8' };
+  const pix = (name) => `<svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="${ICONS[name]}"/></svg>`;
   const armIcon = (b, on) => { b.setAttribute('aria-pressed', String(on)); b.setAttribute('aria-label', on ? `Confirm: ${b.dataset.aria}` : b.dataset.aria); if (on) b.removeAttribute('data-tip'); else b.dataset.tip = b.dataset.name; };
   const calmIcons = () => { for (const o of document.querySelectorAll('.pane .ibtn[aria-pressed="true"]')) armIcon(o, false); };
   function iconArmed(icon, tip, k, id, aria) {
@@ -228,6 +225,7 @@
   const FRESH = 6000;
   let freshTimer = 0;
   function updateButton() {
+    $('head-update').hidden = true; return; // Hydra Desktop has no self-updater
     const u = state.update, b = $('head-update'), v = u.available;
     const fresh = u.result?.ok && Date.now() - (u.result.at ?? 0) < FRESH;
     const [label, aria, kind, off] =
@@ -929,6 +927,9 @@
         el('div', { className: 'setting' },
           el('span', {}, 'Device key', info(`Kept in ${where()}.`)),
           el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: h.link === 'ready' ? 'Saved' : 'Not set' }), link(h.link === 'ready' ? 'Change' : 'Add', () => act('hydra_key', true), { k: 'hydra_key', aria: 'Set the Hydra device key' }))),
+        el('div', { className: 'setting' },
+          el('span', {}, 'Sign-in link', info("Hydra's email sign-in link opens in your browser. Paste it here to sign in the Hydra window.")),
+          link('Paste', () => act('signin_link', true), { k: 'signin_link', aria: 'Paste a Hydra sign-in link' })),
         el('div', { className: 'setting' },
           el('span', {}, 'Status'),
           el('span', { className: 'val', textContent: h.link === 'ready' ? `Paired · ${h.tools ?? 0} tools` : h.link === 'unpaired' ? 'Not paired' : 'Off' }))),

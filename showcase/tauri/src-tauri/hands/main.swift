@@ -1217,8 +1217,9 @@ enum Pal {
     static func c(_ hex: Int) -> NSColor {
         NSColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
     }
-    static let bg = c(0x051214), panel = c(0x071a1c), ink = c(0xe8fffa), ink2 = c(0xb4d8d1)
-    static let line = c(0x1d4a48), lineHi = c(0x2f7c74), lineHot = c(0x4fbfa9), accent = c(0x78ffe2)
+    // Hydra's design language: white, ink and grays, hairlines, no accent colour.
+    static let bg = c(0xFFFFFF), panel = c(0xFFFFFF), ink = c(0x1D1D1F), ink2 = c(0x424245)
+    static let line = c(0xE5E5EA), lineHi = c(0xD2D2D7), lineHot = c(0xA1A1A6), accent = c(0x1D1D1F)
 }
 
 /// The onboarding's pixel frame: corners cut in two steps of `s` points (same polygon as .px in onboarding.css).

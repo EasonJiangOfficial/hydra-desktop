@@ -65,7 +65,7 @@ html, body { height: 100%; background: transparent; }
 #head-update[hidden] { display: none; }
 .by { margin: 2px 0 0; font-size: var(--t-small); line-height: 1.35; color: var(--ink-3); }
 /* Quit, top right: asks first (the .arm Confirm, like Forget). */
-.head-quit { flex: none; margin-inline-start: auto; font-size: var(--t-small); }
+.head-quit { flex: none; margin-inline-start: auto; font-size: var(--t-small); color: var(--ink-3); }
 .head-close { flex: none; margin-inline-start: 0; }
 .head-close svg { display: block; }
 
@@ -181,8 +181,8 @@ html, body { height: 100%; background: transparent; }
 .item .meta { font-size: var(--t-small); line-height: 1.3; color: var(--ink-3); white-space: nowrap; }
 .item .text small { display: block; font-size: var(--t-small); line-height: 1.3; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }
 .item.ask .text { color: var(--ink-2); }
-.item.bad .text, .item .text small.late { color: var(--danger); }
-.mark { width: 8px; height: 8px; justify-self: center; background: var(--line-hi); }
+.item .text small.late { color: var(--danger); } /* overdue: red is for money lost and overdue only */
+.mark { width: 7px; height: 7px; border-radius: 50%; justify-self: center; background: var(--line-hi); }
 
 /* ---------- What's new: one change per row, the title and its kind on one line, the date, then a line or two ---------- */
 .item.wn { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 3px; padding: 8px 0; }
@@ -199,9 +199,9 @@ html, body { height: 100%; background: transparent; }
 /* This update's changes: lit like the current page in the sidebar, the rest as they were. */
 .item.wn.fresh { padding-inline: 10px; background: var(--tint); color: var(--ink); border-bottom-color: var(--bg); }
 .item.did .mark { background: var(--accent-lo); }
-.item.bad .mark { background: var(--danger); }
+.item.bad .mark { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink); }
 /* A question: two stacked bars, like a quote, instead of a dot. */
-.item.ask .mark { background: none; border-left: 3px solid var(--ink-3); border-right: 3px solid var(--ink-3); height: 8px; width: 9px; }
+.item.ask .mark { background: none; border-radius: 0; border-left: 2px solid var(--ink-3); border-right: 2px solid var(--ink-3); height: 8px; width: 7px; }
 .row-btns { display: inline-flex; gap: 10px; }
 /* What to do when a list is empty: it wraps, never cut off, since it's the hint they need. */
 .empty { margin: 0; font-size: var(--t-body); line-height: 1.4; color: var(--ink-2); overflow-wrap: break-word; text-wrap: pretty; }
@@ -232,12 +232,12 @@ html, body { height: 100%; background: transparent; }
 }
 .ibtn:first-child { margin-inline-start: 0; }
 .ibtn:hover { color: var(--accent-hi); }
-.ibtn.danger:hover { color: var(--danger); }
+.ibtn.danger:hover { color: var(--ink); }
 .ibtn > span { display: inline-flex; align-items: center; overflow: hidden; transition: max-width .2s var(--ease), opacity .16s var(--ease), padding .2s var(--ease); }
 .ibtn > .no { max-width: 14px; }
 .ibtn > .no svg { display: block; flex: none; }
 .ibtn > .yes { max-width: 0; opacity: 0; padding: 1px 0; color: var(--accent-ink); background: var(--accent); }
-.ibtn.danger > .yes { background: var(--danger); }
+.ibtn.danger > .yes { background: var(--ink); }
 .ibtn[aria-pressed="true"] > .no { max-width: 0; opacity: 0; }
 .ibtn[aria-pressed="true"] > .yes { max-width: 6em; opacity: 1; padding: 1px 6px; }
 .row-btns:has(> .ibtn[aria-pressed="true"]) > .ibtn:not([aria-pressed="true"]) { max-width: 0; opacity: 0; padding-inline: 0; margin-inline-start: 0; pointer-events: none; }
@@ -251,9 +251,21 @@ html, body { height: 100%; background: transparent; }
 .setting > span { min-width: 0; font-size: var(--t-body); line-height: 1.35; color: var(--ink); }
 .setting > span small { display: block; font-size: var(--t-small); line-height: 1.35; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .setting .link { white-space: nowrap; }
-.picks { display: flex; flex-wrap: wrap; gap: 6px; }
-.picks .chord { padding: 4px; }
-.picks .cap { height: 26px; min-width: 0; padding: 0 9px 2px; font-size: var(--t-small); }
+/* A segmented control: a tinted track, the picked option an outlined white thumb. */
+.picks { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 2px; justify-self: start; width: max-content; max-width: 100%; background: var(--tint); border-radius: var(--r-ctl); }
+.picks .chord { padding: 0; --bc: transparent; --fill: transparent; --r: 6px; }
+.picks .chord[aria-checked="true"] { --bc: var(--line-hi); --fill: #FFFFFF; }
+.picks .cap { --bc: transparent; --fill: transparent; --bw: 0px; height: 26px; min-width: 0; padding: 0 12px; font: 500 var(--t-small)/1 var(--mono); color: var(--ink-2); background: transparent; }
+.picks .chord[aria-checked="true"] .cap { color: var(--ink); }
+/* The info dot: an explanation on hover or focus (the copy rule: no explanatory sentences on the page). */
+.info { appearance: none; display: inline-grid; place-items: center; flex: none; width: 15px; height: 15px; margin-inline-start: 6px; padding: 0;
+  border: 1px solid var(--line-hi); border-radius: 50%; background: #FFFFFF; color: var(--ink-3); cursor: help;
+  font: 500 10px/1 var(--mono); vertical-align: 1px; }
+.info:hover, .info:focus-visible { border-color: var(--ink-3); color: var(--ink); outline: none; }
+.ghead h2 { align-items: center; }
+.row-btns { align-items: center; }
+.val { color: var(--ink-3); font-size: var(--t-body); }
+.notice { margin: 0 0 6px; font-size: var(--t-body); line-height: 1.45; color: var(--ink-2); }
 .body .field { flex: 1; }
 .body .field.select { flex: 1 1 auto; }
 /* Same size as the buttons beside them. Desktop webviews only, so the iOS zoom-on-focus rule doesn't apply. */
@@ -262,7 +274,7 @@ html, body { height: 100%; background: transparent; }
 .body select {
   appearance: none; min-width: 0; flex: 1; border: 0; color: var(--ink); padding-inline-end: 30px;
   font-family: var(--mono); font-weight: 500; cursor: pointer;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 2h2v2H6zM8 0h2v2H8z' fill='%236E6E73'/%3E%3C/svg%3E") no-repeat right 12px center;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236E6E73' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 12px center;
 }
 .body select option { background: var(--panel); color: var(--ink); }
 .body select:focus-visible { outline: none; }
@@ -276,7 +288,7 @@ html, body { height: 100%; background: transparent; }
 .setting.recording > span small { color: var(--accent); }
 .setting > span small.cmd { font-family: var(--mono); color: var(--ink-2); white-space: normal; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.link.danger { color: var(--danger); }
+.link.danger { color: var(--ink-2); }
 .links { display: flex; flex-wrap: wrap; gap: 4px 18px; }
 
 /* Why pick a choice: one line under it, quieter than the setting it explains. */
@@ -290,26 +302,26 @@ html, body { height: 100%; background: transparent; }
 /* A slot's block: its model row, then its Effort slider, full width like the rows. --t: the thumb's width, which the
    thumb's travel and the stops' names both allow for. */
 .slot { display: grid; gap: 6px; min-width: 0; }
-.effort { --t: 12px; display: grid; gap: 6px; min-width: 0; container-type: inline-size; }
+.effort { --t: 14px; display: grid; gap: 6px; min-width: 0; container-type: inline-size; }
 .effort-none { margin: 0; font-size: var(--t-small); line-height: 1.4; color: var(--ink-3); }
-/* The slider: a slim track in the accent, filled up to the stop (--p, 0 to 1); the thumb is a small square. */
+/* The slider: a 4 px track in ink, filled up to the stop (--p, 0 to 1); the thumb a small white circle. */
 .effort-range { appearance: none; -webkit-appearance: none; display: block; width: 100%; height: 16px; margin: 0; padding: 0; background: transparent; cursor: pointer; }
 .effort-range:focus { outline: none; }
 /* Not the text fields' padding (.body input): the track runs the full width. */
 .body .effort-range { padding: 0; }
 .effort-range::-webkit-slider-runnable-track {
-  height: 4px; margin-top: 6px;
+  height: 4px; margin-top: 6px; border-radius: 2px;
   background: linear-gradient(to right, var(--accent) calc(var(--t) / 2 + (100% - var(--t)) * var(--p, 0)), var(--line) 0);
 }
 /* Centred on the 4px track: (4 - 12) / 2. */
 .effort-range::-webkit-slider-thumb {
-  -webkit-appearance: none; appearance: none; width: 12px; height: 12px; margin-top: -4px; border: 0; border-radius: 0;
-  background: var(--accent); box-shadow: none; cursor: pointer;
+  -webkit-appearance: none; appearance: none; width: 14px; height: 14px; margin-top: -5px; border: 0; border-radius: 50%;
+  background: #FFFFFF; box-shadow: 0 0 0 1px var(--line-hot); cursor: pointer;
 }
 .effort-range::-moz-range-track { height: 4px; background: var(--line); }
 .effort-range::-moz-range-progress { height: 4px; background: var(--accent); }
-.effort-range::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 0; background: var(--accent); box-shadow: none; cursor: pointer; }
-.effort-range:focus-visible::-webkit-slider-thumb { background: var(--ink); box-shadow: 0 0 0 2px var(--bg); }
+.effort-range::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: #FFFFFF; box-shadow: 0 0 0 1px var(--line-hot); cursor: pointer; }
+.effort-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 2px var(--ink); }
 .effort-range:focus-visible::-moz-range-thumb { background: var(--ink); box-shadow: 0 0 0 2px var(--bg); }
 /* The stops' names under their stops (--i of --n): the first and last flush with the ends of the track, the others
    centred on the thumb's place. The current stop is lit. */

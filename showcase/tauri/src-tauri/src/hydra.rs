@@ -125,6 +125,15 @@ fn open_in_browser(link: &str) {
     let _ = link;
 }
 
+/// Takes the window to a Hydra or sign-in page (a pasted email sign-in link). Anything else is ignored.
+pub fn navigate(app: &AppHandle, link: &str) {
+    let Ok(url) = link.parse::<Url>() else { return };
+    if url.scheme() != "https" || route(&url) != Nav::Allow { return; }
+    if let Some(w) = app.get_webview_window(MAIN_LABEL) {
+        let _ = w.navigate(url);
+    }
+}
+
 /// The agent's state for the web app's orb: { state, micLevel, outputLevel }, from the overlay (host.js).
 pub fn push(app: &AppHandle, msg: &Value) {
     let Some(w) = app.get_webview_window(MAIN_LABEL) else { return };

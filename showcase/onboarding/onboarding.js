@@ -523,10 +523,10 @@
     on: () => state?.replies === 'voice' && replies.hasKey() && (state?.tts ?? 'fish') === replies.tts(),
     ready: () => replies.mode() === 'text' || replies.on(),
     render() {
-      const mode = replies.mode(), on = replies.on(), t = TTS[replies.tts()];
+      const mode = replies.mode(), on = replies.on(), t = TTS.fish; // Hydra speaks with Fish Audio, or the Mac's voice until its key
       const CARDS = [
         ['text', 'Text only', 'Answers in my bubbles'],
-        ['voice', 'Voice + text', on ? 'Voice is on' : mode === 'voice' ? (t.local ? 'Needs VoiceStudio open' : `Needs a ${t.name} key`) : 'Said out loud too'],
+        ['voice', 'Voice + text', on || mode === 'voice' ? 'Voice is on' : 'Said out loud too'],
       ];
       $('replies').replaceChildren(...CARDS.map(([id, name, sub]) => {
         const checked = mode === id;
@@ -538,15 +538,15 @@
       }));
       const saved = replies.hasKey();
       if (!saved || mode !== 'voice') replies.changing = false;
-      showRow($('tts-row'), mode === 'voice');
+      showRow($('tts-row'), false);
       look.radios('tts', Object.entries(TTS).map(([id, x]) => [id, x.name]), replies.tts(), replies.provider);
       // VoiceStudio: ready (and its engine), or exactly why not.
       const vs = t.local && state?.tts === replies.tts() ? state?.studio : null;
-      showRow($('studio-row'), mode === 'voice' && !!t.local);
+      showRow($('studio-row'), false);
       $('studio-status').textContent = !vs || vs.checking ? 'Checking VoiceStudio…' : vs.ok ? `VoiceStudio is ready${vs.engine ? ` · ${vs.engine}` : ''}` : vs.message || "VoiceStudio isn't available.";
       $('studio-status').className = vs && !vs.checking && !vs.ok ? 'bad' : '';
       // The voices, once it can speak: Gemini's ("Kore · Firm"), or the ones saved in VoiceStudio.
-      showRow($('gvoice-row'), mode === 'voice' && t !== TTS.fish && saved);
+      showRow($('gvoice-row'), false);
       const voices = t.local ? [{ id: 'default', label: 'Engine default' }, ...(vs?.voices ?? []).map((v) => ({ id: v.id, label: v.name }))]
         : (state?.geminiVoices ?? []).map((v) => ({ id: v.id, label: `${v.id} · ${v.style}` }));
       const list = JSON.stringify(voices);
@@ -807,7 +807,7 @@
     },
   };
 
-  for (const id of ['chords', 'write-chords', 'looks', 'sizes']) $(id).addEventListener('keydown', (e) => {
+  for (const id of ['chords', 'write-chords']) $(id).addEventListener('keydown', (e) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
     e.preventDefault();
     const btns = [...$(id).children], i = btns.findIndex((b) => b.getAttribute('aria-checked') === 'true');
@@ -1160,8 +1160,19 @@
 
   // ---------------------------------------------------------------- flow
   // ---------------------------------------------------------------- step 0: welcome
-  // One character (Hydra) and one size: nothing to pick here.
-  const look = { render() {} };
+  // One character (Hydra) and one size: nothing to pick here. radios() still draws the other choice rows.
+  const look = {
+    radios(id, list, value, pickIt) {
+      $(id).replaceChildren(...list.map(([v, label]) => {
+        const on = v === value;
+        const b = el('button', { className: 'px chord', type: 'button', role: 'radio', tabIndex: on ? 0 : -1 }, el('span', { className: 'px cap', textContent: label }));
+        b.setAttribute('aria-checked', String(on));
+        b.onclick = () => { if (!on) pickIt(v); };
+        return b;
+      }));
+    },
+    render() {},
+  };
 
   const ALL = [
     { name: 'welcome', enter: 'drop', next: "Let's go", onEnter: () => { look.render(); setTimeout(() => { if (at('welcome')) { act('wave'); quip('Hi there!'); } }, 650); } },

@@ -52,20 +52,17 @@ final class Wave {
         let root = view.layer!
         let pill = CAShapeLayer()
         pill.path = Self.pixelPill(CGRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5))
-        pill.fillColor = CGColor(srgbRed: 0x05 / 255, green: 0x12 / 255, blue: 0x14 / 255, alpha: 0.94)
-        pill.strokeColor = CGColor(srgbRed: 0x4f / 255, green: 0xbf / 255, blue: 0xa9 / 255, alpha: 1)
+        pill.fillColor = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.97) // Hydra: white, a hairline, ink bars, no glow
+        pill.strokeColor = CGColor(srgbRed: 0xD2 / 255, green: 0xD2 / 255, blue: 0xD7 / 255, alpha: 1)
         pill.lineWidth = 1
         root.addSublayer(pill)
         let host = CALayer()
         host.frame = root.bounds
-        host.shadowColor = CGColor(srgbRed: 0x78 / 255, green: 1, blue: 0xe2 / 255, alpha: 1)
-        host.shadowOpacity = 0.8
-        host.shadowRadius = 3
-        host.shadowOffset = .zero
         root.addSublayer(host)
         let bars: [CALayer] = (0 ..< Self.shape.count).map { _ in
             let b = CALayer()
-            b.backgroundColor = CGColor(srgbRed: 0x78 / 255, green: 1, blue: 0xe2 / 255, alpha: 1)
+            b.backgroundColor = CGColor(srgbRed: 0x1D / 255, green: 0x1D / 255, blue: 0x1F / 255, alpha: 1)
+            b.cornerRadius = 1
             host.addSublayer(b)
             return b
         }
@@ -91,19 +88,9 @@ final class Wave {
         }
     }
 
-    /// The Roamies pixel frame: corners cut in two 2-pt steps (same as the setup guide's .px boxes).
+    /// Hydra: a rounded pill (8 pt corners, as the panel's controls).
     private static func pixelPill(_ r: CGRect) -> CGPath {
-        let s: CGFloat = 2, (x0, y0, x1, y1) = (r.minX, r.minY, r.maxX, r.maxY)
-        let pts: [(CGFloat, CGFloat)] = [
-            (x0 + 2 * s, y0), (x1 - 2 * s, y0), (x1 - 2 * s, y0 + s), (x1 - s, y0 + s), (x1 - s, y0 + 2 * s), (x1, y0 + 2 * s),
-            (x1, y1 - 2 * s), (x1 - s, y1 - 2 * s), (x1 - s, y1 - s), (x1 - 2 * s, y1 - s), (x1 - 2 * s, y1), (x0 + 2 * s, y1),
-            (x0 + 2 * s, y1 - s), (x0 + s, y1 - s), (x0 + s, y1 - 2 * s), (x0, y1 - 2 * s), (x0, y0 + 2 * s), (x0 + s, y0 + 2 * s),
-            (x0 + s, y0 + s), (x0 + 2 * s, y0 + s),
-        ]
-        let p = CGMutablePath()
-        p.addLines(between: pts.map { CGPoint(x: $0.0, y: $0.1) })
-        p.closeSubpath()
-        return p
+        CGPath(roundedRect: r, cornerWidth: min(8, r.height / 2), cornerHeight: min(8, r.height / 2), transform: nil)
     }
 
     /// Off while the notch capsule shows the listening instead (the page draws it there, not beside the cursor).

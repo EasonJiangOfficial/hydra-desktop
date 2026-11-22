@@ -204,7 +204,7 @@ const power = createPower({
     if (asleep) { speech.stop(); send({ type: 'listen_cancel' }); interruptQuietly('sleep'); }
     voiceConfig();
     ui({ kind: 'power', asleep, sound: asleep && why === 'sleep_word' });
-    if (panelOpen) panel();
+    menu();
     // Woken by a double clap, the orb or the app: it says so in its voice, then listens.
     if (!asleep && why !== 'talk') {
       const v = speakLine('Hydra at your service, sir.');
@@ -2187,7 +2187,9 @@ function menu() {
   const items = [
     { id: 'status', label: status, enabled: false },
     { sep: true },
+    { id: 'open_main', label: 'Open Hydra' },
     { id: 'panel', label: 'Open Panel…' },
+    { id: power.asleep ? 'power:wake' : 'power:sleep', label: power.asleep ? 'Wake Hydra' : 'Put Hydra to Sleep' },
     { id: 'show', label: `Show ${lookName()}`, ...(HOTKEYS_OK ? { accel: keys().summon } : {}) },
     { id: 'ask', label: `Ask ${lookName()}…`, enabled: !busy },
     ...(SNAP_OK ? [{ id: 'snap', label: 'Ask About an Area…', accel: keys().snap }] : []),
@@ -2648,6 +2650,16 @@ async function onMenu(id, via) {
     const r = cleanHydraUrl(typed);
     if (!r.ok) { say(r.why, 'concerned'); return; }
     config.hydraUrl = r.url; saveConfig(); agentStale = true; if (panelOpen) panel();
+  }
+  else if (id === 'signin_link') {
+    // Hydra's email sign-in link opens in the default browser; pasted here, it signs in the Hydra window instead.
+    const typed = await ask({ prompt: 'Paste the sign-in link from the email', placeholder: 'https://' });
+    if (typed == null) return;
+    let u = null;
+    try { u = new URL(String(typed).trim()); } catch {}
+    const ok = u && u.protocol === 'https:' && ['https://hydra-olive-one.vercel.app', 'https://vtspmnippnixoqtomfxi.supabase.co'].includes(u.origin);
+    if (!ok) { say("That isn't a Hydra sign-in link.", 'concerned'); return; }
+    send({ type: 'main_show', url: u.href });
   }
   else if (id === 'hydra_key') {
     const typed = await ask({ prompt: 'Hydra device key (empty to remove)', mask: true });

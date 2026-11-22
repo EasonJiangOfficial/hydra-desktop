@@ -445,6 +445,12 @@
     invoke('orb_state', { msg: o }).catch(() => {});
   }
   setInterval(pushOrb, 66);
+  // Asleep: a click on the orb wakes Hydra (it greets, then listens).
+  document.addEventListener('pointerdown', (e) => {
+    const a = getAgent();
+    if (!Roamie.asleep || !a?.visible || !a.pos) return;
+    if (Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) < 90) send({ type: 'agent_power', on: true, from: 'orb' });
+  }, true);
 
   function onVoice(m) {
     if (m.type === 'state') hearing2 = m.state === 'listening';

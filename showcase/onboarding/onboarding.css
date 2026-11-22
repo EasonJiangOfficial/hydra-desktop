@@ -229,7 +229,7 @@ h2 { margin: 0; font: 500 13px/1.35 var(--mono); color: var(--ink); }
 select {
   appearance: none; min-width: 0; flex: 1; padding: 9px 30px 9px 12px; border: 0; color: var(--ink); cursor: pointer;
   font: 500 13px/1.25 var(--mono);
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 2h2v2H6zM8 0h2v2H8z' fill='%236E6E73'/%3E%3C/svg%3E") no-repeat right 12px center;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236E6E73' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 12px center;
 }
 select option { background: #FFFFFF; color: var(--ink); }
 select:focus-visible { outline: none; }
@@ -368,21 +368,21 @@ input:focus-visible { outline: none; }
 .quip {
   position: fixed; left: 0; top: 0; z-index: 6; margin: 0; width: max-content; max-width: 236px; padding: 8px 12px 9px;
   text-align: center; overflow-wrap: break-word;
-  --bc: var(--accent); --fill: #FFFFFF;
-  color: var(--ink); font: 500 15px/1.2 var(--display); pointer-events: none; opacity: 0; transform: translate(-50%, -100%) scale(.85);
+  --bc: var(--line-hi); --fill: #FFFFFF; --r: var(--r-card);
+  color: var(--ink); font: 400 14px/1.3 var(--display); pointer-events: none; opacity: 0; transform: translate(-50%, -100%) translateY(4px);
   transition: opacity .18s var(--ease), transform .22s var(--ease);
 }
-.quip.on { opacity: 1; transform: translate(-50%, -100%) scale(1); }
+.quip.on { opacity: 1; transform: translate(-50%, -100%); }
 .quip-tail {
   position: fixed; z-index: 6; width: 10px; height: 6px; margin-left: -5px; pointer-events: none;
-  background: var(--accent); clip-path: polygon(0 0, 100% 0, 100% 2px, 80% 2px, 80% 4px, 60% 4px, 60% 6px, 40% 6px, 40% 4px, 20% 4px, 20% 2px, 0 2px);
+  background: var(--line-hi); clip-path: polygon(0 0, 100% 0, 50% 100%);
   opacity: 0; transition: opacity .18s var(--ease);
 }
 .quip.on + .quip-tail { opacity: 1; }
 .quip:empty, .quip:empty + .quip-tail { display: none; }
 
 /* ---------- drawing demo (shortcuts step, Mac) ----------
-   The real pen (voice/ink.swift): teal, a dark rim, a soft glow, dimmer until the loop snaps shut. */
+   The real pen (voice/ink.swift): ink with a white halo, dimmer until the loop snaps shut. */
 .pen-demo { position: fixed; left: 0; top: 0; z-index: 5; pointer-events: none; }
 .pen-demo[hidden] { display: none; }
 .pen-demo svg { position: absolute; left: 0; top: 0; overflow: visible; }

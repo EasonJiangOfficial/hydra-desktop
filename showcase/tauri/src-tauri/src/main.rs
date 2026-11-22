@@ -1744,7 +1744,12 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
             }
         }
         Some("panel_show") => show_panel(app, None, false),
-        Some("main_show") => hydra::open_main(app),
+        Some("main_show") => {
+            hydra::open_main(app);
+            if let Some(url) = msg.get("url").and_then(Value::as_str) {
+                hydra::navigate(app, url);
+            }
+        }
         Some("diagnostics") => {
             let app = app.clone();
             thread::spawn(move || to_sidecar(&app, &diagnostics(&app)));

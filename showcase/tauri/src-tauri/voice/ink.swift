@@ -8,8 +8,9 @@
 import AppKit
 import QuartzCore
 
-private let accent = CGColor(srgbRed: 0x78 / 255, green: 1, blue: 0xe2 / 255, alpha: 1)
-private let rim = CGColor(srgbRed: 0x03 / 255, green: 0x27 / 255, blue: 0x22 / 255, alpha: 0.6)
+// Hydra's pen: ink with a white halo, so it reads on dark and light apps. No glow.
+private let accent = CGColor(srgbRed: 0x1D / 255, green: 0x1D / 255, blue: 0x1F / 255, alpha: 1)
+private let rim = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.9)
 
 /// One pen stroke: points in its view's coordinates (top-left origin), drawn as a filled, tapered outline.
 final class InkStroke {
@@ -24,10 +25,6 @@ final class InkStroke {
         edge.lineWidth = 2.5
         edge.lineJoin = .round
         fill.fillColor = accent
-        fill.shadowColor = accent
-        fill.shadowOpacity = 0.75
-        fill.shadowRadius = 6
-        fill.shadowOffset = .zero
         group.addSublayer(edge)
         group.addSublayer(fill)
         // Dimmer until it snaps shut, so it's clear when a mark has counted.
@@ -209,8 +206,8 @@ final class InkView: NSView {
 
     private func pulse(_ s: InkStroke) {
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        let a = CABasicAnimation(keyPath: "shadowRadius")
-        a.fromValue = 6; a.toValue = 16; a.duration = 0.16; a.autoreverses = true
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = 0.7; a.toValue = 1; a.duration = 0.16
         a.timingFunction = CAMediaTimingFunction(name: .easeOut)
         s.fill.add(a, forKey: "snap")
     }

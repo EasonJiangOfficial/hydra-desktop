@@ -116,7 +116,7 @@
         ctx.save();
         if (vdisc) {
           ctx.beginPath(); ctx.arc(vdisc[0], vdisc[1], vdisc[2], 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.86)'; ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,0.94)'; ctx.fill();
           ctx.lineWidth = 1; ctx.strokeStyle = '#E5E5EA'; ctx.stroke();
         }
         // Far dots first, so the near (ink) ones sit on top.
