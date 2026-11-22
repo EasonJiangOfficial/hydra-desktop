@@ -98,6 +98,8 @@ fn windows_main(cmd: &str, args: &[String]) -> ! {
             let front = win::front_pid();
             let list: Vec<Value> = windows().iter().take(30).map(|w| {
                 let mut i = win_info(w);
+                // The program's file name too: find-text "app:X" matches it, so the sidecar checks the same windows.
+                i["exe"] = w.exe.clone().into();
                 if Some(w.pid) == front {
                     i["frontApp"] = true.into();
                 }

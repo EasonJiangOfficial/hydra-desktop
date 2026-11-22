@@ -3,8 +3,9 @@
 // - Asleep: a double clap, a tap on the orb or the key phrase wakes it (W5 contract 4: "Yes, phrase wakes it"); the
 //   phrase's take goes on at once.
 // - While Hydra speaks: the owner talking over it (barge-in) or a double clap stops the speech and starts a take.
-//   The mic then runs with macOS voice processing (echo cancellation), so Hydra's own voice from the speakers is
-//   taken out, and a talk needs a sustained rise over the room for 200 ms, not one loud frame.
+//   The one mic (mic.swift) runs with macOS voice processing (echo cancellation) while interrupting is on, so Hydra's
+//   own voice from the speakers is taken out, and a talk needs a sustained rise over the room for 200 ms, not one loud
+//   frame. The talk detector is one more consumer of that mic, added while Hydra speaks.
 import AVFoundation
 import Foundation
 
@@ -20,9 +21,6 @@ enum Trigger {
         case .voice: return speaking && barge ? .take : .none
         }
     }
-    /// Whether the clap detector needs its own mic: nothing else holds the mic, and wake listening (which hears claps
-    /// itself) can't run right now, whatever its setting.
-    static func clapDetectorRuns(clapOn: Bool, idle: Bool, barging: Bool, wakeCanRun: Bool) -> Bool { clapOn && idle && !barging && !wakeCanRun }
 }
 
 /// Someone starting to talk, from the mic's energy alone (no words), in 10 ms frames. The "bed" follows the loudest
@@ -67,67 +65,21 @@ final class SpeechOnset {
     }
 }
 
-/// The mic while Hydra speaks: voice processing on (echo cancellation), a talk detector and a double-clap detector on
-/// the cleaned sound. Nothing is recorded or recognised.
-final class BargeListener {
-    private var engine: AVAudioEngine?
-    var running: Bool { engine?.isRunning == true }
-    var clapSensitivity = 0.5
-    /// Hydra's voice plays in this engine while it runs (hydraout.swift): the echo canceller's reference.
-    var out: HydraOut?
-    private let onTalk: () -> Void, onClap: () -> Void
-    init(onTalk: @escaping () -> Void, onClap: @escaping () -> Void) { self.onTalk = onTalk; self.onClap = onClap }
-
-    enum Start { case started, failed, noEchoCancel }
-    /// The same mics a take tries, in the same order (InputDevice.firstOpening). No echo cancellation only when no mic
-    /// had it; a mic that failed to open says nothing about that.
-    func start(device: AudioDeviceID?) -> Start {
-        stop()
-        // Before macOS 14 voice processing can't be kept from turning Hydra's own voice down: not used.
-        guard #available(macOS 14, *) else { return .noEchoCancel }
-        var saw = [Start]()
-        let ok = InputDevice.firstOpening(InputDevice.tries(picked: device, current: InputDevice.current(), builtIn: InputDevice.builtIn())) { dev -> Bool? in
-            let r = open(dev); saw.append(r); return r == .started ? true : nil
-        }
-        if ok == true { return .started }
-        return !saw.isEmpty && saw.allSatisfy { $0 == .noEchoCancel } ? .noEchoCancel : .failed
-    }
-
-    @available(macOS 14, *)
-    private func open(_ device: AudioDeviceID?) -> Start {
-        let eng = AVAudioEngine()
-        let input = eng.inputNode
-        if let device, !InputDevice.use(device, on: input) { return .failed }
-        do { try input.setVoiceProcessingEnabled(true) } catch { log("barge-in: no echo cancellation (\(error))"); return .noEchoCancel }
-        guard input.isVoiceProcessingEnabled else { return .noEchoCancel }
-        // Voice processing turns other sound down by default: that would duck Hydra's own voice.
-        input.voiceProcessingOtherAudioDuckingConfiguration = Ducking.configuration
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { return .failed }
-        let talk = SpeechOnset(rate: format.sampleRate), clap = ClapDetector(rate: format.sampleRate, sensitivity: clapSensitivity)
-        let onTalk = onTalk, onClap = onClap
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            guard let ch = buffer.floatChannelData?[0] else { return }
-            let n = Int(buffer.frameLength)
-            if talk.feed(ch, count: n) { DispatchQueue.main.async { onTalk() } }
-            if clap.feed(ch, count: n) { DispatchQueue.main.async { onClap() } }
-        }
-        out?.attach(eng)
-        do { eng.prepare(); try eng.start() } catch { out?.detach(); input.removeTap(onBus: 0); try? input.setVoiceProcessingEnabled(false); log("barge-in listening couldn't start: \(error)"); return .failed }
-        engine = eng
-        log("barge-in listening on (echo cancellation)")
-        return .started
-    }
-
-    func stop() {
-        guard let eng = engine else { return }
-        out?.detach()
-        eng.inputNode.removeTap(onBus: 0)
-        eng.stop()
-        try? eng.inputNode.setVoiceProcessingEnabled(false)
-        engine = nil
-        InputDevice.freedAt = uptime()
-        log("barge-in listening off")
+/// The talk detector as a consumer of the one mic tap while Hydra speaks: a fresh one (it learns the bed again) each
+/// time it's added (reset).
+final class BargeTap {
+    private let lock = NSLock()
+    private var det: SpeechOnset?
+    var onTalk: () -> Void = {}
+    func reset() { lock.lock(); det = nil; lock.unlock() }
+    /// One buffer from the mic (audio thread).
+    func feed(_ buffer: AVAudioPCMBuffer) {
+        guard let ch = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+        lock.lock()
+        if det == nil || det!.rate != buffer.format.sampleRate { det = SpeechOnset(rate: buffer.format.sampleRate) }
+        let fired = det!.feed(ch, count: Int(buffer.frameLength))
+        lock.unlock()
+        if fired { let f = onTalk; DispatchQueue.main.async { f() } }
     }
 }
 
@@ -153,16 +105,11 @@ enum TriggerTest {
         check("clap-to-talk off: a clap while awake and quiet does nothing", Trigger.decide(.clap, asleep: false, speaking: false, clapTalk: false, phrase: true, barge: true) == .none)
         check("key phrase off: the phrase does nothing", Trigger.decide(.phrase, asleep: false, speaking: false, clapTalk: true, phrase: false, barge: true) == .none)
         check("interrupt off: talking over Hydra does nothing", Trigger.decide(.voice, asleep: false, speaking: true, clapTalk: true, phrase: true, barge: false) == .none)
-        check("key phrase on but its mic not open (no permission, backing off, held): the clap detector listens", Trigger.clapDetectorRuns(clapOn: true, idle: true, barging: false, wakeCanRun: false))
-        check("wake listening running hears claps itself: no second mic", !Trigger.clapDetectorRuns(clapOn: true, idle: true, barging: false, wakeCanRun: true))
-        check("barge-in holds the mic: no second mic", !Trigger.clapDetectorRuns(clapOn: true, idle: true, barging: true, wakeCanRun: false))
         // The start order: the mic a stuck default can't open ('!dev') falls through to the next one, as a take does.
         var tried = [AudioDeviceID?]()
         let got = InputDevice.firstOpening(InputDevice.tries(picked: nil, current: 3, builtIn: 4)) { d -> AudioDeviceID? in tried.append(d); return d == nil ? nil : d }
-        check("the clap detector and barge-in try the next mic when the system's choice fails", got == 3 && tried == [nil, 3])
-        check("a picked mic is the only one they try", InputDevice.firstOpening(InputDevice.tries(picked: 7, current: 3, builtIn: 4)) { d -> AudioDeviceID? in d == 7 ? nil : d } == nil)
-        check("the clap detector waits for the last engine's mic to go", !InputDevice.settled(now: 10.1, freedAt: 10.0) && InputDevice.settled(now: 10.5, freedAt: 10.0))
-        check("nothing let go of the mic yet: it starts at once", InputDevice.settled(now: 1.0, freedAt: -10.0))
+        check("the mic tries the next one when the system's choice fails", got == 3 && tried == [nil, 3])
+        check("a picked mic is the only one it tries", InputDevice.firstOpening(InputDevice.tries(picked: 7, current: 3, builtIn: 4)) { d -> AudioDeviceID? in d == 7 ? nil : d } == nil)
         check("clap-to-talk off still wakes from sleep", Trigger.decide(.clap, asleep: true, speaking: false, clapTalk: false, phrase: false, barge: false) == .wake)
 
         // The talk detector. "Playback" is Hydra's voice as it reaches the mic after echo cancellation (about 25 dB

@@ -12,7 +12,12 @@
 export const SLEEP_AFTER_MS = 5 * 60_000;
 export const DEFAULT_SLEEP_WORD = 'Hydra, sleep';
 
-const words = (t) => String(t ?? '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/'/g, '').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+// Numbers as they're said ("3 kill" is "three kill"), digits apart from letters: voice/phrase.swift's Spoken.words.
+const SMALL = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty'];
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const spell = (d) => (d.length <= 2 && +d <= 20 ? [SMALL[+d]] : d.length <= 2 && +d % 10 === 0 ? [TENS[+d / 10]] : [...d].map((c) => SMALL[+c]));
+const words = (t) => String(t ?? '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/'/g, '').split(/[^\p{L}\p{N}]+|(?<=\p{N})(?=\p{L})|(?<=\p{L})(?=\p{N})/u).filter(Boolean)
+  .flatMap((w) => (/^\d+$/.test(w) ? spell(w) : [w]));
 function edits(a, b) {
   const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
   for (let j = 1; j <= b.length; j++) d[0][j] = j;
@@ -20,12 +25,20 @@ function edits(a, b) {
   return d[a.length][b.length];
 }
 
-/** The sleep word's words, in order, anywhere in what was said (the same rule as SleepWord in voice/main.swift). */
+/** The sleep word's words, in order, anywhere in what was said (as SleepWord in voice/main.swift, without its sound
+ * keys): words of 5 letters or more may be one letter off, and a word may be heard as two ("good night"). */
 export function heardSleepWord(text, phrase = DEFAULT_SLEEP_WORD) {
   const want = words(phrase).length ? words(phrase) : words(DEFAULT_SLEEP_WORD), got = words(text);
-  for (let i = 0; i + want.length <= got.length; i++) {
-    if (want.every((w, k) => got[i + k] === w || (w.length >= 5 && edits(got[i + k], w) <= 1))) return true;
-  }
+  const same = (h, w) => h === w || (w.length >= 5 && edits(h, w) <= 1);
+  const at = (i) => {
+    let j = i, k = 0;
+    while (k < want.length) {
+      if (j >= got.length) return false;
+      if (same(got[j], want[k])) { j++; k++; } else if (j + 1 < got.length && same(got[j] + got[j + 1], want[k])) { j += 2; k++; } else if (k + 1 < want.length && same(got[j], want[k] + want[k + 1])) { j++; k += 2; } else return false;
+    }
+    return true;
+  };
+  for (let i = 0; i < got.length; i++) if (at(i)) return true;
   return false;
 }
 

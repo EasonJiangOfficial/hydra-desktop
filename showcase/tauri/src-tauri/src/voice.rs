@@ -351,6 +351,12 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         Some("barge_available") => to_sidecar(app, &json!({ "type": "voice_barge_available" })),
         Some("trigger") => to_sidecar(app, &json!({ "type": "voice_trigger", "via": msg.get("via").cloned().unwrap_or(Value::Null) })),
         Some("sleep_word") => to_sidecar(app, &json!({ "type": "agent_power", "on": false, "from": "sleep_word" })),
+        // "Clap twice" heard the owner's claps (or not), and the live clap level for the panel.
+        Some("clap_calibrated") | Some("clap_level") => {
+            let mut m = msg.clone();
+            m["type"] = json!(format!("voice_{}", msg.get("type").and_then(Value::as_str).unwrap_or("")));
+            to_sidecar(app, &m);
+        }
         // The mic list, for the panel's picker.
         Some("mics") => {
             let mut m = msg.clone();

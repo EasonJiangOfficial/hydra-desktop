@@ -28,10 +28,11 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
 
 // ---- 1. Shared settings.
 {
-  assert.deepEqual(SETTINGS_DEFAULTS, { wakePhrase: 'Hey Hydra', sleepWord: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium' }, 'the contract\'s defaults');
+  // clapSensitivity (W6): null until Hydra sends one, so the Mac keeps its own (an older server sends none).
+  assert.deepEqual(SETTINGS_DEFAULTS, { wakePhrase: 'Hey Hydra', sleepWord: null, clapSensitivity: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium' }, 'the contract\'s defaults');
   assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
   const snake = cleanSettings({ settings: { wake_phrase: '  Okay   Computer ', sleep_word: 'Goodnight Hydra', model: 'claude-sonnet-5-5', effort_live: 'high', effort_routine: 'low' } });
-  assert.deepEqual(snake, { wakePhrase: 'Okay Computer', sleepWord: 'Goodnight Hydra', model: 'claude-sonnet-5-5', effortLive: 'high', effortRoutine: 'low' });
+  assert.deepEqual(snake, { wakePhrase: 'Okay Computer', sleepWord: 'Goodnight Hydra', clapSensitivity: null, model: 'claude-sonnet-5-5', effortLive: 'high', effortRoutine: 'low' });
   assert.deepEqual(cleanSettings({ settings: { wakePhrase: 'Hey Jarvis', model: 'claude-haiku-5-5', effortLive: 'medium' } }).model, 'claude-haiku-5-5', 'camelCase too');
   const bad = cleanSettings({ settings: { wake_phrase: 'x', model: 'gpt-9', effort_live: 'ultra', effort_routine: 3 } }, snake);
   assert.deepEqual(bad, snake, 'values out of range keep what was there');
@@ -85,7 +86,7 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
 {
   assert.deepEqual(newInputs({ inputs: [{ seq: 3, text: ' c ' }, { seq: 1, text: 'a' }, { seq: 2, text: '' }, { seq: 'x', text: 'b' }, { seq: 3, text: 'dup' }] }, 1), [{ seq: 3, text: 'c' }]);
   assert.deepEqual(newInputs(null), []);
-  assert.ok(relayEventsAnswerSchema.safeParse({ inputs: [{ seq: 1, text: 'and Friday too' }] }).success);
+  assert.ok(relayEventsAnswerSchema.safeParse({ ok: true, status: 'claimed', inputs: [{ seq: 1, text: 'and Friday too' }] }).success, 'the web\'s answer shape');
   assert.ok(relayBatchSchema.safeParse({ turnId: randomUUID(), claimId: randomUUID(), events: [], inputsSeen: 2 }).success, 'inputsSeen is part of the batch');
   const turnId = randomUUID(), claimId = randomUUID();
   const posts = [];
@@ -328,12 +329,13 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.match(side, /const \{ model, thinking \} = brainFor\(agentSettings\.current, turn\.surface\);/, 'relay turns too');
   assert.match(side, /agentSettings\.start\(\);/, 'read when paired');
   assert.match(side, /m\.type === 'hydra_settings_changed'\) agentSettings\.refresh\(\);/, 'and on a change push from the window');
-  assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: wakePhraseFor\(agentSettings\),/, 'the wake phrase reaches the helper; it listens asleep too');
+  assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: wakePhraseNow\(\),/, 'the wake phrase reaches the helper; it listens asleep too');
+  assert.match(side, /const wakePhraseNow = \(\) => \(servedNow\('wakePhrase'\) && wakePhraseFor\(agentSettings\)\) \|\| config\.wakePhrase \|\| `Hey \$\{wakeName\(config\)\}`;/, 'Hydra\'s phrase only when a read sent one (R10-14), else the Mac\'s own');
   assert.match(side, /if \(!asleep && why !== 'talk' && why !== 'phrase'\)/, 'a phrase wake keeps its own take (no greeting over the owner)');
   assert.match(side, /state === 'listening' && busy && m\.mode === 'wake'\) \{ addOnTake = true;/, 'the phrase while thinking adds on');
   assert.match(side, /if \(addOnTake\) \{ addOnTake = false; if \(addOn\(text\)\) return; \}/);
   assert.match(side, /const into = addOnTo\(text, \{ busy, addInput: \(t\) => agent\?\.addInput\?\.\(t\), enqueue \}\);/, 'addOnTo (behavior in voiceturn.test.mjs)');
-  assert.match(side, /onInput\(\(text\) => agentRun\.addInput\(`\$\{INPUT_PREFIX\}\$\{text\}`\)\);/, 'relay additions into the session');
+  assert.match(side, /await relaySession\(\{\n\s+agent: agentRun, text: said\.text, h,/, 'relay additions into the session (relaySession: behavior in relayup.test.mjs)');
   assert.match(side, /if \(m\.via === 'barge'\) noteInterrupted\(\);/, 'barge-in notes what was heard');
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');
   assert.match(side, /const noFiller = startFiller\(\{ voice: !intro && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \}\);/, 'a filler after 1.1 s, never muted (startFiller: behavior in voiceturn.test.mjs)');

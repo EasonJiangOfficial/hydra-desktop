@@ -270,20 +270,53 @@ export function checkRead(p, home, opts = {}) {
 const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint)|safari|google chrome|chrome|arc|firefox|microsoft edge|brave browser|opera|vivaldi|orion|zen|hydra)$/i;
 /** What a window shows (take_screenshot, read_window) before its text or picture reaches the model: each file it has
  *  open (its document, a file:// page) is read like read_file; a window with no file is free only in a viewer app,
- *  any other (Terminal, a password manager, Messages) asks, naming the app (tenth review R10-11). { level, reason }. */
-export function checkWindow(win, home) {
+ *  any other (Terminal, a password manager, Messages) asks, naming the app (tenth review R10-11). { level, reason }.
+ *  viewers: false (a relay turn: the owner is not at this Mac, R11-1): a window with no file asks in every app, a browser
+ *  or Hydra too, since only plain reads in the three folders run unasked. */
+// Single-document apps only: a code editor's window shows its terminal panel, other tabs and an AI chat beside the
+// file it reports (R11c-6), so it asks.
+const DOC_APPS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint))$/i;
+const BROWSER_APPS = /^(safari|google chrome|chrome|chromium|arc|firefox|microsoft edge|msedge|brave browser|brave|opera|vivaldi|orion|zen)$/i;
+// The file names a title shows: ".env - Notepad", "*id_rsa - Notepad", "id_rsa — Edited", "● .env — shop — Code", and
+// with a folder after the name, Vim's "id_rsa + (~/.ssh) - VIM" and Sublime's "C:\\keys\\id_rsa (keys) - Sublime Text"
+// (R11h-2). Each piece with its marks (Vim's +, =, -, [+], [RO]) and folder taken off, its first word, the folder,
+// and the name in that folder ("config (~/.ssh)" is ~/.ssh/config).
+// Vim and Neovim put the file list's counter last when more than one file is open: "config (~/.ssh) (1 of 2) - VIM",
+// "config + (~\\.kube) ((2) of 3) - GVIM" (R11i-2); it's taken off before the folder.
+const MARKS = /(\s+(\[[^\]]*\]|[+=-]{1,2}))+$/u, ARGS = /\s*\(\(?\d+\)? of \d+\)$/u;
+const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) => {
+  let name = x.replace(/^[*●•\s]+|[*●•\s]+$/gu, '').replace(MARKS, '').replace(ARGS, '').replace(MARKS, '').trim(), dir = '';
+  const p = /\s*\(([^()]*)\)$/u.exec(name);
+  if (p) { dir = p[1].trim(); name = name.slice(0, p.index).replace(MARKS, '').trim(); }
+  const first = name.split(/\s+/)[0];
+  return [name, first, dir, ...(dir && name ? [`${dir}/${name}`, `${dir}/${first}`] : [])].filter(Boolean);
+});
+export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
   if (win?.url) { try { const u = new URL(String(win.url).replace(/^view-source:/i, '')); if (u.protocol === 'file:') files.push(decodeURIComponent(u.pathname)); } catch { /* not a URL */ } }
+  // No file or address said (hands-win never says one; some Mac editors set no document): a key file's name in the
+  // title blocks it as the file itself would (R11g-3).
+  if (!files.length && !win?.url) {
+    // Its words are never quoted: a title is an email's subject, a page's name or a command (R11h-5).
+    const homes = homesOf(home);
+    if (titleNames(win?.title).some((n) => hits(SECRET, [norm(n, home)], homes))) return verdict(BLOCK, `${app ? `${app}'s window title` : "That window's title"} names a file that holds passwords or keys, so I won't read it or look at it.`);
+  }
   let worst = verdict(SAFE);
   for (const f of files) {
     const v = checkRead(f, home);
     if (v.level === BLOCK) return verdict(BLOCK, `${app || 'That window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
     if (v.level === ASK) worst = verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`);
   }
-  if (!files.length && !WINDOW_VIEWERS.test(app)) {
+  // A relay turn (viewers off, R11b-B): a file frees a window only in an app that just shows or edits it, never
+  // Terminal, Finder, a browser or a chat app (their window shows more than the file).
+  const plain = files.length ? viewers || DOC_APPS.test(app) : viewers && WINDOW_VIEWERS.test(app);
+  if (!plain && worst.level === SAFE) {
     const title = String(win?.title ?? '').trim();
-    worst = { ...verdict(ASK, `Look at ${app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name"}? It has no file I can check, so it could show anything (a password, a message, a terminal).`), app };
+    const name = app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name";
+    // A browser window with no address said: its address wasn't read, so it isn't said to have no file (R11g-2).
+    const none = BROWSER_APPS.test(app) && !win?.url ? "I couldn't read which page or file it shows" : 'It has no file I can check';
+    worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a password, a message, a terminal).`), app };
   }
   return worst;
 }

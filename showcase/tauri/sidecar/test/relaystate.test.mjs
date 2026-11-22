@@ -23,13 +23,18 @@ const body = (req) => new Promise((res) => { let s = ''; req.on('data', (d) => {
 const json = (res, code, v) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(v)); };
 const fastSleep = (ms, s) => new Promise((r, j) => { const t = setTimeout(r, 1); s?.addEventListener('abort', () => { clearTimeout(t); j(new Error('aborted')); }, { once: true }); });
 let handle = null;
-const server = http.createServer(async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${KEY}`) return json(res, 401, {});
-  const u = new URL(req.url, 'http://x');
-  return handle(u, req.method === 'POST' ? await body(req) : null, res, req);
-});
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
-const api = hydraApi({ base: `http://127.0.0.1:${server.address().port}`, getKey: async () => KEY });
+// A fake Hydra on its own port. Section 4 gets a fresh one (R11-5): a poll an earlier, stopped relay already sent can
+// still reach the shared server after its handler changed, and take the turn section 4 offers its child.
+const listen = async (route) => {
+  const srv = http.createServer(async (req, res) => {
+    if (req.headers.authorization !== `Bearer ${KEY}`) return json(res, 401, {});
+    const u = new URL(req.url, 'http://x');
+    return route()(u, req.method === 'POST' ? await body(req) : null, res, req);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { srv, base: `http://127.0.0.1:${srv.address().port}`, api: hydraApi({ base: `http://127.0.0.1:${srv.address().port}`, getKey: async () => KEY }) };
+};
+const { srv: server, api } = await listen(() => handle);
 const turnOf = (id) => ({ id, claimId: randomUUID(), threadId: randomUUID(), surface: 'web', input: { text: 'hi' }, context: { path: '/', search: '', scope: 'all' } });
 const idle = (res) => setTimeout(() => { res.writeHead(204); res.end(); }, 10);
 
@@ -131,6 +136,9 @@ const idle = (res) => setTimeout(() => { res.writeHead(204); res.end(); }, 10);
 // ---- 4. Killed mid-turn (kill -9, a crash): nothing was recorded as stopped, yet after the restart the re-claimed turn
 // is refused (mac_failed), never run a second time. A turn that ends cleanly leaves no mark.
 {
+  let handle = null;
+  const { srv, base, api } = await listen(() => handle);
+  server.close(); // nothing from sections 1 to 3 can reach this section
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-crash-'));
   const stateFile = path.join(dir, 'relay-stopped.json');
   const t = turnOf(randomUUID()), ok = turnOf(randomUUID());
@@ -153,7 +161,7 @@ const idle = (res) => setTimeout(() => { res.writeHead(204); res.end(); }, 10);
   const apiUrl = pathToFileURL(path.resolve(import.meta.dirname, '..', 'hydramcp.mjs')).href;
   fs.writeFileSync(child, `import { createRelay } from ${JSON.stringify(relayUrl)};
 import { hydraApi } from ${JSON.stringify(apiUrl)};
-const api = hydraApi({ base: ${JSON.stringify(`http://127.0.0.1:${server.address().port}`)}, getKey: async () => ${JSON.stringify(KEY)} });
+const api = hydraApi({ base: ${JSON.stringify(base)}, getKey: async () => ${JSON.stringify(KEY)} });
 createRelay({ api, slots: ['live'], waitSecs: 1, minPollMs: 1, flushMs: 1, heartbeatMs: 60_000, stateFile: ${JSON.stringify(stateFile)},
   runTurn: async (turn, { emit }) => { emit({ type: 'text', delta: 'sending' }); await new Promise(() => {}); } }).start();
 `);
@@ -178,7 +186,7 @@ createRelay({ api, slots: ['live'], waitSecs: 1, minPollMs: 1, flushMs: 1, heart
   assert.ok(Number.isFinite(left[t.id]), 'the killed turn stays marked');
   assert.equal(left[ok.id], undefined, 'a turn that ended cleanly leaves no mark');
   fs.rmSync(dir, { recursive: true, force: true });
+  srv.close();
 }
 
-server.close();
 console.log('relaystate: ok');

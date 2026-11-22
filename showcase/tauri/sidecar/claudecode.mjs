@@ -70,7 +70,8 @@ export function toSdkUserContent(content) {
     return { type: 'text', text: `[${p.type} attachment omitted: not supported here]` };
   });
 }
-const toSdkUserMessage = (content) => ({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+// Each with its own uuid: Claude Code's result names the user messages its turn took (user_message_uuids).
+const toSdkUserMessage = (content) => ({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, uuid: crypto.randomUUID() });
 
 // A tool call copied into a reply as text by an earlier session: not part of what was said.
 const ECHOED = /^[ \t]*(?:\[called [\w.-]+(?: [^\n]*)?\]|Tool (?:use|result): [^\n]*)[ \t]*$/gm;
@@ -226,7 +227,8 @@ const preview = (c) => (typeof c === 'string' ? c : c.map((b) => (b.type === 'te
 const toMcpContent = (c) => (typeof c === 'string' ? (c ? [{ type: 'text', text: c }] : [])
   : c.map((b) => (b.type === 'text' ? { type: 'text', text: b.text } : b.type === 'image' ? { type: 'image', data: b.data, mimeType: b.mediaType } : { type: 'text', text: `[${b.mediaType} omitted: not supported here]` })));
 
-export function createToolBridge({ tools, signal, maxToolResultChars, onEvent }) {
+// onReply(toolCallId): just before a result is handed back to Claude Code (on the same stdin as the owner's additions).
+export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, onReply }) {
   const results = new Map(), invalidCounts = new Map();
   async function callTool(name, args, toolCallId, cancel) {
     const t0 = Date.now();
@@ -292,7 +294,7 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent })
           const metaId = params._meta?.['claudecode/toolUseId'];
           const toolCallId = typeof metaId === 'string' ? metaId : `gg_call_${++callCount}`;
           void callTool(String(params.name), params.arguments ?? {}, toolCallId, controller.signal)
-            .then((result) => { results.set(toolCallId, result); reply(id, { result: { content: toMcpContent(result.content), ...(result.isError ? { isError: true } : {}) } }); })
+            .then((result) => { results.set(toolCallId, result); onReply?.(toolCallId); reply(id, { result: { content: toMcpContent(result.content), ...(result.isError ? { isError: true } : {}) } }); })
             .finally(() => inFlight.delete(id));
           return;
         }
@@ -323,7 +325,6 @@ class Channel {
     }
   }
 }
-const isAbortLike = (err) => /abort/i.test(err instanceof Error ? err.message : String(err)) || err?.name === 'AbortError';
 
 // ---------- warm spare ----------
 // Starting Claude Code costs ~0.7 s before the model is even asked (process, config, MCP handshake). A spare is
@@ -353,7 +354,7 @@ export const connectorTool = (name) => { const m = /^mcp__(.+?)__(.+)$/.exec(nam
 // o.connectors: the owner's claude.ai connectors load too, and every call to one goes through o.gate(name, input,
 // signal) → true to run it (the desktop risk gate: reads run, anything else asks the owner).
 function sdkOptions(o, resume, link) {
-  const bridge = createToolBridge({ tools: o.tools ?? [], signal: () => link.signal, onEvent: (event) => link.onEvent?.(event) });
+  const bridge = createToolBridge({ tools: o.tools ?? [], signal: () => link.signal, onEvent: (event) => link.onEvent?.(event), onReply: (id) => link.onReply?.(id) });
   const abortController = new AbortController();
   const effort = effortForThinking(o.thinking);
   const options = {
@@ -433,6 +434,8 @@ async function* claudeCodeLoop(messages, o) {
     Object.assign(run.link, link);
     input = new Channel();
     input.push(toSdkUserMessage(first));
+    // A spare that died while parked: what was added into its input goes into the fresh one too (R11e-8).
+    for (const a of added) if (!a.done) input.push(a.m);
     const w = s ? await s.warm : null;
     warmUsed = !!w;
     q = w ? w.query(input) : (o.query ?? sdkQuery)({ prompt: input, options: run.options });
@@ -448,13 +451,42 @@ async function* claudeCodeLoop(messages, o) {
   // Words the owner adds while this runs (W5 contract 2): one more user message on the same streaming input. Claude Code
   // takes it into the turn under way, or answers it right after; a result that comes before any assistant message
   // after the last addition is not the end yet (the addition is still to be answered).
-  let step = 0, addedAt = 0, answeredAt = 0, streamed = false;
+  // finalAt: the last top-level message that ended the turn (end_turn). A run cut by max turns or an error answered
+  // only what came before it; a message that merely started after an addition (a tool step) did not (R11b-G).
+  let step = 0, addedAt = 0, answeredAt = 0, finalAt = 0, msgAt = 0, streamed = false, cut = false, byUuid = false;
+  const added = []; // [{ at, text }]: what was not answered when the run ends goes to o.onLeft (R11-2)
+  // turnAt: the step the turn under way started after (the last result). turnTook: what Claude Code's stream stamps say
+  // this turn took so far (user_message_uuids on its replies): all a crash leaves to go by (R11f-1).
+  let turnAt = 0, turnTook = null;
+  // folds: where a tool round ended and a new message began after it (R11g-5). Claude Code folds what was queued into a
+  // turn only there, and a typed turn's stream names none of it (sdk.d.ts: only its first frame is stamped). Counted
+  // only where the order is provable (R11h-1): our tools' results go back to Claude Code on the same stdin as the
+  // additions, so one added before the bridge handed back a result of the round was read before the round ended. The
+  // fold is the step of the round's last such hand-back. A round of results Claude Code made itself (a connector's)
+  // proves nothing: an addition still on its way then waits for its own turn.
+  let roundAt = 0, lastStop = null;
+  const folds = [], handed = new Map();
+  link.onReply = (id) => { handed.set(id, ++step); };
+  const tookOf = (m) => (Array.isArray(m?.user_message_uuids) ? m.user_message_uuids : typeof m?.user_message_uuid === 'string' ? [m.user_message_uuid] : null);
+  // Claude Code named what a turn took (R11c-B1): from then on, whatever it didn't take is unanswered. A turn that
+  // ended well answered all it took; one cut short (an error result, max turns, a crash) only if its last message was
+  // its final answer, as all it took was folded in before that (R11f-1).
+  // guess: took is only the stream's stamps (a crash, a result with no uuids, a plain end), so a fold counts too. A
+  // result that names what its turn took is believed as it is.
+  const settle = (took, ok, guess = false) => {
+    if (!took) return;
+    byUuid = true;
+    // Cut short after its final answer: what was sent before a fold in this turn was taken in and answered too.
+    if (ok || (finalAt === answeredAt && finalAt > turnAt)) for (const a of added) if (took.includes(a.uuid) || (guess && folds.some((f) => f > a.at && f > turnAt))) a.done = true;
+  };
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
   // After begin(): the first message is on the input already, so an addition always comes after it.
   o.takeInput?.((text) => {
     if (aborted || !input || !String(text ?? '').trim()) return false;
-    input.push(toSdkUserMessage([{ type: 'text', text: String(text) }]));
+    const m = toSdkUserMessage([{ type: 'text', text: String(text) }]);
+    input.push(m);
     addedAt = ++step;
+    added.push({ at: addedAt, text: String(text), uuid: m.uuid, m });
     return true;
   });
 
@@ -473,9 +505,11 @@ async function* claudeCodeLoop(messages, o) {
     for await (const item of channel) {
       if (item.kind === 'wake') continue;
       if (item.kind === 'event') { if (!aborted) yield item.event; continue; }
-      if (item.kind === 'end') break;
+      if (item.kind === 'end') { settle(turnTook, false, true); break; }
       if (item.kind === 'error') {
-        if (aborted || isAbortLike(item.error)) break;
+        // Only a Stop ends quietly: an error that merely says "abort" is an error (R11c-B2), so what was added is named.
+        if (aborted) break;
+        settle(turnTook, false, true);
         throw item.error instanceof Error ? item.error : new Error(String(item.error));
       }
       const message = item.message;
@@ -484,22 +518,45 @@ async function* claudeCodeLoop(messages, o) {
       if (message.type !== 'result') {
         // An assistant message that starts after an addition is its answer (or takes it in).
         if (!message.parent_tool_use_id) {
-          if (message.type === 'stream_event' && message.event?.type === 'message_start') { streamed = true; answeredAt = ++step; }
-          else if (message.type === 'assistant' && !streamed) answeredAt = ++step;
+          if (message.type === 'stream_event' && message.event?.type === 'message_start') {
+            streamed = true;
+            answeredAt = msgAt = ++step;
+            if (lastStop === 'tool_use' && roundAt) folds.push(roundAt);
+            lastStop = null; roundAt = 0;
+          } else if (message.type === 'stream_event' && message.event?.type === 'message_delta') { lastStop = message.event.delta?.stop_reason ?? lastStop; if (lastStop === 'end_turn') finalAt = msgAt; }
+          else if (message.type === 'assistant' && !streamed) { answeredAt = ++step; if (message.message?.stop_reason === 'end_turn') finalAt = step; }
+          else if (message.type === 'user' && Array.isArray(message.message?.content)) {
+            for (const b of message.message.content) if (b?.type === 'tool_result' && handed.has(b.tool_use_id)) roundAt = Math.max(roundAt, handed.get(b.tool_use_id));
+          }
+          const s = tookOf(message);
+          if (s) turnTook = [...new Set([...(turnTook ?? []), ...s])];
         }
         yield* mapper.handle(message); continue;
       }
-      if (message.subtype === 'error_max_turns') { hitMaxTurns = true; break; }
+      // Read before an error throws or max turns breaks: an error result names what its turn took too (R11f-1).
+      const own = tookOf(message), took = own ?? turnTook;
+      if (message.subtype !== 'success' || message.is_error) settle(took, false, !own);
+      if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
         throw new Error(detail || `Claude Code stopped: ${message.subtype}`);
       }
       if (message.is_error) throw new Error(message.result || mapper.syntheticError || 'Claude Code request failed.');
-      if (addedAt > answeredAt) continue; // an addition came after the last answer: its own answer follows
+      // Claude Code names the user messages a turn took (R11c-B1): one it didn't take is still queued, and its own turn
+      // follows, even when it came before this turn's answer started (sent while the last request was out). An older
+      // Claude Code doesn't say: an addition after the last answer started waits for its own answer, as before.
+      settle(took, true);
+      turnAt = step; turnTook = null;
+      if (took) { if (added.some((a) => !a.done)) continue; }
+      else if (addedAt > answeredAt) continue;
       break;
     }
-  } finally {
+  } catch (e) { cut = true; throw e; } finally {
     o.takeInput?.(null);
+    // Claude Code named what it took: unless Stop ended it, every addition it didn't take is unanswered, whenever it was
+    // sent (one sent during the final answer's first token is before finalAt, R11c-B1 follow-up), on a cut or a stream
+    // that simply ended (R11e-7). Else by step, as before.
+    o.onLeft?.(added.filter((a) => !a.done && ((byUuid && !aborted) || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
@@ -534,7 +591,7 @@ export function resumeId(state, messages) {
  */
 export class ClaudeCodeAgent {
   #running = false;
-  #add = null; #early = [];
+  #add = null; #early = []; #left = [];
   constructor(options) {
     this.options = options;
     this.resume = options.resume ?? null;
@@ -549,16 +606,21 @@ export class ClaudeCodeAgent {
   setSignal(signal) { this.options = { ...this.options, signal }; }
   /** While a prompt runs: the owner's added words go into it as one more user message. False when nothing runs. */
   addInput(text) { return this.#add ? this.#add(text) : false; }
+  /** After a prompt's run: the added words it took but ended before answering (max turns, an error), as given. */
+  unanswered() { return [...this.#early, ...this.#left]; }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
     this.messages.push({ role: 'user', content });
     // Additions before Claude Code has started wait for it (the stream starts when it is first read).
-    this.#early = [];
+    this.#early = []; this.#left = [];
     this.#add = (t) => { this.#early.push(t); return true; };
     return new AgentStream(this.#run(), () => { this.#running = false; });
   }
-  async *#run() {
+  // Nothing runs after this (even when it threw before Claude Code took the additions, which then stay in #early for
+  // unanswered(), R11b-H): an addition is refused, not acknowledged and dropped.
+  async *#run() { try { return yield* this.#session(); } finally { this.#add = null; } }
+  async *#session() {
     const o = this.options;
     const resume = resumeId(this.resume, this.messages);
     // The live block and trimming apply to what's sent, not to the saved history.
@@ -569,6 +631,7 @@ export class ClaudeCodeAgent {
       return yield* claudeCodeLoop(loopMsgs, {
         ...o, resume,
         takeInput: (fn) => { this.#add = fn; if (fn) for (const t of this.#early.splice(0)) fn(t); },
+        onLeft: (l) => { this.#left = l; },
         onSessionId: (id) => { sessionId = id; },
         onRateLimit: o.onRateLimit ?? ((info) => void recordClaudeCodeRateLimit(info).catch(() => {})),
       });

@@ -229,8 +229,9 @@ console.log(JSON.stringify(o));
   nextTurn();
   assert.match(await T('act_in_app').execute({ target: 'Google Chrome', steps: [{ do: 'key', key: 'end' }, { do: 'type', text: 'hello' }] }, {}), /In Google Chrome/, 'moving first, then typing, is fine');
 
-  // R10-11: a screenshot or read of Terminal (no file to check) asks, naming it; a browser page doesn't.
-  reset({ window: { id: 9, app: 'Terminal', title: 'cat ~/.aws/credentials', bounds: [0, 0, 800, 600] } });
+  // R10-11: a screenshot or read of Terminal (no file to check) asks, naming it; a browser page doesn't. (A title that
+  // names a key file, "cat ~/.aws/credentials", is blocked outright since R11g-3.)
+  reset({ window: { id: 9, app: 'Terminal', title: 'ssh prod — zsh', bounds: [0, 0, 800, 600] } });
   await assert.rejects(T('take_screenshot').execute({ target: 'Terminal' }, {}), /said no/);
   assert.ok(asks[0].includes('the Terminal window'), asks[0]);
   await assert.rejects(T('read_window').execute({ target: 'Terminal' }, {}), /said no/);

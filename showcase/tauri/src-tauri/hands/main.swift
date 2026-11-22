@@ -63,6 +63,12 @@ func appMatches(_ app: String, _ want: String) -> Bool {
     let a = app.lowercased()
     return a == w || a.contains(w) || w.contains(a)
 }
+/// The running app 'app:X' brings forward when none of its windows is on screen: one named X itself first, then the
+/// fuzzy match (as manage picks it). "Photos" is Photos, not Adobe Photoshop 2025 running before it (R11i-1).
+func pickRunning(_ names: [String], _ want: String) -> Int? {
+    let w = want.lowercased().trimmingCharacters(in: .whitespaces)
+    return names.firstIndex { $0.lowercased() == w } ?? names.firstIndex { appMatches($0, want) }
+}
 
 /// Resolves a target to a window. "front" = the frontmost app that isn't Roamies.
 func resolve(_ target: String) -> Win? {
@@ -113,7 +119,9 @@ func resolveWin(_ target: String) -> Win? {
         let name = String(target.dropFirst(4))
         if let w = mainWindow(all.filter { appMatches($0.app, name) }) { return w }
         // Running but no visible window (hidden or minimised): bring it forward and look again.
-        if let app = NSWorkspace.shared.runningApplications.first(where: { appMatches($0.localizedName ?? "", name) }) {
+        let running = NSWorkspace.shared.runningApplications
+        if let i = pickRunning(running.map { $0.localizedName ?? "" }, name) {
+            let app = running[i]
             app.unhide()
             app.activate(options: [.activateAllWindows])
             Thread.sleep(forTimeInterval: 0.6)
@@ -124,8 +132,10 @@ func resolveWin(_ target: String) -> Win? {
 }
 
 func winInfo(_ w: Win) -> [String: Any] { ["id": w.id, "app": w.app, "title": w.title, "bounds": [Int(w.x), Int(w.y), Int(w.w), Int(w.h)]] }
-/// winInfo plus what the window shows (its file, its address): for every result that carries the window's text or picture.
-func winShows(_ w: Win) -> [String: Any] { winInfo(w).merging(shows(w)) { a, _ in a } }
+/// winInfo plus what the window shows (its file, its address): for every result that carries the window's text or picture,
+/// and for the windows the sidecar checks before it reads any (windows, locate). url: false leaves out a browser's
+/// address (a walk of its window), so the whole window list stays cheap.
+func winShows(_ w: Win, url: Bool = true) -> [String: Any] { winInfo(w).merging(shows(w, url: url)) { a, _ in a } }
 /// The file a window's document is (AXDocument, a file URL), as a path; nil for none.
 func documentPath(_ win: AXUIElement) -> String? {
     guard let d = str(win, "AXDocument") ?? (attr(win, "AXDocument") as? URL)?.absoluteString, let u = URL(string: d), u.isFileURL else { return nil }
@@ -144,13 +154,13 @@ func browserURL(_ win: AXUIElement) -> String? {
 }
 /// What a window shows that the sidecar checks like a file read before any of it reaches the model: its document's
 /// file ("document") and, in a browser, its address ("url": a file:// page is a file).
-func shows(_ w: Win) -> [String: Any] {
+func shows(_ w: Win, url: Bool = true) -> [String: Any] {
     let ax = AXUIElementCreateApplication(w.pid)
     AXUIElementSetMessagingTimeout(ax, 0.25)
     guard let win = axWindow(ax, w) else { return [:] }
     var o: [String: Any] = [:]
     if let d = documentPath(win) { o["document"] = d }
-    if BROWSERS.contains(w.app), let u = browserURL(win) { o["url"] = u }
+    if url, BROWSERS.contains(w.app), let u = browserURL(win) { o["url"] = u }
     return o
 }
 /// The files open in the plan's window and in its app's focused window (keys go there): typing, keys and saving in
@@ -1849,6 +1859,8 @@ case "--self-test":
     check("a titled small window in front is kept", mainWindow([win(1, "Export", 300, 200), win(2, "Doc", 1800, 1066)])?.id == 1)
     check("a sizeable untitled window in front is kept", mainWindow([win(1, "", 900, 600), win(2, "Doc", 1800, 1066)])?.id == 1)
     check("an app with only a small window still has it", mainWindow([win(1, "", 183, 88)])?.id == 1)
+    check("app:Photos brings Photos forward, not Adobe Photoshop running before it", pickRunning(["Adobe Photoshop 2025", "Photos"], "Photos") == 1)
+    check("a part of the name still finds its app", pickRunning(["Finder", "Google Chrome"], "chrome") == 1 && pickRunning(["Finder"], "Notes") == nil)
     let main = Win(id: 2, pid: 1, app: "CapCut", title: "CapCut", x: 0, y: 39, w: 1800, h: 1066), badge = Win(id: 1, pid: 1, app: "CapCut", title: "", x: 1625, y: 1029, w: 183, h: 88)
     check("a capture that also shows a child window maps over both", shotArea(main, [badge, main], [1568, 935]) == CGRect(x: 0, y: 39, width: 1808, height: 1078))
     check("a capture of the window alone maps over the window", shotArea(main, [badge, main], [1568, 929]) == nil)
@@ -2006,7 +2018,13 @@ case "trusted":
 
 case "windows":
     let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    out(["ok": true, "windows": windows().prefix(30).map { var i = winInfo($0); if $0.pid == front { i["frontApp"] = true }; return i }])
+    // Each window's file too (R11f-3): a key file open in an editor is blocked, not asked about as a window with no file.
+    // No browser addresses here (a walk per browser window), so the list stays cheap: the sidecar reads each browser
+    // window's own with locate before draw reads it (R11g-2), so a file:// key file there is blocked too.
+    // windows all: every one, not the first 30, and says so (R11h-3): the sidecar checks each window on the whole screen
+    // before draw reads its words or pixels, and reads none when a list may have left some out.
+    let every = args.count >= 2 && args[1] == "all", list = windows()
+    out(["ok": true, "all": every, "windows": (every ? list : Array(list.prefix(30))).map { var i = winShows($0, url: false); if $0.pid == front { i["frontApp"] = true }; return i }])
 
 // Where the user is right now, for each message's live state: the app in front (never Roamies), its focused
 // window's title, and for a browser the page's address. Accessibility for the title and address; the window list
@@ -2035,7 +2053,7 @@ case "locate":
     guard args.count >= 2 else { fail("usage: locate <target>") }
     if args[1] == "screen" { out(["ok": true, "what": "screen"]) }
     guard let w = resolve(args[1]) else { fail("No matching window is open\(args[1].hasPrefix("app:") ? " for \(args[1].dropFirst(4))" : "").") }
-    out(["ok": true, "window": winInfo(w)])
+    out(["ok": true, "window": winShows(w)])
 
 case "capture":
     // capture <out> <target> [max]: with max, the image is shrunk here to at most max px on its long side
