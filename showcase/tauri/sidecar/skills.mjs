@@ -59,6 +59,13 @@ export function readSkill(name) {
   try { return { slug, path: fileOf(slug), ...parseSkillFile(readFileSync(fileOf(slug), 'utf8'), slug) }; } catch { return null; }
 }
 
+/** Whether a skill by that name is there in any form (its folder), even one whose SKILL.md doesn't read: saving over
+ *  it would replace what's there, a hand-edited file included. */
+export function skillExists(name) {
+  const slug = slugOf(name);
+  return !!slug && existsSync(path.join(SKILLS_DIR, slug));
+}
+
 /** Creates or replaces a skill. Throws (with a reason fit to pass on) when it's empty, too big, unsafe or one too many. */
 export async function saveSkill({ name, description, steps }) {
   const slug = slugOf(name);

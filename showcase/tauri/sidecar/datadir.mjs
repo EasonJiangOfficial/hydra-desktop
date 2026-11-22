@@ -68,9 +68,9 @@ function verify(files, tmp) {
 }
 
 // The whole ~/Roamies tree, as [from, relative, kind] (kind: 'dir', 'file' or 'link'); Data/models is renamed across
-// afterwards instead. A symlink is copied as the same symlink (never followed, never dropped); anything else odd (a
-// socket, a fifo) fails the move, so nothing is ever left behind silently.
-function treePlan(from) {
+// afterwards instead. A symlink is copied as the same symlink (never followed, never dropped); a socket or fifo (a
+// running program's, not data) is left behind with a log line.
+function treePlan(from, log = () => {}) {
   const out = [];
   const walk = (dir, rel) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -79,7 +79,7 @@ function treePlan(from) {
       if (e.isSymbolicLink()) out.push([src, r, 'link']);
       else if (e.isDirectory()) { out.push([src, r, 'dir']); walk(src, r); }
       else if (e.isFile()) out.push([src, r, 'file']);
-      else throw new Error(`${r} is not a file, folder or link`);
+      else log(`left ${r} behind: not a file, folder or link (a socket or pipe some program made while running)`);
     }
   };
   walk(from, '');
@@ -96,20 +96,44 @@ function verifyTree(files, tmp) {
   }
 }
 
-// Whether ~/Roamies may hold data the copy doesn't: never marked moved, or written to after it was (an older Hydra
-// kept running and saving there). Looked at in Data/ only, newest change first found.
-function olderThere(from) {
-  let moved;
-  try { moved = statSync(path.join(from, 'MOVED.txt')).mtimeMs; } catch { return true; }
-  const newer = (dir, depth) => {
+// Removes a folder even when it holds read-only folders (a copy that got its original modes back).
+function forceRm(p) {
+  const open = (d) => { try { chmodSync(d, 0o700); for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory() && !e.isSymbolicLink()) open(path.join(d, e.name)); } catch {} };
+  open(p);
+  rmSync(p, { recursive: true, force: true });
+}
+
+// Every regular file and link in a tree (Data/models and MOVED.txt aside), as relative paths.
+function treeFiles(root) {
+  const out = [];
+  const walk = (dir, rel) => {
     for (const e of (() => { try { return readdirSync(dir, { withFileTypes: true }); } catch { return []; } })()) {
-      const p = path.join(dir, e.name);
-      try { if (lstatSync(p).mtimeMs > moved + 1000) return true; } catch {}
-      if (e.isDirectory() && depth < 3 && newer(p, depth + 1)) return true;
+      if (e.name === '.DS_Store' || (!rel && e.name === 'MOVED.txt') || (rel === 'Data' && e.name === 'models')) continue;
+      const r = rel ? path.join(rel, e.name) : e.name;
+      if (e.isDirectory() && !e.isSymbolicLink()) walk(path.join(dir, e.name), r); else out.push(r);
     }
-    return false;
   };
-  return newer(path.join(from, 'Data'), 0);
+  walk(root, '');
+  return out;
+}
+
+// Whether ~/Roamies may hold data ~/HydraAgent doesn't. Marked moved: a file changed after the mark (an older Hydra
+// kept running and saving there). Not marked: a file the copy lacks or holds at another size. The whole tree is read.
+// Same data and no MOVED.txt (a crash right after the switch): it is marked now, and nothing is reported.
+function olderThere(from, to) {
+  let moved = null;
+  try { moved = statSync(path.join(from, 'MOVED.txt')).mtimeMs; } catch {}
+  for (const r of treeFiles(from)) {
+    let a, b;
+    try { a = lstatSync(path.join(from, r)); } catch { continue; }
+    // Marked moved: only a change after the mark counts (the copy is the live one and changes on its own).
+    if (moved != null) { if (a.mtimeMs > moved + 1000) return true; continue; }
+    // Not marked: the copy must hold every file, the same size.
+    try { b = lstatSync(path.join(to, r)); } catch { return true; }
+    if (a.isFile() && (!b.isFile() || a.size !== b.size)) return true;
+  }
+  if (moved == null) { try { writeFileSync(path.join(from, 'MOVED.txt'), `Hydra now keeps everything in ${to}.\n\nThis folder is the copy from before the move, kept in case you go back to an older version.\nYou can delete it.\n`); } catch {} }
+  return false;
 }
 
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -118,24 +142,30 @@ const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
  *  place in one step. One process at a time (a lock file); one that finds the move done by another adopts it.
  *  { ok }: ~/HydraAgent is the one to use. { older }: both are there and ~/Roamies was never marked moved (data in it
  *  may be newer than the copy: the panel says where it is). */
-export function moveRoot({ base = baseDir(), log = (m) => console.error(`[datadir] ${m}`), afterCopy, waitMs = 15_000 } = {}) {
+const LOCK_STALE_MS = 10 * 60_000;
+export function moveRoot({ base = baseDir(), log = (m) => console.error(`[datadir] ${m}`), afterCopy, waitMs = 2_000 } = {}) {
   const from = path.join(base, OLD_ROOT_NAME), to = path.join(base, ROOT_NAME), lock = path.join(base, `.${ROOT_NAME}.lock`);
   if (!isDir(from)) return { ok: true };
-  if (existsSync(to)) return { ok: true, older: !existsSync(lock) && olderThere(from) };
-  // The lock: made new (wx), or taken over from a process that's gone; another live one is moving it, so wait for it.
+  if (existsSync(to)) return { ok: true, older: !existsSync(lock) && olderThere(from, to) };
+  // The lock: made new (wx) with this process's id and the time. One older than LOCK_STALE_MS, or whose process is
+  // gone, is taken over (a crashed run's, or one whose id was reused). A fresh one from a live process is moving it
+  // now: wait a little (never long: this is the app starting), then use ~/Roamies for this launch.
   let fd = null;
   for (let tries = 0; fd == null; tries++) {
-    try { fd = openSync(lock, 'wx', 0o600); writeFileSync(fd, String(process.pid)); }
+    try { fd = openSync(lock, 'wx', 0o600); writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() })); }
     catch (e) {
       if (e.code !== 'EEXIST' || tries > 1) { log(`couldn't lock the move (${e.message}), using ${from} for now`); return { ok: false }; }
-      const owner = Number(String((() => { try { return readFileSync(lock, 'utf8'); } catch { return ''; } })()).trim());
-      if (owner && owner !== process.pid && alive(owner)) {
+      let held = null;
+      try { held = JSON.parse(readFileSync(lock, 'utf8')); } catch {}
+      const at = Number(held?.at) || (() => { try { return statSync(lock).mtimeMs; } catch { return 0; } })();
+      const live = held?.pid && held.pid !== process.pid && alive(Number(held.pid)) && Date.now() - at < LOCK_STALE_MS;
+      if (live) {
         for (let t = 0; t < waitMs && existsSync(lock); t += 100) sleepMs(100);
         if (existsSync(to) && !existsSync(lock)) return { ok: true };
-        log(`another Hydra is still moving ${from}; using it for now`);
+        log(`another Hydra is moving ${from}; using it for this launch`);
         return { ok: false };
       }
-      rmSync(lock, { force: true }); // left by a process that's gone
+      rmSync(lock, { force: true }); // stale: a crashed run's, or its process id now belongs to something else
     }
   }
   let tmp = null;
@@ -143,12 +173,12 @@ export function moveRoot({ base = baseDir(), log = (m) => console.error(`[datadi
   try {
     for (const n of readdirSync(base)) {
       const m = ROOT_TMP.exec(n);
-      if (m && (Number(m[1]) === process.pid || !alive(Number(m[1])))) rmSync(path.join(base, n), { recursive: true, force: true });
+      if (m && (Number(m[1]) === process.pid || !alive(Number(m[1])) || Date.now() - statSync(path.join(base, n)).mtimeMs > LOCK_STALE_MS)) forceRm(path.join(base, n));
     }
     tmp = path.join(base, `.${ROOT_NAME}-${process.pid}.tmp`);
     mkdirSync(tmp, { mode: 0o700 });
     modes.push([tmp, statSync(from).mode & 0o777]);
-    const files = treePlan(from);
+    const files = treePlan(from, log);
     for (const [src, rel, kind] of files) {
       const dst = path.join(tmp, rel), st = lstatSync(src);
       // Folders and files are made writable while copying; their own modes go back on at the end (read-only ones too).
@@ -170,10 +200,10 @@ export function moveRoot({ base = baseDir(), log = (m) => console.error(`[datadi
       if (!['ENOTEMPTY', 'EEXIST'].includes(e.code) || !isDir(to)) throw e;
       log(`${to} was finished by another Hydra; using it`);
     }
-    if (existsSync(tmp)) { for (const [p] of modes) { try { chmodSync(p, 0o700); } catch {} } rmSync(tmp, { recursive: true, force: true }); }
+    if (existsSync(tmp)) forceRm(tmp);
     tmp = null;
   } catch (e) {
-    if (tmp) { for (const [p] of modes) { try { chmodSync(p, 0o700); } catch {} } rmSync(tmp, { recursive: true, force: true }); }
+    if (tmp && existsSync(tmp)) forceRm(tmp);
     closeSync(fd); rmSync(lock, { force: true });
     log(`couldn't move ${from} to ${to}, using ${from} for now: ${e.message}`);
     return { ok: false };

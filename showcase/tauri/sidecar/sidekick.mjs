@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import {
-  addFact, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
+  addFact, supersedeFact, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
   touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
@@ -65,7 +65,7 @@ import { detailsText, explain } from './errors.mjs';
 import { aboutHydra } from './about.mjs';
 import { whatsNewOnStart } from './whatsnew.mjs';
 import { createMcp, createMcpTools } from './mcp.mjs';
-import { deleteSkill, listSkills, readSkill, saveSkill, skillIndex } from './skills.mjs';
+import { skillExists, deleteSkill, listSkills, readSkill, saveSkill, skillIndex } from './skills.mjs';
 import { getJob, jobBrief, jobsText, listJobs, markRun, nextJobDue, removeJob, takeDueJobs, updateJob } from './jobs.mjs';
 import { lookLine, lookSeen } from './looknote.mjs';
 import { leanTools } from './lean.mjs';
@@ -1186,9 +1186,11 @@ async function sideRoute() {
 async function learnFacts(facts) {
   const added = [];
   for (const f of facts) {
-    // A correction is added beside the old fact, never in its place: nothing is deleted without the owner's yes
-    // (he forgets the old one himself, or asks Hydra to, which asks first).
-    added.push(await addFact(f.text));
+    // A correction is added and the old fact kept, marked replaced (not used, shown as replaced in Memory): nothing is
+    // deleted without the owner's yes.
+    const nf = await addFact(f.text);
+    if (f.replaces) await supersedeFact(f.replaces, nf.id);
+    added.push(nf);
   }
   if (added.length) menu();
   return added;
@@ -1242,7 +1244,7 @@ async function skillPass(p, why) {
     const k = parseSkill(text);
     if (!k) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false }); return; }
     // The background pass only makes new skills: changing one that exists replaces it, which asks the owner first.
-    if (readSkill(k.name)) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false, skipped: 'exists' }); return; }
+    if (skillExists(k.name)) { logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: false, skipped: 'exists' }); return; }
     const s = await saveSkill(k); // checkSkill and key scrubbing happen here; an unsafe one throws
     activity.learned(s.name, !s.created); panel();
     logLine('skill_learn', { why, model, ms: Date.now() - t0, saved: s.slug, updated: !s.created });
@@ -1293,7 +1295,7 @@ async function lessonPass(r, correction) {
     const out = parseLesson(text, { knownIds: facts.map((f) => f.id) });
     let skill = null;
     if (out.fact) { await learnFacts([out.fact]); activity.noted(out.fact.text); }
-    if (out.skill && !readSkill(out.skill.name)) {
+    if (out.skill && !skillExists(out.skill.name)) {
       try { const s = await saveSkill(out.skill); activity.learned(s.name, !s.created); skill = s.slug; } // checkSkill runs here
       catch (e) { logLine('lesson_skill_refused', { error: String(e?.message ?? e).slice(0, 300) }); }
     }
@@ -2134,8 +2136,8 @@ async function toggleItem(id) {
 }
 // Finished items stay struck through for the rest of the day; at midnight they're deleted.
 async function midnightClean() {
-  const n = await clearFinished().catch(() => 0);
-  if (n) { menu(); showList(); }
+  // Finished to-dos are kept (hidden from the list after their day), never deleted on their own; only the app's own
+  // logs and usage counts are trimmed.
   pruneLogs(); pruneUsage();
   const next = new Date(); next.setHours(24, 0, 5, 0);
   setTimeout(midnightClean, Math.min(next.getTime() - Date.now(), 6 * 3600_000));
@@ -2283,7 +2285,7 @@ function panelState() {
     loggingIn,
     recent: activity.recent,
     usage: usageToday.requests ? { requests: usageToday.requests, tokens: usageToday.tokens } : null,
-    facts: listFacts().slice().reverse().map((f) => ({ id: f.id, text: f.text })),
+    facts: listFacts().slice().reverse().map((f) => ({ id: f.id, text: f.text, ...(f.supersededBy ? { replaced: true } : {}) })),
     jobs: listJobs().map(jobRow),
     connections: mcp.status(),
     skills: listSkills().map((k) => ({ slug: k.slug, name: k.name, description: k.description })), learnSkills: config.learnSkills !== false,
@@ -3086,7 +3088,7 @@ async function runJob(j, { now = false } = {}) {
 // A row on the Abilities page's Routines tab: when it runs next, how often, and how its last run went.
 function jobRow(j) {
   const a = j.lastAgentId ? agents.get(j.lastAgentId) : null;
-  const last = !j.lastRunAt ? '' : j.lastError ? `Didn't run: ${j.lastError}` : a?.state === 'working' || a?.state === 'waiting' ? 'Running now'
+  const last = !j.lastRunAt ? '' : j.lastError ? `Didn't run: ${j.lastError}` : a?.state === 'waiting' ? 'Waiting for your yes' : a?.state === 'working' ? 'Running now'
     : a?.result?.outcome ? `Last: ${a.result.outcome}` : a?.state === 'failed' ? `Last run failed${a.reason ? `: ${a.reason}` : ''}` : `Last ran ${fmtWhen(j.lastRunAt)}`;
   return { id: j.id, title: j.title, paused: !!j.paused, next: j.paused ? 'Paused' : j.due != null ? fmtWhen(j.due) : 'No next run', repeat: j.repeat ? repeatLabel(j.repeat) : '', last, bad: !!j.lastError || a?.state === 'failed' };
 }

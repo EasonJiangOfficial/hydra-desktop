@@ -87,10 +87,12 @@ export async function pruneSessions() {
   try { names = (await fs.readdir(SESSIONS)).filter((n) => SESSION_FILE.test(n)).sort(); } catch { return; }
   const drop = names.slice(0, Math.max(0, names.length - KEEP_SESSIONS));
   if (!drop.length) return;
-  console.error(`[store] pruning ${drop.length} old session(s), keeping ${KEEP_SESSIONS}`);
+  // Kept, not deleted (owner: nothing of his is deleted without his yes): older chats move to sessions/archive.
+  console.error(`[store] archiving ${drop.length} old session(s), keeping ${KEEP_SESSIONS} at hand`);
+  const archive = path.join(SESSIONS, 'archive');
+  await fs.mkdir(archive, { recursive: true, mode: 0o700 }).catch(() => {});
   for (const n of drop) {
-    await fs.unlink(path.join(SESSIONS, n)).catch(() => {});
-    await fs.unlink(path.join(SESSIONS, n.replace(/\.json$/, '.folded.jsonl'))).catch(() => {});
+    for (const f of [n, n.replace(/\.json$/, '.folded.jsonl')]) await fs.rename(path.join(SESSIONS, f), path.join(archive, f)).catch(() => {});
   }
 }
 
@@ -492,7 +494,7 @@ export async function addFact(text) {
   if (same) { same.updatedAt = Date.now(); await saveMemory(); return same; }
   const f = { id: newId('f'), text: t, createdAt: Date.now() };
   facts.push(f);
-  if (facts.length > FACT_CAP) facts.splice(0, facts.length - FACT_CAP); // oldest go first
+  // No cap that deletes: every fact stays until the owner forgets it (pickFacts keeps the prompt small).
   await saveMemory();
   return f;
 }
@@ -502,7 +504,7 @@ export async function addFact(text) {
 const STOP = new Set('the a an and or but to of in on at for with is are was were be it this that my me i you your his her its our their what how when where why can do does just like about from have has had will would should could not no yes so if then than'.split(' '));
 const words = (t) => new Set(String(t).toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((w) => !STOP.has(w)) ?? []);
 export function pickFacts(context = '', limit = 40) {
-  const facts = loadMemory().facts;
+  const facts = loadMemory().facts.filter((f) => !f.supersededBy); // replaced ones are kept, never used
   if (facts.length <= limit) return facts.slice();
   const ctx = words(context), byNew = facts.slice().sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt));
   const chosen = new Set(byNew.slice(0, 8).map((f) => f.id));
@@ -525,6 +527,15 @@ export async function clearFacts() {
   memory.facts = [];
   await saveMemory();
   return n;
+}
+
+/** A newer fact corrects an older one: the old one is kept (only the owner deletes), marked replaced, never used. */
+export async function supersedeFact(oldId, newId) {
+  const f = loadMemory().facts.find((x) => x.id === oldId);
+  if (!f || f.id === newId) return null;
+  f.supersededBy = newId; f.supersededAt = Date.now();
+  await saveMemory();
+  return f;
 }
 
 export async function forgetFact(id) {

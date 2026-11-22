@@ -39,5 +39,5 @@ assert.equal(asked.length, 0, 'ticking one off needs no yes');
 const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
 assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx\)\)/);
 assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?`, ctx\)/);
-assert.match(src, /readSkill\(args\.name\) && !\(await confirm\(`Replace the skill/, 'saving over a skill asks (second review M8)');
+assert.match(src, /skillExists\(args\.name\) && !\(await confirm\(`Replace the skill/, 'saving over a skill asks (second review M8)');
 console.log('memory deletes ask: passed');

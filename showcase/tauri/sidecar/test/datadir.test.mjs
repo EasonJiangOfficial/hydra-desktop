@@ -198,11 +198,11 @@ console.log('datadir tests: passed');
   const home = path.join(TMP, `rename${n++}`), R = path.join(home, 'Roamies');
   fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
   // A live process holds the lock: this one waits, then keeps using ~/Roamies rather than moving at the same time.
-  fs.writeFileSync(path.join(home, '.HydraAgent.lock'), String(process.ppid));
+  fs.writeFileSync(path.join(home, '.HydraAgent.lock'), JSON.stringify({ pid: process.ppid, at: Date.now() }));
   assert.equal(moveRoot({ base: home, log: () => {}, waitMs: 300 }).ok, false, 'never two moves at once');
   assert.ok(!fs.existsSync(path.join(home, 'HydraAgent')));
   // A lock left by a process that's gone is taken over.
-  fs.writeFileSync(path.join(home, '.HydraAgent.lock'), '999999999');
+  fs.writeFileSync(path.join(home, '.HydraAgent.lock'), JSON.stringify({ pid: 999999999, at: Date.now() }));
   assert.equal(moveRoot({ base: home, log: () => {} }).ok, true, 'a stale lock is taken over');
   assert.ok(fs.existsSync(path.join(home, 'HydraAgent', 'Data', 'memory.json')));
 }
@@ -218,6 +218,7 @@ console.log('datadir tests: passed');
 {
   const home = path.join(TMP, `rename${n++}`);
   fs.mkdirSync(path.join(home, 'Roamies', 'Data'), { recursive: true }); fs.mkdirSync(path.join(home, 'HydraAgent', 'Data'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Roamies', 'Data', 'memory.json'), memory); // only in the old one
   const p = migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} });
   assert.equal(p.root, path.join(home, 'HydraAgent'), 'both there: HydraAgent is used');
   assert.equal(p.older, true, 'and the panel is told older data sits in Roamies');
@@ -227,5 +228,53 @@ console.log('datadir tests: passed');
   const later = (Date.now() + 5000) / 1000;
   fs.writeFileSync(path.join(home, 'Roamies', 'Data', 'memory.json'), memory); fs.utimesSync(path.join(home, 'Roamies', 'Data', 'memory.json'), later, later);
   assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).older, true, 'written to after the move');
+}
+// Third review: a lock whose process id now belongs to a live process (pid 1), or an old-format or hours-old lock,
+// is taken over at once, without a long wait; sockets are left behind with a log line; a crash between the switch and
+// MOVED.txt reports nothing when the data is the same; a read-only leftover copy is cleaned up.
+{
+  const { moveRoot } = await import('../datadir.mjs');
+  for (const lock of ['1', JSON.stringify({ pid: 1, at: Date.now() - 3600_000 }), JSON.stringify({ pid: process.ppid, at: Date.now() - 3600_000 })]) {
+    const home = path.join(TMP, `rename${n++}`), R = path.join(home, 'Roamies');
+    fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
+    fs.writeFileSync(path.join(home, '.HydraAgent.lock'), lock);
+    const t0 = Date.now();
+    assert.equal(moveRoot({ base: home, log: () => {} }).ok, true, `lock ${lock} is taken over`);
+    assert.ok(Date.now() - t0 < 1500, 'without waiting');
+  }
+}
+{
+  const { moveRoot } = await import('../datadir.mjs');
+  const net = await import('node:net');
+  const home = path.join(TMP, `r${n++}`), R = path.join(home, 'Roamies');
+  fs.mkdirSync(path.join(R, 'Data'), { recursive: true }); fs.writeFileSync(path.join(R, 'Data', 'memory.json'), memory);
+  const sock = path.join(R, 'Data', 's.sock'), srv = net.createServer().listen(sock);
+  await new Promise((r) => srv.on('listening', r));
+  const logs = [];
+  assert.equal(moveRoot({ base: home, log: (m) => logs.push(m) }).ok, true, 'a socket does not stop the move');
+  assert.ok(logs.some((m) => /left Data\/s\.sock behind/.test(m)), 'it is named in the log');
+  srv.close();
+  // Leftover copy with a read-only folder: cleaned up on the next try.
+  const h2 = path.join(TMP, `r${n++}`);
+  fs.mkdirSync(path.join(h2, 'Roamies', 'Data'), { recursive: true }); fs.writeFileSync(path.join(h2, 'Roamies', 'Data', 'memory.json'), memory);
+  const left = path.join(h2, '.HydraAgent-999999999.tmp', 'Agents', 'ro');
+  fs.mkdirSync(left, { recursive: true }); fs.writeFileSync(path.join(left, 'f'), 'x'); fs.chmodSync(left, 0o555);
+  assert.equal(moveRoot({ base: h2, log: () => {} }).ok, true);
+  assert.ok(!fs.existsSync(path.join(h2, '.HydraAgent-999999999.tmp')), 'a read-only leftover copy is removed');
+}
+{
+  const home = path.join(TMP, `r${n++}`), R = path.join(home, 'Roamies'), H = path.join(home, 'HydraAgent');
+  for (const root of [R, H]) { fs.mkdirSync(path.join(root, 'Data'), { recursive: true }); fs.writeFileSync(path.join(root, 'Data', 'memory.json'), memory); }
+  const p = migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} });
+  assert.equal(p.older, false, 'same data, no MOVED.txt (a crash after the switch): nothing to report');
+  assert.ok(fs.existsSync(path.join(R, 'MOVED.txt')), 'and the old folder is marked now');
+  // Data changes in the new folder (the app is running there): still nothing to report.
+  fs.writeFileSync(path.join(H, 'Data', 'memory.json'), memory + ' ');
+  assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).older, false);
+  // A file anywhere in the old tree changed after the mark: reported.
+  fs.mkdirSync(path.join(R, 'Agents'), { recursive: true });
+  const later = (Date.now() + 5000) / 1000;
+  fs.writeFileSync(path.join(R, 'Agents', 'late.md'), 'x'); fs.utimesSync(path.join(R, 'Agents', 'late.md'), later, later);
+  assert.equal(migrateData({ base: home, old: path.join(home, '.gg'), log: () => {} }).older, true, 'the whole tree is looked at');
 }
 console.log('folder rename tests: passed');
