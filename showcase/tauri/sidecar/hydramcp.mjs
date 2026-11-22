@@ -8,6 +8,7 @@
 //   that id. Never an auto-yes.
 // - showTool: the agent's way to move the Hydra window (the server's UiAction shape).
 import { z } from 'zod';
+import { LIMITS, PANEL_PARAMS, SCOPES, uiActionSchema } from './relayschema.mjs';
 
 export const HYDRA_ORIGIN = 'https://hydra-olive-one.vercel.app';
 export const PREFIX = 'hydra_';
@@ -70,10 +71,11 @@ export function needsApproval(res) {
   return null;
 }
 // Hydra's gate doesn't say how dangerous a call is yet: deleting, removing, paying, sending and cancelling are.
-const DANGER = /delete|remove|trash|cancel|pay|send|transfer|archive|unpair|revoke/i;
+export const DANGER = /delete|remove|trash|cancel|pay|send|transfer|archive|unpair|revoke/i;
 
 /** Polls the relay's approval endpoint until the owner answers: 'approved', 'declined' or 'expired'. */
-export async function waitApproval(api, id, { signal, every = 2000, maxMs = 16 * 60_000, sleep = delay } = {}) {
+// Until Hydra says the approval expired (15 min for a live turn, 24 h for a routine's: W3 contract-fixes 5).
+export async function waitApproval(api, id, { signal, every = 2000, maxMs = 25 * 3600_000, sleep = delay } = {}) {
   const until = Date.now() + maxMs;
   while (Date.now() < until) {
     if (signal?.aborted) return 'expired';
@@ -142,28 +144,32 @@ export function createHydraTools({ api, log = () => {} }) {
   };
 }
 
+// The shared limits on what the Mac may show (W3 contract-fixes 2): relayschema.mjs is the server's
+// src/lib/agent/relay-schema.ts, copied verbatim.
+export { PANEL_PARAMS, SCOPES, uiActionSchema };
+
 /** The agent moves the Hydra window: a page, a panel, the scope, or a highlight (the server's UiAction shape). */
 export function showTool({ onUi }) {
   return {
     name: 'hydra_show',
-    description: 'Show something in the Hydra app window: navigate to a page (href is a path like /money or /planning?day=2026-11-21), open a panel (param and value, as in ?tx=<id>), switch the scope (all, personal or ugc), or highlight an element (a CSS selector).',
+    description: `Show something in the Hydra app window: navigate to a page (href is a path like /money or /planning?day=2026-11-21), open a panel (param one of ${PANEL_PARAMS.join(', ')}; value its id), switch the scope (all, personal or ugc), or highlight an element (a CSS selector).`,
     parameters: z.object({
       kind: z.enum(['navigate', 'openPanel', 'setScope', 'highlight']),
-      href: z.string().max(500).optional(), param: z.string().max(40).optional(), value: z.string().max(200).optional(),
-      scope: z.enum(['all', 'personal', 'ugc']).optional(), selector: z.string().max(300).optional(),
+      href: z.string().max(LIMITS.href).optional(), param: z.enum(PANEL_PARAMS).optional(), value: z.string().max(LIMITS.panelValue).optional(),
+      scope: z.enum(SCOPES).optional(), selector: z.string().max(LIMITS.selector).optional(),
     }),
     execute: async (a) => {
       const action = toUiAction(a);
-      if (!action) throw new Error('That is not something the Hydra window can show. navigate needs a path starting with /, openPanel a param and value, setScope a scope, highlight a selector.');
+      if (!action) throw new Error('That is not something the Hydra window can show. navigate needs a path starting with / (no spaces), openPanel a param and an id of letters, digits, _ or -, setScope a scope, highlight a selector up to 200 characters.');
       onUi(action);
       return 'Shown.';
     },
   };
 }
+/** The action in the server's exact shape, or null when the server would refuse it. */
 export function toUiAction(a) {
-  if (a?.kind === 'navigate') return typeof a.href === 'string' && a.href.startsWith('/') && !a.href.startsWith('//') ? { kind: 'navigate', href: a.href } : null;
-  if (a?.kind === 'openPanel') return a.param && a.value ? { kind: 'openPanel', param: a.param, value: a.value } : null;
-  if (a?.kind === 'setScope') return ['all', 'personal', 'ugc'].includes(a.scope) ? { kind: 'setScope', scope: a.scope } : null;
-  if (a?.kind === 'highlight') return a.selector ? { kind: 'highlight', selector: a.selector } : null;
-  return null;
+  const k = a?.kind;
+  const v = k === 'navigate' ? { kind: k, href: a.href } : k === 'openPanel' ? { kind: k, param: a.param, value: a.value }
+    : k === 'setScope' ? { kind: k, scope: a.scope } : k === 'highlight' ? { kind: k, selector: a.selector } : null;
+  return v && uiActionSchema.safeParse(v).success ? v : null;
 }

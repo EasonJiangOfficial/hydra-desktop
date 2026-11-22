@@ -25,9 +25,9 @@ const run = (_cmd, args) => {
   c.stdin = { end: (t) => { said.push(t); fs.writeFileSync(args[args.indexOf('-o') + 1], wav(10)); setImmediate(() => c.emit('close', 0)); } };
   return c;
 };
-const speak = (text) => new Promise((resolve, reject) => {
+const speak = (text, voice = null) => new Promise((resolve, reject) => {
   const got = [];
-  const v = new HydraVoice({ run, tmp, onAudio: (pcm, rate) => got.push([pcm.length, rate]), onEnd: () => resolve(got), onError: (e) => reject(new Error(e.message)) });
+  const v = new HydraVoice({ voice, run, tmp, onAudio: (pcm, rate) => got.push([pcm.length, rate]), onEnd: () => resolve(got), onError: (e) => reject(new Error(e.message)) });
   v.convert = async (from, to) => { assert.ok(fs.readFileSync(from).length > 0, 'the MP3 was saved'); fs.writeFileSync(to, wav(20)); };
   v.say(text); v.end();
 });
@@ -56,6 +56,10 @@ status = 200;
 assert.deepEqual(await speak('Four.'), [[20, SYSTEM_RATE]]);
 assert.equal(reqs.length, before + 1, 'after a 503 the server rests');
 HydraVoice.resetForTests();
+// A Mac voice the owner picked: his voice, the server isn't asked.
+const m = reqs.length;
+assert.deepEqual(await speak('Picked.', 'Samantha'), [[20, SYSTEM_RATE]]);
+assert.equal(reqs.length, m, 'a picked Mac voice stays his pick');
 // Not paired: the Mac's voice, no request.
 paired = false;
 const n = reqs.length;

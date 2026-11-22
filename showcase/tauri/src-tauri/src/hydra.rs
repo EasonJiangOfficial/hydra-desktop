@@ -133,22 +133,27 @@ const BRIDGE_JS: &str = r#"(() => {
   const T = '__HYDRA_TOKEN__';
   let snap = { state: 'Asleep', micLevel: 0, outputLevel: 0, detached: false, muted: false, paused: false, reply: null, heard: null, ui: null };
   const subs = new Set(), waiting = new Map();
-  let n = 0;
-  // Each call is its own hidden frame's navigation, caught and cancelled by the app (hydra.rs), so calls made one
-  // right after another never replace each other the way two location changes in a row would.
-  const call = (cmd, extra = '') => {
-    const f = document.createElement('iframe');
-    f.hidden = true;
-    f.src = 'hydra-desktop://' + cmd + '?t=' + T + extra;
-    (document.body || document.documentElement).appendChild(f);
-    setTimeout(() => f.remove(), 3000);
+  // Request ids start at a random point on each page load, so an answer meant for the page before a reload never
+  // resolves a call on this one (they stay 9 digits, as the app checks).
+  let n = Math.floor(Math.random() * 4e8);
+  // Every call is a top-level navigation to hydra-desktop://, caught and cancelled by the app (hydra.rs). The page's
+  // CSP doesn't govern top-level navigations (it would block a frame). They go one at a time with a short gap, so two
+  // calls in a row never replace each other.
+  const queue = [];
+  let sending = false;
+  const pump = () => {
+    if (sending || !queue.length) return;
+    sending = true;
+    location.href = queue.shift();
+    setTimeout(() => { sending = false; pump(); }, 80);
   };
+  const call = (cmd, extra = '', id = ++n) => { queue.push('hydra-desktop://' + cmd + '?t=' + T + '&id=' + id + extra); pump(); };
   // A call with an answer: the app replies through __hydraDesktopPush({ res: { id, result } }).
   const ask = (cmd, extra = '', ms = 180000) => new Promise((resolve, reject) => {
     const id = ++n;
     const t = setTimeout(() => { waiting.delete(id); reject(new Error('Hydra Desktop did not answer')); }, ms);
     waiting.set(id, (r) => { clearTimeout(t); resolve(r); });
-    call(cmd, '&id=' + id + extra);
+    call(cmd, extra, id);
   });
   Object.defineProperty(window, 'hydraDesktop', { value: Object.freeze({
     version: 3,
@@ -268,6 +273,13 @@ pub fn navigate(app: &AppHandle, link: &str) {
     }
 }
 
+/// The relay's shared limits (Hydra's src/lib/agent/relay-schema.ts): the panels a UI action may open, and a path
+/// inside Hydra (one leading slash, no host, no whitespace, backslash or control character, at most 500).
+const PANEL_PARAMS: [&str; 9] = ["tx", "day", "account", "task", "goal", "deal", "category", "routine", "taxline"];
+fn is_internal_href(h: &str) -> bool {
+    h.len() <= 500 && h.starts_with('/') && !h.starts_with("//") && !h.starts_with("/\\") && !h.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+}
+
 /// What may go to the page from the app: the orb's state and levels, attached or not (version 2); muted, paused, the
 /// reply being spoken, the words heard, a UI action and a promise call's answer (version 3). Anything else is dropped.
 pub fn clean_push(msg: &Value) -> Option<Value> {
@@ -299,10 +311,11 @@ pub fn clean_push(msg: &Value) -> Option<Value> {
     if let Some(a) = msg.get("ui").filter(|a| a.is_object()) {
         let s = |k: &str| a.get(k).and_then(Value::as_str).filter(|v| v.len() <= 2000);
         let ok = match s("kind") {
-            Some("navigate") => s("href").is_some_and(|h| h.starts_with('/') && !h.starts_with("//")).then(|| json!({ "kind": "navigate", "href": s("href") })),
-            Some("openPanel") => s("param").zip(s("value")).map(|(p, v)| json!({ "kind": "openPanel", "param": p, "value": v })),
+            Some("navigate") => s("href").filter(|h| is_internal_href(h)).map(|h| json!({ "kind": "navigate", "href": h })),
+            Some("openPanel") => s("param").filter(|p| PANEL_PARAMS.contains(p)).zip(s("value").filter(|v| (1..=100).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')))
+                .map(|(p, v)| json!({ "kind": "openPanel", "param": p, "value": v })),
             Some("setScope") => s("scope").filter(|v| ["all", "personal", "ugc"].contains(v)).map(|v| json!({ "kind": "setScope", "scope": v })),
-            Some("highlight") => s("selector").map(|v| json!({ "kind": "highlight", "selector": v })),
+            Some("highlight") => s("selector").filter(|v| (1..=200).contains(&v.chars().count())).map(|v| json!({ "kind": "highlight", "selector": v })),
             _ => None,
         };
         if let Some(mut v) = ok {
@@ -431,9 +444,12 @@ mod tests {
         }
         let js = bridge_js(t);
         for f in ["stop: () => call('stop')", "pause: () => call('pause')", "resume: () => call('resume')", "setMuted: (muted)", "setup: () => ask('setup')",
-            "pair: (code)", "signInClaude: ()", "requestPermission: (kind)", "unpair: ()", "if (m && m.res)", "muted: false, paused: false, reply: null, heard: null, ui: null"] {
+            "pair: (code)", "signInClaude: ()", "requestPermission: (kind)", "unpair: ()", "if (m && m.res)", "muted: false, paused: false, reply: null, heard: null, ui: null",
+            "location.href = queue.shift()", "'&id=' + id"] {
             assert!(js.contains(f), "the page script has {f}");
         }
+        // Top-level navigations (CSP doesn't block them), never a frame (frame-src would).
+        assert!(!js.contains("iframe"), "no frame transport");
     }
 
     #[test]
@@ -454,6 +470,14 @@ mod tests {
         assert_eq!(p(json!({ "ui": { "kind": "setScope", "scope": "ugc" } })), Some(json!({ "ui": { "kind": "setScope", "scope": "ugc", "at": 0 } })));
         assert_eq!(p(json!({ "ui": { "kind": "setScope", "scope": "work" } })), None);
         assert_eq!(p(json!({ "ui": { "kind": "openPanel", "param": "tx", "value": "abc" } })), Some(json!({ "ui": { "kind": "openPanel", "param": "tx", "value": "abc", "at": 0 } })));
+        // The relay's shared limits: known panels, plain ids, plain paths, short selectors.
+        assert_eq!(p(json!({ "ui": { "kind": "openPanel", "param": "wallet", "value": "abc" } })), None, "unknown panel");
+        assert_eq!(p(json!({ "ui": { "kind": "openPanel", "param": "tx", "value": "a b" } })), None, "ids are letters, digits, _ and -");
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/a b" } })), None, "no whitespace");
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/\\evil.com" } })), None, "no backslash");
+        assert_eq!(p(json!({ "ui": { "kind": "navigate", "href": "/a\u{7}" } })), None, "no control characters");
+        assert_eq!(p(json!({ "ui": { "kind": "highlight", "selector": "x".repeat(201) } })), None, "selectors up to 200");
+        assert!(p(json!({ "ui": { "kind": "highlight", "selector": "#total" } })).is_some());
         assert_eq!(p(json!({ "ui": { "kind": "eval", "code": "x" } })), None);
         assert_eq!(p(json!({ "res": { "id": 9, "result": { "ok": true } }, "state": "Asleep" })), Some(json!({ "res": { "id": 9, "result": { "ok": true } } })), "an answer goes alone");
         assert_eq!(p(json!({ "res": { "id": "9" } })), None);

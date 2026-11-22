@@ -296,11 +296,12 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         // The words as they're recognised, for the Hydra window's orb card too (bridge v3: heard).
         Some("partial") => {
             to_overlays(app, &ui);
-            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": false } }));
+            // The owner talks again: a new turn, so the last reply clears (W3 contract-fixes 10).
+            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": false }, "reply": Value::Null }));
         }
         Some("final") => {
             to_overlays(app, &ui);
-            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": true } }));
+            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": true }, "reply": Value::Null }));
             // area: the part of the screen marked with the pen while talking (a PNG, its rect and the strokes).
             to_sidecar(app, &json!({ "type": "voice", "text": msg.get("text"), "area": msg.get("area"), "ms": msg.get("ms"), "via": msg.get("via") }));
         }

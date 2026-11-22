@@ -563,8 +563,9 @@
     // The accounts, then each local server (Ollama, LM Studio, the ones added) and the Add a server row.
     const servers = state.localServers ?? [];
     if (ui.addSent != null && servers.length > ui.addSent) { ui.addSent = null; ui.add = { label: '', url: '', key: '', images: false }; if (ui.key === ADD) ui.key = null; }
-    // Hydra Desktop runs on Claude only (the owner's Claude login): the one account is Sign in with Claude.
-    const accounts = state.providers.filter((p) => p.id === 'anthropic');
+    // Hydra Desktop runs on Claude only (the owner's Claude login): the one account to sign in to is Claude. Another
+    // provider still signed in or with a saved key shows only so it can be removed.
+    const accounts = state.providers.filter((p) => p.id === 'anthropic' || p.on);
     const { box, nav } = paged('accounts', accounts, (p) => (p.add ? addServerRow() : p.server ? serverRow(p) : el('li', { className: `acct${ui.key === p.id ? ' open' : ''}` },
       el('div', { className: 'setting' },
         // Connected: a lit dot by the name, its word in a tooltip (and for screen readers).

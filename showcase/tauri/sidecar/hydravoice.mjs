@@ -21,7 +21,8 @@ export class HydraVoice extends SystemVoice {
 
   async render(text, file) {
     const s = HydraVoice.server;
-    if (s?.paired() && Date.now() >= offUntil) {
+    // A Mac voice the owner picked stays his pick; Hydra's server voice only stands in for the default one.
+    if (!this.voice && s?.paired() && Date.now() >= offUntil) {
       try {
         const out = await this.fromServer(s, text, file);
         if (out) return out;
