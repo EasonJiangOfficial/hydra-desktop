@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Welcome to Roamies</title>
+<title>Welcome to Hydra</title>
 <link rel="stylesheet" href="onboarding.css">
 </head>
 <body>
@@ -19,17 +19,10 @@
     </header>
 
     <section class="step" id="step-welcome" data-name="Welcome" aria-labelledby="h-0">
-      <h1 id="h-0">Hi, I'm Roamie.</h1>
-      <p class="lead">I live on your screen, help with your work and keep you on track. Setup takes about a minute.</p>
-      <div class="px keyrow">
-        <div class="kline stack">
-          <div><h2 id="look-h">My look</h2><p>Each has its own voice. Change it in Settings.</p></div>
-          <div class="chords" id="looks" role="radiogroup" aria-labelledby="look-h"></div>
-        </div>
-        <div class="kline">
-          <div><h2 id="size-h">My size</h2><p>Cursor is a little pointer.</p></div>
-          <div class="chords" id="sizes" role="radiogroup" aria-labelledby="size-h"></div>
-        </div>
+      <h1 id="h-0">Hydra</h1>
+      <p class="lead">The Hydra Agent, on your Mac.</p>
+      <div class="mark" aria-hidden="true">
+        <svg viewBox="0 0 69.47 66" width="56" height="53"><g fill="none" stroke="#1D1D1F" stroke-width="5"><circle cx="34.74" cy="21.71" r="19.21"/><circle cx="21.71" cy="44.29" r="19.21"/><circle cx="47.76" cy="44.29" r="19.21"/></g></svg>
       </div>
     </section>
 
@@ -37,7 +30,7 @@
       <h1 id="h-1">Let me help</h1>
       <p class="lead" id="perm-lead">Only used when you ask me something.</p>
       <ul class="rows" id="perm-rows" aria-live="polite"></ul>
-      <p class="note">When you ask about your screen, screenshots and window text go to the AI you connect. Nothing goes to the developer.</p>
+      
     </section>
 
     <section class="step" id="step-brain" data-name="Not a chatbot" aria-labelledby="h-brain" hidden>
@@ -83,7 +76,7 @@
 
     <section class="step" id="step-voice" data-name="Replies" aria-labelledby="h-voice" hidden>
       <h1 id="h-voice">How should I reply?</h1>
-      <p class="lead">Text shows in my bubbles. Voice also says it out loud. Change it any time in the Roamies panel.</p>
+      <p class="lead">Text, or voice and text.</p>
       <div class="providers two" id="replies" role="radiogroup" aria-labelledby="h-voice"></div>
       <div class="tts-row" id="tts-row" hidden>
         <span id="tts-h">Spoken by</span>
@@ -101,7 +94,7 @@
       <form class="inline" id="fish-form" hidden>
         <div class="label-row">
           <label for="fish-input" id="fish-label">Fish Audio API key</label>
-          <button class="link" type="button" id="fish-link">Get a free key (affiliate link)</button>
+          <button class="link" type="button" id="fish-link">Get a key</button>
         </div>
         <div class="field-row">
           <span class="px field"><input id="fish-input" type="password" placeholder="Paste your key" autocomplete="off" spellcheck="false" maxlength="1000" aria-describedby="fish-note"></span>
@@ -112,7 +105,7 @@
       <p class="error" id="fish-error" role="alert" hidden></p>
       <ul class="rows" id="talk-rows" hidden>
         <li class="px row"><div><h2>Auto-listen</h2><p>Mic opens when I ask you something.</p></div><button class="px switch" type="button" role="switch" id="autolisten-switch" aria-label="Auto-listen"></button></li>
-        <li class="px row" id="wake-row"><div><h2>Wake word</h2><p>Say “Hey Roamies” to talk. Mic stays on.</p></div><button class="px switch" type="button" role="switch" id="wake-switch" aria-label="Wake word"></button></li>
+        <li class="px row" id="wake-row"><div><h2>Wake word</h2><p>“Hey Hydra”</p></div><button class="px switch" type="button" role="switch" id="wake-switch" aria-label="Wake word"></button></li>
       </ul>
     </section>
 
@@ -229,8 +222,7 @@
 <script src="../roamies/core.js"></script>
 <script src="../roamies/sfx.js"></script>
 <script src="../roamies/voice-out.js"></script>
-<script src="../roamies/jarvis.js"></script>
-<script src="../roamies/people.js"></script>
+<script src="../roamies/hydra.js"></script>
 <script src="../roamies/10-dither.js"></script>
 <script src="onboarding.js"></script>
 </body>

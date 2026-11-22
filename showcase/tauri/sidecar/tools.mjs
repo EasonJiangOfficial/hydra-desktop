@@ -282,7 +282,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     };
   }
   async function hands(...args) {
-    if (!HANDS) throw new Error('This needs the Roamies app.');
+    if (!HANDS) throw new Error('This needs the Hydra app.');
     // Acting in an app may take the real cursor: meanwhile clicks go through the overlay, even where the Sidekick or
     // its bubble sits on the spot being clicked.
     const acting = args[0] === 'act';
@@ -299,11 +299,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     try { r = await runHands(args, { timeout: 120_000, onLine }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
     let res;
     try { res = JSON.parse(r.stdout.trim().split('\n').pop() || '{}'); } catch { throw new Error(`hands helper failed: ${r.stderr.trim().slice(0, 200) || 'no output'}`); }
-    if (res.ok === false && !res.cancelled) {
+    if (res.ok === false && !res.cancelled && !res.needsConfirm) {
       if (process.platform === 'darwin' && /Accessibility/i.test(res.error ?? '')) {
         // Open the exact Settings pane (once a minute at most) so the fix is one click away.
         if (Date.now() - axNudged > 60_000) { axNudged = Date.now(); openUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'); }
-        throw new Error('Accessibility is off for Roamies, so I can\'t read or control other apps yet. I just opened System Settings → Privacy & Security → Accessibility: switch on Roamies there, then ask again. Tell the user exactly that, briefly.');
+        throw new Error('Accessibility is off for Hydra, so I can\'t read or control other apps yet. I just opened System Settings → Privacy & Security → Accessibility: switch on Hydra there, then ask again. Tell the user exactly that, briefly.');
       }
       throw new Error(res.error || 'That did not work.');
     }
@@ -878,6 +878,33 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         },
       },
     ] : []),
+    // Hydra: manage apps and windows on the Mac (quit, close, minimise, switch, arrange). Destructive steps always ask,
+    // even with "Skip Allow prompts" on: quitting an app with unsaved work, closing an unsaved window, force quitting.
+    ...(process.platform === 'darwin' && HANDS ? [{
+      name: 'manage_app',
+      description: "Manage apps and windows on the Mac. do: 'switch' (bring an app to the front), 'hide', 'quit' (a normal quit), 'force_quit' (only when an app is frozen), 'close' (close a window), 'minimize', 'arrange' (layout: left, right, top, bottom, full, center). app: the app's name; window: an id from list_windows for one particular window (default: the app's front window, or the frontmost app when neither is given). To open an app, a file, a folder or a site, use open.",
+      parameters: z.object({
+        do: z.enum(['switch', 'hide', 'quit', 'force_quit', 'close', 'minimize', 'arrange']),
+        app: z.string().max(100).optional(), window: z.number().int().optional(),
+        layout: z.enum(['left', 'right', 'top', 'bottom', 'full', 'center']).optional(),
+      }),
+      executionMode: 'sequential',
+      execute: async ({ do: what, app, window, layout }, ctx) => {
+        if (what !== 'switch' && !allowActions()) throw new Error(actionsOff);
+        if (what === 'arrange' && !layout) throw new Error('arrange needs a layout: left, right, top, bottom, full or center.');
+        const spec = { do: what === 'switch' ? 'activate' : what, ...(app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
+        agentChangesScreen();
+        let res = await hands('manage', JSON.stringify(spec));
+        if (res.needsConfirm) {
+          // Always asked, whatever the Allow settings: this can lose work.
+          const answer = await ask({ placeholder: `${res.why} ${what === 'force_quit' ? 'Force quit' : what === 'close' ? 'Close it' : 'Quit'} anyway?`, choices: ['Allow', "Don't allow"] }, ctx?.signal);
+          if (!isYes(answer)) throw new Error(`${userName} said no, so ${res.app ?? 'the app'} stays open.`);
+          res = await hands('manage', JSON.stringify({ ...spec, confirmed: true }));
+        }
+        if (res.ok === false) throw new Error(res.error || res.why || 'That did not work.');
+        return `Done: ${res.done}.`;
+      },
+    }] : []),
     {
       name: 'draw',
       description: `Draw on the user's screen while you talk: your Roamie becomes a cursor and draws each beat's marks while its line is spoken and captioned. One call holds a whole explanation or walkthrough; up to 12 beats, 40 marks each.
@@ -975,7 +1002,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     }),
     createWebFetchTool(undefined, { guardUrl: guardFetch }),
     {
-      name: 'open', description: 'Open a website, a file or folder, or an app by name (e.g. "Safari", "https://skool.com", "~/Documents"). Links open in the default browser; set app to open one in a particular browser or app (e.g. app "Safari" when the user says "in Safari").',
+      name: 'open', description: 'Open a website, a file or folder, or an app by name (e.g. "Safari", "https://hydra-olive-one.vercel.app", "~/Documents"). Links open in the default browser; set app to open one in a particular browser or app (e.g. app "Safari" when the user says "in Safari").',
       parameters: z.object({ target: z.string(), app: z.string().optional() }),
       execute: async ({ target, app }) => {
         let t = String(target).trim();

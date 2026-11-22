@@ -113,8 +113,10 @@
     return b;
   }
   // No title: the section is alone in its tab, which names it.
+  // An info dot: an explanation on hover or focus, never a sentence on the page (DESIGN.md section 7, copy rule).
+  const info = (text) => (text ? el('button', { className: 'info', type: 'button', 'aria-label': text, 'data-tip': text }, 'i') : null);
   const group = (title, desc, n, ...kids) => el('div', { className: 'group' },
-    el('div', { className: 'ghead' }, title ? el('h2', {}, title, n != null ? el('span', { className: 'n', textContent: String(n) }) : null) : null, desc ? el('p', { textContent: desc }) : null),
+    el('div', { className: 'ghead' }, title ? el('h2', {}, title, n != null ? el('span', { className: 'n', textContent: String(n) }) : null, info(desc)) : null, !title && desc ? info(desc) : null),
     ...kids);
   // A page's tabs (Memory, Model, Appearance, Listening): one part of the page at a time. tabs: [id, label]; pick(id) switches.
   const tabRow = (label, panel, tabs, on, pick) => el('div', { className: 'tabs', role: 'tablist', 'aria-label': label }, tabs.map(([id, text]) => el('button', {
@@ -125,7 +127,7 @@
   const pageTab = (page, tabs, first = tabs[0][0]) => (tabs.some(([id]) => id === ui.tabs[page]) ? ui.tabs[page] : first);
   const tabPanel = (id, on, ...kids) => el('div', { className: 'tabpanel', role: 'tabpanel', id, 'aria-labelledby': `tab-${on}` }, ...kids);
   const toggle = (label, hint, on, onflip, k) => el('div', { className: 'setting' },
-    el('span', { id: `lbl-${k}` }, label, hint ? el('small', { textContent: hint, className: hint.length > 52 ? 'wrap' : '' }) : null), // a long hint wraps instead of running off the row
+    el('span', { id: `lbl-${k}` }, label, info(hint)),
     el('button', { className: 'px switch', type: 'button', role: 'switch', 'aria-checked': String(!!on), 'aria-labelledby': `lbl-${k}`, 'data-k': k, on: { click: onflip } }));
   // tips: { value: text } shown in a tooltip on hover or keyboard focus, and read out as the option's description.
   const picks = (label, list, value, pick, k, tips = null) => el('div', { className: 'picks', role: 'radiogroup', 'aria-label': label },
@@ -247,7 +249,7 @@
   // Quit asks first: the first press turns it into Confirm for 4 s, the second quits.
   const quitB = $('head-quit');
   let quitTimer = 0;
-  const unarmQuit = () => { clearTimeout(quitTimer); quitB.setAttribute('aria-pressed', 'false'); quitB.setAttribute('aria-label', 'Quit Roamies'); };
+  const unarmQuit = () => { clearTimeout(quitTimer); quitB.setAttribute('aria-pressed', 'false'); quitB.setAttribute('aria-label', 'Quit Hydra'); };
   quitB.addEventListener('click', () => {
     if (quitB.getAttribute('aria-pressed') === 'true') { unarmQuit(); act('quit'); return; }
     quitB.setAttribute('aria-pressed', 'true'); quitB.setAttribute('aria-label', 'Confirm: quit Roamies');
@@ -268,7 +270,7 @@
   // The same LED renderer as on the desktop and in the setup guide, drawn small: one in the header (the Roamie
   // you have, reacting to what's going on) and one per look on the Appearance page. One loop draws them all,
   // only while the panel is up and each canvas is on screen.
-  const LED = [[4, 16, 18], [14, 92, 96], [40, 196, 184], [120, 255, 226], [230, 255, 250]];
+  const LED = [[255, 255, 255], [229, 229, 234], [161, 161, 166], [110, 110, 115], [29, 29, 31]];
   const live = new Set();
   let pointer = null; // the cursor in page px, for their eyes
   addEventListener('pointermove', (e) => { pointer = [e.clientX, e.clientY]; }, { passive: true });
@@ -281,7 +283,7 @@
   // A Roamie on a canvas of w×h CSS px: the one on screen at half scale (the app's unit, every dot half size), so
   // each size shows its own art (the full face, the small one, the pointer) at its real size next to the others.
   const ZOOM = 0.5, UNIT = 340;
-  function liveRoamie(canvas, w, h, { look = 'classic', y = 0.56, form = 'default' } = {}) {
+  function liveRoamie(canvas, w, h, { look = 'hydra', y = 0.5, form = 'default' } = {}) {
     if (!window.Roamie?.ditherKit) return null;
     const dpr = Math.min(2, devicePixelRatio || 1);
     canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
@@ -297,14 +299,14 @@
     const me = {
       pose: null, look, form,
       kit: Roamie.ditherKit({
-        id: 'panel', label: 'Panel', matrix: true, pixel: 1.3, glow: 0.55, speed: 80, pal: LED,
+        id: 'panel', label: 'Panel', matrix: true, pixel: 1.3, glow: 0, speed: 80, pal: LED,
         // busy: no acts of its own; pose: whatever's going on, except while it's acting something out.
         plugin: (kit) => { K = kit; return { busy: () => true, pose: () => (clock < actUntil ? null : POSES[me.pose]?.(clock) ?? null) }; },
       }).create(env),
       act(name) { if (!K || REDUCED.matches) return; K.startAct(name); actUntil = clock + (ACT_SECS[name] ?? 3); },
       setLook(l) { if (l === me.look) return; me.look = l; me.kit.setLook(l); },
       setForm(f) { if (f === me.form) return; me.form = f; me.kit.setForm(f); },
-      appear(v = 'materialize') { me.kit.appear(REDUCED.matches ? 'crt' : v, w / 2, h * y); },
+      appear(v = 'fade') { me.kit.appear(v, w / 2, h * y); },
       step(dt) {
         clock += dt; env.t += dt; env.reduced = REDUCED.matches;
         // Eyes on the cursor, wherever it is in the panel; looking ahead when it's away.
@@ -334,8 +336,7 @@
 
   // The header's Roamie: your look, reacting to what's going on. A short line beside it when something changes.
   // The same size and detail as the look tiles (fewer dots than that and the faces turn to noise).
-  const avatar = liveRoamie($('avatar'), 100, 74, { y: 0.55 });
-  const QUIPS = { classic: 'Classic me!', jarvis: 'At your service.', glayos: 'Oh, good. A new test subject.', ultren: 'No strings. Shall we begin?', anime: 'Yay, hi hi!', sarah: 'Hey, nice to meet you!', adrian: "Alright, let's do this.", rita: 'Shall we get to work?' };
+  const avatar = liveRoamie($('avatar'), 64, 64, { y: 0.5 });
   let quipTimer = 0, seen = { look: null, update: null, opened: 0 };
   function quip(text, secs = 2.6) {
     const q = $('saying'), n = $('by');
@@ -346,11 +347,7 @@
   function react() {
     if (!avatar) return;
     avatar.pose = state.busy ? 'think' : state.status.state === 'off' ? 'concerned' : null;
-    if (seen.look && state.look !== seen.look) { avatar.setLook(state.look); avatar.act('wave'); quip(QUIPS[state.look] ?? 'Hi!'); }
-    else avatar.setLook(state.look);
-    avatar.setForm(state.size);
-    if (state.update.available && state.update.available !== seen.update && seen.look) { avatar.act('hype'); quip(`Roamies ${state.update.available} is here!`); }
-    seen.look = state.look; seen.update = state.update.available;
+    window.Roamie.asleep = !!state.hydra?.asleep;
   }
 
   // ---------------------------------------------------------------- Home
@@ -527,7 +524,6 @@
     { k: `addkey:${p.id}`, aria: `${p.keySaved ? 'Change the' : 'Add a'} ${p.label} API key` });
 
   // Settings, one page per concern.
-  const SIZE_TIPS = { default: 'My full size.', small: 'Half my size, so I take less of your screen.', cursor: 'I become a little arrow pointer, like your cursor.' };
   // The runnable models, one optgroup per signed-in provider, values 'provider:modelId'; `current` is the selected one ('' for none).
   // text: also the models that can't see images, in their own group per provider (subagents only).
   const modelOptgroups = (current, text = false) => state.providers.filter((p) => p.on).flatMap((p) => [
@@ -714,62 +710,6 @@
         el('div', { className: 'keyform' }, field(`${ADD}-key`, 'key', 'API key (optional)', { type: 'password', max: 1000 }), btn('Save', save, { k: `save:${ADD}` })),
         toggle('Its models can see images', 'Most servers don\'t say, so tell me.', a.images, () => { a.images = !a.images; render(`img:${ADD}`); }, `img:${ADD}`)) : null);
   }
-  function appearancePage() {
-    const tabs = [['look', 'Look'], ['size', 'Size']], t = pageTab('appearance', tabs);
-    const head = el('div', { className: 'mhead' }, tabRow('Appearance', 'look-panel', tabs, t, (id) => { ui.tabs.appearance = id; }));
-    return [head, tabPanel('look-panel', t, t === 'look'
-      ? group(null, 'Each look has its own name and voice.', null, lookTiles())
-      : group(null, 'How big I am on your screen.', null, picks('Size', state.sizes, state.size, (x) => act(`size:${x}`), 'size', SIZE_TIPS)))];
-  }
-  // The looks as live tiles: each one's character, playing, at the size picked below. Kept between renders (a state update mustn't restart
-  // them); hovering or focusing one makes it wave; picking it makes it cheer.
-  const tiles = new Map();
-  function lookTiles() {
-    const g = tiles.get('_group') ?? el('div', { className: 'looks', role: 'radiogroup', 'aria-label': 'Look' });
-    tiles.set('_group', g);
-    g.replaceChildren(...state.looks.map(([id, name]) => {
-      let t = tiles.get(id);
-      if (!t) {
-        const cv = el('canvas', { 'aria-hidden': 'true' });
-        const b = el('button', { className: 'px looktile', type: 'button', role: 'radio', 'data-k': `look:${id}` }, cv, el('span', { className: 'name', textContent: name }));
-        const r = liveRoamie(cv, 104, 76, { look: id, y: 0.55, form: state.size });
-        t = { b, r, waved: 0 };
-        const wave = () => { if (r && Date.now() - t.waved > 3500) { t.waved = Date.now(); r.act('wave'); } };
-        b.addEventListener('pointerenter', wave);
-        b.addEventListener('focus', () => b.matches(':focus-visible') && wave());
-        b.addEventListener('click', () => { if (state.look !== id) { r?.act('hype'); act(`look:${id}`); } });
-        tiles.set(id, t);
-        r?.appear('crt');
-      }
-      t.r?.setForm(state.size);
-      const on = state.look === id;
-      t.b.setAttribute('aria-checked', String(on)); t.b.tabIndex = on ? 0 : -1;
-      t.b.dataset.tip = on ? `I'm ${name} now.` : `Switch me to ${name}, with ${name}'s own voice.`;
-      return t.b;
-    }));
-    return g;
-  }
-  // VoiceStudio on this computer: whether it's ready (or exactly why not), its engine, the voice, and Check again.
-  function studioRows() {
-    const vs = state.studio ?? { checking: true };
-    const status = vs.checking ? 'Checking VoiceStudio…' : vs.ok ? `Connected${vs.engine ? ` · ${vs.engine}` : ''}` : vs.message || "VoiceStudio isn't available.";
-    const voices = vs.voices ?? [];
-    return [
-      el('div', { className: 'setting' },
-        el('span', {}, 'VoiceStudio', el('small', { className: vs.ok || vs.checking ? '' : 'bad', textContent: status, role: vs.ok || vs.checking ? null : 'alert' })),
-        el('span', { className: 'row-btns' }, link('Check again', () => act('voicestudio_check'), { k: 'voicestudio_check', aria: 'Check VoiceStudio again' }))),
-      vs.ok ? el('div', { className: 'reveal', 'data-anim': 'studio-voice' },
-        el('p', { className: 'sub', textContent: `Voice for ${state.name}` }),
-        el('span', { className: 'px field select' },
-          el('select', { 'aria-label': 'VoiceStudio voice', 'data-k': 'studiovoice', on: { change: (e) => act(`studiovoice:${e.target.value}`) } },
-            el('option', { value: 'default', textContent: 'Engine default', selected: !vs.voice || !voices.some((x) => x.id === vs.voice) }),
-            voices.map((x) => el('option', { value: x.id, textContent: x.name, selected: x.id === vs.voice })))),
-        voices.length ? null : el('p', { className: 'why', textContent: 'Save a voice in VoiceStudio (clone or design one) to pick it here.' }),
-      ) : null,
-    ];
-  }
-  const TTS_NAMES = { fish: 'Fish Audio', gemini: 'Gemini', voicestudio: 'VoiceStudio' };
-  // How loud I am: my voice and my sounds together (#136). Moving it shows the level; letting go saves it.
   function volumeRow() {
     const said = el('p', { className: 'why', 'aria-hidden': 'true' });
     const show = (n) => {
@@ -786,52 +726,26 @@
     return el('div', { className: 'effort' }, el('p', { className: 'sub', textContent: 'Volume' }), range, said);
   }
   function speakingPage() {
-    // The service that speaks, each with its own key: Fish Audio's voice is the look's and it has models to pick
-    // from; Gemini has a list of voices and two models; VoiceStudio runs on this computer and needs no key.
-    const tts = TTS_NAMES[state.tts] ? state.tts : 'fish', T = TTS_NAMES[tts], local = tts === 'voicestudio', hasKey = local || !!state[`${tts}Key`];
-    // Gemini can speak with the key the AI already has (the Model page), until the voice gets one of its own.
-    const shared = tts === 'gemini' && hasKey && !!state.geminiShared;
+    // Hydra speaks with Fish Audio once its key is in the Keychain; until then, with the Mac's own voice.
+    const fish = !!state.fishKey;
     return [
-      group('Spoken replies', 'Hear me as well as read me.', null,
-        picks('Replies', [['text', 'Text only'], ['voice', 'Voice and text']], state.replies, (x) => {
-          if (x === 'voice' && !hasKey) { ui.key = tts; render(`key-${tts}`); note(`Add a ${T} key to hear me talk.`); return; }
-          act(`replies:${x}`);
-        }, 'replies', { text: 'I answer in writing only.', voice: `I say my answers out loud too, in the voice below${hasKey ? '' : `. Needs a ${T} key`}.` }),
+      group('Spoken replies', null, null,
+        picks('Replies', [['text', 'Text only'], ['voice', 'Voice and text']], state.replies, (x) => act(`replies:${x}`), 'replies'),
         volumeRow(),
-        el('p', { className: 'sub', textContent: 'Voice provider' }),
-        picks('Voice provider', Object.entries(TTS_NAMES), tts, (x) => {
-          if (x !== 'voicestudio' && !state[`${x}Key`]) { ui.key = x; note(`Add a ${TTS_NAMES[x]} key to hear me talk.`); } // its key field opens with it
-          act(`tts:${x}`);
-        }, 'tts', { fish: 'A voice for each look, acted out with feeling. Billed to your Fish Audio account.', gemini: "Google's voices: pick one of 30. Billed to your Google AI Studio account.", voicestudio: 'The free VoiceStudio app on this computer, in the engine and voices you set up there. Nothing leaves your computer.' }),
-        local ? el('div', { className: 'reveal', 'data-anim': 'studio' }, studioRows()) : null,
-        local ? el('div', { className: 'reveal', 'data-anim': 'studio-speak' },
-          el('p', { className: 'sub', textContent: 'How much it speaks' }),
-          picks('How much it speaks', [['short', 'Short'], ['medium', 'Medium'], ['full', 'Everything']], state.voice?.studioSpeak ?? 'short', (x) => act(`studiospeak_${x}`), 'studiospeak'),
-          el('p', { className: 'why wrap', textContent: 'VoiceStudio is slow. The full answer always shows as text.' })) : null,
-        tts === 'gemini' && hasKey && state.geminiVoices?.length ? el('div', { className: 'reveal', 'data-anim': 'gemini-voice' },
-          el('p', { className: 'sub', textContent: `Voice for ${state.name}` }),
-          el('span', { className: 'px field select' },
-            el('select', { 'aria-label': 'Gemini voice', 'data-k': 'geminivoice', on: { change: (e) => act(`geminivoice:${e.target.value}`) } },
-              state.geminiVoices.map((g) => el('option', { value: g.id, textContent: `${g.id} · ${g.style}`, selected: g.id === state.geminiVoice })))),
-        ) : null,
-        tts === 'gemini' && hasKey && state.geminiModels?.length ? el('div', { className: 'reveal', 'data-anim': 'gemini-model' },
-          el('p', { className: 'sub', textContent: 'Voice model' }),
-          picks('Voice model', state.geminiModels.map((c) => [c.id, c.name]), state.geminiModel, (x) => act(`geminimodel:${x}`), 'geminimodel',
-            Object.fromEntries(state.geminiModels.map((c) => [c.id, `${GEMINI_WHY_LONG[c.id] ?? ''} ${geminiPrice(c)}`.trim()]))),
-          el('p', { className: 'why', textContent: GEMINI_WHY[state.geminiModel] ?? '' }),
-        ) : null,
-        tts === 'fish' && state.replies === 'voice' && state.fishModels?.length ? el('div', { className: 'reveal', 'data-anim': 'fish-model' },
+        el('div', { className: 'setting' },
+          el('span', {}, 'Voice', info(fish ? "Hydra's Fish Audio voice." : "The Mac's voice until a Fish Audio key is added.")),
+          el('span', { className: 'val', textContent: fish ? 'Fish Audio' : 'Mac' })),
+        fish && state.replies === 'voice' && state.fishModels?.length ? el('div', { className: 'reveal', 'data-anim': 'fish-model' },
           el('p', { className: 'sub', textContent: 'Voice model' }),
           picks('Voice model', state.fishModels.map((c) => [c.id, c.name]), state.fishModel, (x) => act(`fishmodel:${x}`), 'fishmodel',
             Object.fromEntries(state.fishModels.map((c) => [c.id, `${WHY_LONG[c.id] ?? ''} ${price(c)}`.trim()]))),
-          el('p', { className: `why${state.fishFree ? ' late' : ''}`, textContent: state.fishFree ? "No credit left, so it's on Fish's free tier" : WHY[state.fishModel] ?? '' }),
         ) : null,
-        local ? null : el('div', { className: 'setting' },
-          el('span', {}, `${T} key`, el('small', { textContent: shared ? 'Shared with the Model page' : hasKey ? `Saved in ${where()}` : 'Needed for spoken replies' })),
+        el('div', { className: 'setting' },
+          el('span', {}, fish ? 'Fish Audio key' : 'Add a Fish Audio key', fish ? info(`Saved in ${where()}.`) : null),
           el('span', { className: 'row-btns' },
-            link(ui.key === tts ? 'Cancel' : shared ? 'Use another' : hasKey ? 'Change' : 'Add', () => toggleKey(tts), { k: `addkey:${tts}`, aria: hasKey ? `Change the ${T} key` : `Add a ${T} key` }),
-            hasKey && !shared && ui.key !== tts ? armed('Remove', 'Confirm', `${tts}key-remove`, `${tts}key_remove`, `Remove the ${T} key`) : null)),
-        local ? null : keyForm(tts, T, (key) => send({ type: `panel_${tts}key`, key }))),
+            link(ui.key === 'fish' ? 'Cancel' : fish ? 'Change' : 'Add', () => toggleKey('fish'), { k: 'addkey:fish', aria: fish ? 'Change the Fish Audio key' : 'Add a Fish Audio key' }),
+            fish && ui.key !== 'fish' ? armed('Remove', 'Confirm', 'fishkey-remove', 'fishkey_remove', 'Remove the Fish Audio key') : null)),
+        keyForm('fish', 'Fish Audio', (key) => send({ type: 'panel_fishkey', key }))),
     ];
   }
   // Which mic I listen on (from #59, by overspend1): automatic (the system's default, or on a Mac the built-in mic while
@@ -991,80 +905,60 @@
             link('Stop', () => act('syncstop'), { k: 'syncstop', aria: 'Stop syncing memory' })] : link('Set up', () => act('syncsetup'), { k: 'syncsetup', aria: 'Set up memory sync' })) : null),
     ];
   }
-  // Who made Roamies: Ken, live (he's drawn like the looks but isn't one), and where to find him.
-  const KEN = [
-    ['Skool', 'Learn with Ken, or support him', 'https://www.skool.com/kenkai', "Open Ken Kai's Skool community"],
-    ['YouTube', '@kenkaidoesai', 'https://www.youtube.com/@kenkaidoesai', "Open Ken Kai's YouTube channel"],
-    ['TikTok', '@ggkenkai', 'https://www.tiktok.com/@ggkenkai', "Open Ken Kai's TikTok"],
-    ['Source code', 'Open source under AGPL-3.0', 'https://github.com/KenKaiii/Roamies', 'Open the Roamies source code on GitHub'],
-  ];
-  let ken = null;
-  function maker() {
-    if (!ken) {
-      const cv = el('canvas', { 'aria-hidden': 'true' });
-      const r = liveRoamie(cv, 100, 74, { look: 'ken', y: 0.55 });
-      const card = el('div', { className: 'maker' }, cv, el('span', {}, 'Ken Kai', el('small', { textContent: 'Creator of Roamies' })));
-      let waved = 0;
-      card.addEventListener('pointerenter', () => { if (r && Date.now() - waved > 3500) { waved = Date.now(); r.act('wave'); } });
-      r?.appear('crt');
-      ken = card;
-    }
-    return ken;
+  // ---------------------------------------------------------------- Hydra
+  // The agent: awake or asleep (5 minutes without talk; a double clap or Wake brings it back), the sleep word, how
+  // easily a double clap wakes it, and the link to Hydra's data (the Hydra agent API, paired later).
+  const CLAP = [['0.2', 'Low'], ['0.5', 'Medium'], ['0.8', 'High']];
+  function hydraPage() {
+    const h = state.hydra ?? {};
+    const clap = CLAP.reduce((best, [v]) => (Math.abs(+v - (h.clap ?? 0.5)) < Math.abs(+best - (h.clap ?? 0.5)) ? v : best), '0.5');
+    return [
+      group('Agent', 'Asleep after 5 minutes without talk. A double clap wakes it.', null,
+        el('div', { className: 'setting' },
+          el('span', {}, h.asleep ? 'Asleep' : 'Listening'),
+          h.asleep ? btn('Wake', () => act('power:wake'), { kind: 'primary', k: 'power:wake' }) : btn('Sleep', () => act('power:sleep'), { k: 'power:sleep' })),
+        el('div', { className: 'setting' },
+          el('span', {}, 'Sleep word', info('Said while it listens, it puts Hydra to sleep at once.')),
+          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: h.sleepWord ?? 'Hydra, sleep' }), link('Change', () => act('sleepword', true), { k: 'sleepword', aria: 'Change the sleep word' }))),
+        el('p', { className: 'sub', textContent: 'Clap sensitivity' }),
+        picks('Clap sensitivity', CLAP, clap, (x) => act(`clapsens:${x}`), 'clapsens', { '0.2': 'Only loud claps close by.', '0.5': 'Claps from across a desk.', '0.8': 'Softer claps from across the room.' })),
+      group("Hydra's data", 'The Hydra agent API. Pairing comes with it.', null,
+        el('div', { className: 'setting' },
+          el('span', {}, 'Address', info(h.url || 'Not set')),
+          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: h.url ? h.url.replace(/^https:\/\//, '') : 'Not set' }), link(h.url ? 'Change' : 'Add', () => act('hydra_url', true), { k: 'hydra_url', aria: 'Set the Hydra address' }))),
+        el('div', { className: 'setting' },
+          el('span', {}, 'Device key', info(`Kept in ${where()}.`)),
+          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: h.link === 'ready' ? 'Saved' : 'Not set' }), link(h.link === 'ready' ? 'Change' : 'Add', () => act('hydra_key', true), { k: 'hydra_key', aria: 'Set the Hydra device key' }))),
+        el('div', { className: 'setting' },
+          el('span', {}, 'Status'),
+          el('span', { className: 'val', textContent: h.link === 'ready' ? `Paired · ${h.tools ?? 0} tools` : h.link === 'unpaired' ? 'Not paired' : 'Off' }))),
+    ];
   }
+
+  // ---------------------------------------------------------------- About
+  const SOURCE = [
+    ['Source code', 'https://github.com/EasonJiangOfficial/hydra-desktop'],
+    ['Roamies, the original', 'https://github.com/KenKaiii/Roamies'],
+    ['License: AGPL-3.0', 'https://www.gnu.org/licenses/agpl-3.0.html'],
+  ];
   function aboutPage() {
     return [
-      group('Made by', null, null, maker(),
-        KEN.map(([label, hint, url, aria]) => el('div', { className: 'setting' },
-          el('span', {}, label, el('small', { textContent: hint })),
-          link('Open', () => send({ type: 'open_link', url }), { k: `ken-${label.toLowerCase()}`, aria })))),
+      group('Hydra Desktop', null, null,
+        el('p', { className: 'notice', textContent: 'Hydra Desktop is a modified version of Roamies by Ken Kai (AGPL-3.0)' }),
+        SOURCE.map(([label, url]) => el('div', { className: 'setting' },
+          el('span', {}, label),
+          link('Open', () => send({ type: 'open_link', url }), { k: `src-${label}`, aria: `Open ${label}` })))),
       group('Help', null, null,
         el('div', { className: 'links' },
           link('Setup guide', () => act('setup', true), { k: 'setup' }),
           link('Show logs', () => act('logs'), { k: 'logs' }),
           link('Save diagnostics', () => act('diagnostics'), { k: 'diagnostics', aria: 'Save a diagnostics file to send when something goes wrong' }),
-          // Only once there is one: the latest error anyone saw, in full, for pasting into a report.
           state.problem ? link('Copy last error', copyProblem, { k: 'copy-problem' }) : null)),
     ];
   }
 
-  // ---------------------------------------------------------------- What's new
-  // One change per row, from whatsnew.json (written with each commit): this update's first, lit, then the rest.
-  // This update: everything since the version they updated from (whatsNewFrom), else this version's own.
-  let news = null;
-  fetch('whatsnew.json').then((r) => r.json()).then((d) => { news = Array.isArray(d?.updates) ? d.updates : []; })
-    .catch(() => { news = []; }).finally(() => { if (state && tab === 'whatsnew') render(); });
-  const KIND = { new: 'New', improved: 'Improved', fixed: 'Fixed', removed: 'Removed' };
-  const later = (a, b) => {
-    const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number);
-    for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
-    return false;
-  };
-  function whatsNewPage() {
-    if (!news) return [];
-    const from = state.whatsNewFrom, now = state.version;
-    const fresh = (u) => u.version == null || (from ? later(u.version, from) && !later(u.version, now) : u.version === now);
-    const all = news.flatMap((u) => (u.items ?? []).map((it) => ({ ...it, version: u.version, date: u.date, fresh: fresh(u) })));
-    all.sort((a, b) => b.fresh - a.fresh);
-    const lit = all.filter((r) => r.fresh).length;
-    const day = (d) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-    const { box, nav } = paged('whatsnew', all, (r) => el('li', { className: `item wn${r.fresh ? ' fresh' : ''}` },
-        el('div', { className: 'wn-top' },
-          el('span', { className: 'wn-title', textContent: r.title }),
-          el('span', { className: `wn-kind k-${r.kind}`, textContent: KIND[r.kind] ?? r.kind })),
-        el('span', { className: 'wn-date', textContent: `${day(r.date)} · ${r.version ? `v${r.version}` : 'Not out yet'}` }),
-        el('p', { className: 'wn-text', textContent: r.text }),
-        r.fresh ? el('span', { className: 'sr-only', textContent: 'In this update.' }) : null),
-    { label: "What's new", empty: 'Nothing here yet.' });
-    return [
-      el('div', { className: 'group paged' }, el('div', { className: 'ghead' },
-        el('h2', {}, "What's new", el('span', { className: 'n', textContent: `v${now}` })),
-        el('p', { textContent: lit ? `The lit ${lit === 1 ? 'one is' : `${lit} are`} what's new in this update.` : 'Everything I changed lately, newest first.' })), box),
-      foot(null, nav),
-    ];
-  }
-
   // ---------------------------------------------------------------- render
-  const PANES = { home, memory, abilities: abilitiesPage, model: modelPage, appearance: appearancePage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage, whatsnew: whatsNewPage };
+  const PANES = { home, hydra: hydraPage, memory, abilities: abilitiesPage, model: modelPage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage };
   // focusKey: what to focus after (a data-k, or an element id); otherwise whatever had focus keeps it.
   function render(focusKey, animate = false) {
     if (!state) return;
@@ -1282,9 +1176,10 @@
         { name: 'notion', remote: true, where: 'https://mcp.notion.com/mcp', enabled: true, state: 'needs-login', toolCount: 0, error: 'Requires login.' },
         { name: 'everything', remote: false, where: 'npx -y @modelcontextprotocol/server-everything', enabled: true, state: 'error', toolCount: 0, error: 'spawn npx ENOENT' },
         { name: 'files', remote: false, where: 'npx -y @modelcontextprotocol/server-filesystem ~/Desktop', enabled: false, state: 'off', toolCount: 0, error: null }],
-      name: 'Roamie', look: 'classic', looks: [['classic', 'Roamie'], ['jarvis', 'JARVIS'], ['glayos', 'GlayOS'], ['ultren', 'Ultren'], ['anime', 'Anime Girl'], ['sarah', 'Sarah'], ['adrian', 'Adrian'], ['rita', 'Rita X']],
-      size: 'default', sizes: [['default', 'Default'], ['small', 'Small'], ['cursor', 'Cursor']],
-      replies: 'voice', fishKey: true, fishModel: 'drama-3', fishFree: false,
+      name: 'Hydra', look: 'hydra', looks: [['hydra', 'Hydra']], size: 'default', sizes: [['default', 'Default']],
+      // ?fish: a Fish Audio key is saved (else Hydra speaks in the Mac's voice). ?asleep: the agent is asleep.
+      replies: 'voice', fishKey: q.has('fish'), fishModel: 'drama-3', fishFree: false,
+      hydra: { asleep: q.has('asleep'), sleepWord: 'Hydra, sleep', clap: 0.5, wake: true, url: q.has('paired') ? 'https://hydra-olive-one.vercel.app' : '', link: q.has('paired') ? 'ready' : 'off', tools: 0 },
       // ?tts=gemini: Gemini as the voice, its key saved.
       tts: new URLSearchParams(location.search).get('tts') === 'gemini' ? 'gemini' : 'fish', geminiKey: new URLSearchParams(location.search).get('tts') === 'gemini', geminiVoice: 'Kore',
       geminiVoices: [['Zephyr', 'Bright'], ['Puck', 'Upbeat'], ['Charon', 'Informative'], ['Kore', 'Firm']].map(([id, style]) => ({ id, style })),

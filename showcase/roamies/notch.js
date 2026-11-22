@@ -2,13 +2,13 @@
 // of popping up beside the cursor.
 // A black capsule pours out of the notch (it starts exactly the notch's size, so it reads as the notch itself
 // growing), spreads sideways with an ease, and drops open when there's something to read. When the turn is
-// over it folds back the same way and disappears into the notch. Inside: a small live JARVIS globe (jarvis.js, the
+// over it folds back the same way and disappears into the notch. Inside: a small live Hydra orb (hydra.js, the
 // same renderer as the sidekick), what it's doing, and the reply as it streams.
 // Two styles (R.notch.style): 'drop' (the default) is a capsule that pours out of the notch like water, a liquid
 // neck stretching and splitting off with a couple of droplets, floats just under the notch and plays with the cursor
 // (the lens watches it, a click folds the reply away or opens it again), then rises back and melts
 // into the notch the same way. 'spread' widens sideways out of the notch instead.
-// The lens shows whichever look is picked (JARVIS's globe, a person, or the Roamie blob). While it speaks, a true
+// The lens shows the Hydra orb. While it speaks, a true
 // waveform of its own voice (voice-out.js samples) runs in the status slot; while it listens, one that follows the mic.
 // Screens without a notch get the same capsule hanging from the top edge, with nothing to hide in at rest.
 // The overlay is click-through, so the host asks Roamie.notchHit(x, y) whether the cursor is over it.
@@ -23,7 +23,7 @@
   // ---------- look ----------
   // The capsule stays black (it is the notch growing), so its type is white and grays; no accent colour.
   const INK = '#FFFFFF', ACCENT = '#FFFFFF';
-  // The levels JARVIS is drawn in, a gray ramp up to white; level 0 never drawn here: the capsule is the dark.
+  // The levels the orb is drawn in, a gray ramp up to white; level 0 never drawn here: the capsule is the dark.
   const PAL = [null, '#424245', '#6E6E73', '#A1A1A6', '#F5F5F7'];
   const L = PAL.length - 1;
   // Fillet where the capsule meets the top edge, flowing into the screen like the notch's own corners.
@@ -217,7 +217,7 @@
   sr.setAttribute('role', 'status');
   const announce = (t) => { sr.textContent = ''; setTimeout(() => { sr.textContent = String(t ?? '').replace(/\*\*|__|`|^#+\s*/gm, ''); }, 60); };
   el.innerHTML = '<div class="nc-skin" aria-hidden="true"><i class="nc-glow l"></i><i class="nc-glow r"></i></div>'
-    + '<div class="nc-row"><span class="nc-mark">JARVIS</span><canvas class="nc-globe" aria-hidden="true"></canvas>'
+    + '<div class="nc-row"><span class="nc-mark">Hydra</span><canvas class="nc-globe" aria-hidden="true"></canvas>'
     + '<div class="nc-status"><canvas class="nc-wave" aria-hidden="true"></canvas><span class="nc-label"></span></div></div>'
     + '<div class="nc-body"><p class="nc-text"></p><div class="nc-choices" hidden></div><div class="nc-rate" hidden></div></div>';
   // The goo: blurred, then its alpha thresholded, so shapes that touch melt into one (metaballs). The notch, a tongue,
@@ -346,7 +346,7 @@
   };
 
   // ---------- state ----------
-  const st = { mode: null, open: false, text: '', heard: '', mic: 0, lingerAt: 0, linger: 0, speech: null, prompt: null, hover: false, closeT: 0, folded: false, px: null, py: null, g: 0.4, look: 'jarvis', liq: null, follow: true };
+  const st = { mode: null, open: false, text: '', heard: '', mic: 0, lingerAt: 0, linger: 0, speech: null, prompt: null, hover: false, closeT: 0, folded: false, px: null, py: null, g: 0.4, look: 'hydra', liq: null, follow: true };
   let raf = 0, last = 0;
   const jst = { t: 0, dt: 0.016, mode: null, act: null, actA: 0, open: 1, look: [0, 0], sq: 0, wide: 0, dizzy: 0, happy: 0, sleepy: 0, voice: null, heard: 0 };
 
@@ -501,10 +501,8 @@
     jst.mouth = playing ? (jst.voice > 0.35 ? 'talk2' : jst.voice > 0.08 ? 'talk1' : null) : st.mode === 'error' ? 'frown' : null;
     jst.brow = st.mode === 'think' || st.mode === 'tool' ? 'raised' : null;
     const k = { put, L, th: () => 0 };
-    const person = R.people?.[st.look];
-    // The lens shows whoever was picked: JARVIS's globe, a person (head and shoulders), or the Roamie's blob.
-    if (person) person.body(k, CELLS / 2 - 0.5, CELLS / 2 + 3, 10, jst);
-    else if (st.look === 'jarvis' || !st.look || !R.jarvis) R.jarvis?.body(k, CELLS / 2 - 0.5, CELLS / 2 - 0.5, 10.5, jst);
+    // The lens shows the Hydra orb (hydra.js), in cells.
+    if (R.hydra) R.hydra.body(k, CELLS / 2 - 0.5, CELLS / 2 - 0.5, 10.5, jst);
     else blob(put, jst);
     for (const [k, l] of buf) {
       gctx.fillStyle = PAL[clamp(l, 1, L)];
@@ -801,10 +799,10 @@
   R.notch = {
     enabled: false,
     get style() { return drop() ? 'drop' : 'spread'; },
-    // The name on the capsule: the look's own (JARVIS, Roamie, …).
-    set name(v) { $('.nc-mark').textContent = String(v || 'JARVIS'); if (st.open) apply(shape); },
-    // The look in the lens: 'jarvis', a person ('anime', 'sarah', 'adrian', 'rita', 'ultren', 'glayos'), or 'classic' (the Roamie blob).
-    set look(v) { st.look = String(v || 'jarvis'); jst.swing = null; },
+    // The name on the capsule: Hydra.
+    set name(v) { $('.nc-mark').textContent = String(v || 'Hydra'); if (st.open) apply(shape); },
+    // The look in the lens: always the Hydra orb.
+    set look(v) { st.look = 'hydra'; jst.swing = null; },
     set style(v) {
       const d = v === 'drop';
       if (d === drop()) return;

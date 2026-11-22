@@ -9,6 +9,7 @@
 //   roamies-hands ui front|app:<name>          the window's buttons, fields, etc. with ids
 //   roamies-hands act <json>                   {"app":"Brave","steps":[{"do":"focus","id":3},{"do":"type","text":"hi"}]}
 //   roamies-hands trusted [--prompt]           Accessibility permission status
+//   roamies-hands manage <json>                {"do":"quit|force_quit|hide|activate|close|minimize|arrange","app":"Notes","window":12,"layout":"left","confirmed":false}
 //   roamies-hands locate-control <target> <id>  where one control (from `ui`) is on screen, for pointing
 //   roamies-hands screencheck                  takes (and deletes) one test screenshot: {"seen": true|false}
 //   roamies-hands guide accessibility|screen [<Roamies.app>] [--preview]  drag-me-in panel under System Settings (until stdin closes)
@@ -34,7 +35,7 @@ let me = ProcessInfo.processInfo.processIdentifier
 let myParent = getppid()
 // Never point at Roamies itself (its overlay windows cover every screen).
 func isRoamies(_ pid: pid_t) -> Bool {
-    pid == me || pid == myParent || NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.kenkai.roamies"
+    pid == me || pid == myParent || NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.easonjiang.hydra"
 }
 
 // ---------- windows ----------
@@ -1437,13 +1438,126 @@ func runGuide(_ rest: [String]) -> Never {
 // The user's own API keys (Fish Audio) live in their login keychain: encrypted at rest, locked with their Mac
 // login, and readable without a prompt only by this signed helper. A secret comes in on stdin and goes out on
 // stdout, never in arguments (other processes can read those).
-let secretService = "com.kenkai.roamies"
+let secretService = "com.easonjiang.hydra"
 func secretName(_ i: Int) -> String {
     guard args.count > i, args[i].range(of: "^[a-z0-9-]{1,40}$", options: .regularExpression) != nil else { fail("bad secret name") }
     return args[i]
 }
 func secretQuery(_ name: String) -> [String: Any] {
     [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: secretService, kSecAttrAccount as String: name]
+}
+
+// ---------- managing apps and windows (Hydra: "open apps, close things") ----------
+// Quit, force quit, hide, switch to an app; close, minimise or arrange a window. Quitting an app with unsaved work,
+// closing an unsaved window and force quitting always need the user's yes first ("confirmed", given by the sidecar
+// after asking); without it the answer is {"ok":false,"needsConfirm":true,"why":…}. Never Hydra itself or the system.
+let SYSTEM_APPS: Set<String> = ["com.apple.finder", "com.apple.dock", "com.apple.systemuiserver", "com.apple.loginwindow", "com.apple.WindowManager", "com.apple.controlcenter", "com.apple.notificationcenterui"]
+
+/// Whether a window has unsaved changes: macOS marks it on the window (AXEdited) or on its close button.
+func edited(_ win: AXUIElement) -> Bool {
+    if (attr(win, kAXEditedAttribute) as? Bool) == true { return true }
+    if let close = attr(win, kAXCloseButtonAttribute) { return (attr(close as! AXUIElement, kAXEditedAttribute) as? Bool) == true }
+    return false
+}
+
+/// Where a window goes for a layout, in the global top-left coordinates AX uses. visible: the screen's usable area
+/// (no menu bar or Dock), also top-left.
+func layoutRect(_ layout: String, visible v: CGRect, current: CGRect) -> CGRect? {
+    let half = v.width / 2, halfH = v.height / 2
+    switch layout {
+    case "left": return CGRect(x: v.minX, y: v.minY, width: half, height: v.height)
+    case "right": return CGRect(x: v.minX + half, y: v.minY, width: v.width - half, height: v.height)
+    case "top": return CGRect(x: v.minX, y: v.minY, width: v.width, height: halfH)
+    case "bottom": return CGRect(x: v.minX, y: v.minY + halfH, width: v.width, height: v.height - halfH)
+    case "full", "maximize", "maximise": return v
+    case "center", "centre":
+        let w = min(current.width, v.width), h = min(current.height, v.height)
+        return CGRect(x: v.midX - w / 2, y: v.midY - h / 2, width: w, height: h)
+    default: return nil
+    }
+}
+
+/// The usable area of the screen a window is mostly on, top-left global coordinates.
+func visibleArea(for r: CGRect) -> CGRect {
+    let primaryH = NSScreen.screens.first?.frame.height ?? 0
+    let flip = { (f: CGRect) in CGRect(x: f.minX, y: primaryH - f.maxY, width: f.width, height: f.height) }
+    let best = NSScreen.screens.max { flip($0.frame).intersection(r).area < flip($1.frame).intersection(r).area } ?? NSScreen.main
+    return best.map { flip($0.visibleFrame) } ?? r
+}
+extension CGRect { var area: CGFloat { isNull ? 0 : width * height } }
+
+func setFrame(_ win: AXUIElement, _ r: CGRect) -> Bool {
+    var p = r.origin, z = r.size
+    guard let pv = AXValueCreate(.cgPoint, &p), let zv = AXValueCreate(.cgSize, &z) else { return false }
+    // Size, then position, then size again: some apps clamp the size to the screen the window is still on.
+    _ = AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, zv)
+    let a = AXUIElementSetAttributeValue(win, kAXPositionAttribute as CFString, pv)
+    let b = AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, zv)
+    return a == .success || b == .success
+}
+
+func manage(_ spec: [String: Any]) -> Never {
+    let what = spec["do"] as? String ?? ""
+    let confirmed = spec["confirmed"] as? Bool == true
+    let appName = (spec["app"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+    let all = windows()
+    var target: Win? = nil
+    if let id = spec["window"] as? Int { target = all.first { $0.id == id }; if target == nil { fail("No window with id \(id) (it may have closed). Call list_windows again.") } }
+    let running: NSRunningApplication? = {
+        if let t = target { return NSRunningApplication(processIdentifier: t.pid) }
+        if !appName.isEmpty {
+            let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+            return apps.first { ($0.localizedName ?? "").lowercased() == appName.lowercased() } ?? apps.first { appMatches($0.localizedName ?? "", appName) }
+        }
+        return NSWorkspace.shared.frontmostApplication
+    }()
+    guard let app = running else { fail(appName.isEmpty ? "No app is in front." : "\(appName) isn't open.") }
+    let name = app.localizedName ?? appName
+    if isRoamies(app.processIdentifier) { fail("That's Hydra itself.") }
+    if SYSTEM_APPS.contains(app.bundleIdentifier ?? "") && ["quit", "force_quit"].contains(what) { fail("\(name) is part of macOS; it isn't quit this way.") }
+    let ax = AXUIElementCreateApplication(app.processIdentifier)
+    let axWins = attr(ax, kAXWindowsAttribute) as? [AXUIElement] ?? []
+    func window() -> AXUIElement? {
+        if let t = target { return axWindow(ax, t) }
+        if let f = attr(ax, kAXFocusedWindowAttribute) { return (f as! AXUIElement) }
+        return axWins.first
+    }
+    func needYes(_ why: String) -> Never { out(["ok": false, "needsConfirm": true, "why": why, "app": name]) }
+    switch what {
+    case "quit":
+        let unsaved = axWins.filter(edited).count
+        if unsaved > 0 && !confirmed { needYes("\(name) has \(unsaved) window\(unsaved == 1 ? "" : "s") with unsaved changes.") }
+        // A polite quit: the app still asks about anything unsaved itself.
+        out(["ok": app.terminate(), "done": "asked \(name) to quit", "unsaved": unsaved])
+    case "force_quit":
+        if !confirmed { needYes("Force quitting \(name) loses anything unsaved.") }
+        out(["ok": app.forceTerminate(), "done": "force quit \(name)"])
+    case "hide":
+        out(["ok": app.hide(), "done": "hid \(name)"])
+    case "activate":
+        app.unhide()
+        let ok = app.activate(options: [.activateAllWindows])
+        out(["ok": ok, "done": "switched to \(name)"])
+    case "close":
+        guard let w = window() else { fail("\(name) has no window open.") }
+        if edited(w) && !confirmed { needYes("That \(name) window has unsaved changes.") }
+        guard let b = attr(w, kAXCloseButtonAttribute) else { fail("That window can't be closed this way.") }
+        let r = AXUIElementPerformAction(b as! AXUIElement, kAXPressAction as CFString)
+        out(["ok": r == .success, "done": "closed a \(name) window"])
+    case "minimize", "minimise":
+        guard let w = window() else { fail("\(name) has no window open.") }
+        let r = AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        out(["ok": r == .success, "done": "minimised a \(name) window"])
+    case "arrange":
+        guard let w = window(), let cur = frame(w) else { fail("\(name) has no window open.") }
+        let layout = (spec["layout"] as? String ?? "").lowercased()
+        guard let r = layoutRect(layout, visible: visibleArea(for: cur), current: cur) else { fail("Layouts: left, right, top, bottom, full, center.") }
+        app.unhide(); _ = app.activate(options: [])
+        AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        out(["ok": setFrame(w, r), "done": "put the \(name) window \(layout == "full" || layout == "maximize" ? "full screen size" : "on the \(layout)")", "bounds": [Int(r.minX), Int(r.minY), Int(r.width), Int(r.height)]])
+    default:
+        fail("unknown manage step \(what)")
+    }
 }
 
 // ---------- commands ----------
@@ -1468,6 +1582,12 @@ case "--self-test":
     // Regression: CapCut's Scale box is invisible to accessibility, so typing after clicking it was refused every time.
     check("typing after a click in an app that hides its fields", mayType(editable: false, focusRole: "AXWindow", clickedSpot: true))
     check("no typing in such an app without a click first", !mayType(editable: false, focusRole: "AXWindow", clickedSpot: false))
+    let vis = CGRect(x: 0, y: 25, width: 1440, height: 850), cur = CGRect(x: 100, y: 100, width: 800, height: 600)
+    check("arrange left is the left half of the usable area", layoutRect("left", visible: vis, current: cur) == CGRect(x: 0, y: 25, width: 720, height: 850))
+    check("arrange right is the right half", layoutRect("right", visible: vis, current: cur) == CGRect(x: 720, y: 25, width: 720, height: 850))
+    check("arrange full fills the usable area", layoutRect("full", visible: vis, current: cur) == vis)
+    check("arrange center keeps the size and centres it", layoutRect("center", visible: vis, current: cur) == CGRect(x: 320, y: 150, width: 800, height: 600))
+    check("an unknown layout is refused", layoutRect("diagonal", visible: vis, current: cur) == nil)
     check("no typing on a web page outside a field, even after a click", !mayType(editable: false, focusRole: "AXWebArea", clickedSpot: true))
     check("typing in a real text field", mayType(editable: true, focusRole: "AXTextField", clickedSpot: false))
     // Regression: click_text "Speed" (a tab CapCut hides from accessibility) clicked a clip named "MTLSVideoP:speed.mp4".
@@ -2146,6 +2266,11 @@ case "act":
 case "guide":
     runGuide(Array(args.dropFirst()))
 
+case "manage":
+    guard args.count > 1, let data = args[1].data(using: .utf8), let spec = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { fail("manage needs a JSON step") }
+    guard AXIsProcessTrusted() else { fail("Hydra needs Accessibility permission to manage apps and windows.") }
+    manage(spec)
+
 case "secret-get":
     var q = secretQuery(secretName(1))
     q[kSecReturnData as String] = true
@@ -2165,7 +2290,7 @@ case "secret-set":
     if st == errSecItemNotFound {
         var add = secretQuery(name)
         add[kSecValueData as String] = data
-        add[kSecAttrLabel as String] = "Roamies (\(name))"
+        add[kSecAttrLabel as String] = "Hydra (\(name))"
         st = SecItemAdd(add as CFDictionary, nil)
     }
     guard st == errSecSuccess else { fail("keychain save failed (\(st))") }

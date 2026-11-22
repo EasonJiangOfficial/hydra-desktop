@@ -66,6 +66,8 @@
   const SOUNDS = {
     boop: (X, t) => { tone(X, t, { wave: 'p25', f0: 760, f1: 1140, dur: 0.07, vol: 0.45 }); tone(X, t + 0.06, { wave: 'p25', f0: 1520, dur: 0.05, vol: 0.25 }); },
     grab: (X, t) => tone(X, t, { f0: 480, f1: 880, dur: 0.09, vol: 0.5 }),
+    // Hydra going to sleep (the sleep word): one soft falling note, nothing said.
+    sleep: (X, t) => tone(X, t, { wave: 'sine', f0: 660, f1: 330, dur: 0.22, vol: 0.22 }),
     pip: (X, t) => tone(X, t, { f0: 1400, dur: 0.035, vol: 0.18 }),
     whoosh: (X, t) => hiss(X, t, { dur: 0.22, vol: 0.32, f0: 2400, f1: 500, q: 1.2 }),
     bonk: (X, t) => {

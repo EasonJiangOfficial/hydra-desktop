@@ -309,6 +309,9 @@ fn handle_voice(app: &AppHandle, msg: Value) {
             m["type"] = json!("voice_lang");
             to_sidecar(app, &m);
         }
+        // Hydra's sleep and wake: a double clap while it sleeps, or the sleep word while it listens.
+        Some("clap") => to_sidecar(app, &json!({ "type": "agent_power", "on": true, "from": "clap" })),
+        Some("sleep_word") => to_sidecar(app, &json!({ "type": "agent_power", "on": false, "from": "sleep_word" })),
         // The mic list, for the panel's picker.
         Some("mics") => {
             let mut m = msg.clone();

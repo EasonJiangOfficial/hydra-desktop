@@ -83,8 +83,8 @@
   const field = document.createElement('input');
   Object.assign(field.style, { position: 'fixed', left: '0', top: '0', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' });
   // Its name is its look's (the sidecar's LOOKS).
-  const NAMES = { classic: 'Roamie', jarvis: 'JARVIS', glayos: 'GlayOS', ultren: 'Ultren', anime: 'Anime Girl', sarah: 'Sarah', adrian: 'Adrian', rita: 'Rita X' };
-  field.setAttribute('aria-label', 'Message for Roamie');
+  const NAMES = { hydra: 'Hydra' };
+  field.setAttribute('aria-label', 'Message for Hydra');
   field.autocomplete = 'off'; field.spellcheck = false;
   document.addEventListener('DOMContentLoaded', () => document.body.appendChild(field));
   if (document.body) document.body.appendChild(field);
@@ -431,7 +431,23 @@
   }
 
   // ---------- voice (⌃⌥) ----------
+  // ---------- the bridge to the main window: the web app's orb mirrors this one (hydra.rs, docs/BRIDGE.md) ----------
+  let micLevel = 0, hearing2 = false, orbSent = '', orbAt = 0;
+  function orbNow() {
+    const out = Roamie.voiceOut?.playing() ? Roamie.voiceOut.level() : 0;
+    const state = Roamie.asleep ? 'Asleep' : Roamie.voiceOut?.playing() ? 'Speaking' : hearing2 ? 'Listening' : responding ? 'Thinking' : 'Listening';
+    return { state, micLevel: hearing2 ? micLevel : 0, outputLevel: out };
+  }
+  function pushOrb(force = false) {
+    const o = orbNow(), key = `${o.state}|${o.micLevel.toFixed(2)}|${o.outputLevel.toFixed(2)}`, now = performance.now();
+    if (!force && key === orbSent && now - orbAt < 2000) return;
+    orbSent = key; orbAt = now;
+    invoke('orb_state', { msg: o }).catch(() => {});
+  }
+  setInterval(pushOrb, 66);
+
   function onVoice(m) {
+    if (m.type === 'state') hearing2 = m.state === 'listening';
     // Windows: the pen trail while the talk keys are held (pen.js).
     if (m.type === 'ink') { Roamie.pen?.(m); return; }
     const a = getAgent();
@@ -464,7 +480,7 @@
       }
       listen = a.listen({ placeholder: m.mode === 'handsfree' ? 'Listening… tap again to send' : 'Listening…' });
     } else if (m.type === 'partial') { listen?.set(m.text); if (notchOn()) N().heard(m.text); }
-    else if (m.type === 'level') { listen?.level(m.v); if (notchOn()) N().level(m.v); }
+    else if (m.type === 'level') { micLevel = Number(m.v) || 0; listen?.level(m.v); if (notchOn()) N().level(m.v); }
     else if (m.type === 'state' && m.state === 'processing') listen?.processing();
     else if (m.type === 'final') {
       heardText = true;
@@ -512,11 +528,15 @@
     if (held) { held.q.push(m); return; }
     if (m.kind === 'notch') { if (Roamie.notch) { Roamie.notch.enabled = !!m.on; if (m.style) Roamie.notch.style = m.style; if (!m.on) Roamie.notch.close(); } return; }
     if (m.kind === 'sound') { if (Roamie.sfx) Roamie.sfx.enabled = m.on; return; }
+    // Hydra asleep (5 minutes without talk, or the sleep word) or awake: the orb holds still and pale while asleep.
+    if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
+    // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
+    if (m.kind === 'listen_after') { waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
     if (m.kind === 'size') { for (const t of Roamie.tiles ?? []) t.creature.setForm?.(m.size); return; }
     if (m.kind === 'look') {
       for (const t of Roamie.tiles ?? []) t.creature.setLook?.(m.look);
-      field.setAttribute('aria-label', `Message for ${NAMES[m.look] ?? NAMES.classic}`);
-      if (Roamie.notch) { Roamie.notch.name = NAMES[m.look] ?? NAMES.classic; Roamie.notch.look = m.look; }
+      field.setAttribute('aria-label', 'Message for Hydra');
+      if (Roamie.notch) { Roamie.notch.name = 'Hydra'; Roamie.notch.look = 'hydra'; }
       return;
     }
     if (!getAgent()) return;

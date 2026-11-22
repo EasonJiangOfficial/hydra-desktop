@@ -47,11 +47,10 @@
       // Size: 'default', 'small' (half the body) or 'cursor' (a pixel arrow pointer). Text keeps its size either way.
       let form = (typeof location !== 'undefined' && new URLSearchParams(location.search).get('form')) || 'default', lastEnv = null;
       let userForm = form;
-      // Look: 'classic' (the goo blob, and the arrow at cursor size), 'jarvis' (roamies/jarvis.js: a globe of
-      // points with a lit heart, and a HUD reticle at cursor size) or a character from roamies/people.js
-      // ('anime', 'sarah', 'adrian', 'rita', 'ultren', 'glayos'). Moves, sizes and everything else are shared.
-      const drawn = (l) => (l === 'jarvis' ? Roamie.jarvis : Roamie.people?.[l]);
-      const pickLook = (l) => (drawn(l) ? l : 'classic');
+      // Hydra Desktop has one look: 'hydra' (roamies/hydra.js, an open sphere of ink dots). The goo blob ('classic')
+      // is only drawn when hydra.js isn't loaded. Moves and everything else are shared.
+      const drawn = () => Roamie.hydra;
+      const pickLook = () => (Roamie.hydra ? 'hydra' : 'classic');
       let look = pickLook(typeof location !== 'undefined' ? new URLSearchParams(location.search).get('look') : null);
       const jst = { spin: 0, dt: 0.016 };
       // Each hand springs to its pose in the body's own space (o: its offset from the body), so it moves with the body
@@ -108,6 +107,28 @@
         if ((jbuf.get(key) ?? -1) < l) jbuf.set(key, l);
       };
       const jflush = () => { for (const [key, l] of jbuf) put(key % 8192, Math.floor(key / 8192), l); jbuf.clear(); };
+      // The Hydra orb's dots this frame (x, y, r in cells, shade 0 ink..1 pale), and its disc [x, y, r] in px.
+      const vdots = [];
+      let vdisc = null;
+      const SHADES = ['#1D1D1F', '#424245', '#6E6E73', '#A1A1A6', '#C7C7CC'];
+      const drawOrb = (ctx) => {
+        if (!vdots.length || look !== 'hydra') return;
+        ctx.save();
+        if (vdisc) {
+          ctx.beginPath(); ctx.arc(vdisc[0], vdisc[1], vdisc[2], 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.86)'; ctx.fill();
+          ctx.lineWidth = 1; ctx.strokeStyle = '#E5E5EA'; ctx.stroke();
+        }
+        // Far dots first, so the near (ink) ones sit on top.
+        const order = [];
+        for (let i = 0; i < vdots.length; i += 4) order.push(i);
+        order.sort((a, b) => vdots[b + 3] - vdots[a + 3]);
+        for (const i of order) {
+          ctx.fillStyle = SHADES[Math.min(SHADES.length - 1, Math.round(vdots[i + 3] * (SHADES.length - 1)))];
+          ctx.beginPath(); ctx.arc(vdots[i] * P + P / 2, vdots[i + 1] * P + P / 2, Math.max(0.7, vdots[i + 2] * P), 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.restore();
+      };
       const line = (x0, y0, x1, y1, lvl) => {
         const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / P));
         for (let i = 0; i <= n; i++) put(Math.round((x0 + ((x1 - x0) * i) / n) / P), Math.round((y0 + ((y1 - y0) * i) / n) / P), lvl);
@@ -222,7 +243,7 @@
         rows.forEach((r, j) => { for (let i = 0; i < r.length; i++) if (r[i] === '#') for (let a = 0; a < sc; a++) for (let b = 0; b < sc; b++) put(x0 + 2 + i * sc + b, y0 + 2 + j * sc + a, ink); });
       };
       const drawHands = (bx, by) => {
-        if (arms < 0.12 || form === 'cursor' || look === 'jarvis') return;
+        if (arms < 0.12 || form === 'cursor' || look === 'hydra') return;
         // Floating mitts, no arms: they pop out of the body edge and stay readable over it.
         const hr = Math.max(2, Math.round(((R * 0.25) / P) * Math.min(1, arms * 1.25)));
         for (const h of hands) {
@@ -489,27 +510,20 @@
           wide: face.wide, dizzy: face.dizzy, happy: face.happy, sleepy: Math.max(env.sleepy ?? 0, face.sleepy ?? 0),
           mouth: pose?.mouth ?? (act && { wave: null, hype: 'shout', remind: 'o', upset: 'frown', motivate: 'grin' }[A]),
           brow: pose ? pose.brow : A === 'upset' ? 'angry' : A === 'motivate' ? 'determined' : A === 'remind' ? 'raised' : null,
-          rest: pose?.rest ?? null, feel: pose?.feel ?? null, // the voice's feeling: the mouth between words, and JARVIS's heart
+          rest: pose?.rest ?? null, feel: pose?.feel ?? null, // the voice's feeling
         });
-        // The globe's points overlap (the brightest wins); a character is drawn in layers (the last one wins).
-        if (look !== 'jarvis') {
-          const k = { put, L, th };
-          if (form === 'cursor') J.cursor(k, Math.round(bx / P), Math.round(by / P), Math.round(bx / P) - AX, Math.round(by / P) - AY, jst);
-          else J.body(k, bx / P, by / P, R / P, jst);
-          return;
-        }
-        const k = { put: jput, L, th };
-        if (form === 'cursor') J.cursor(k, Math.round(bx / P), Math.round(by / P), Math.round(bx / P) - AX, Math.round(by / P) - AY, jst);
-        else {
-          // A faint projector glow on the floor under the hologram.
-          const fy = (by + R * 1.3) / P, fw = (R * 0.75) / P;
-          for (let y = -1; y <= 1; y++) for (let x = -Math.ceil(fw); x <= Math.ceil(fw); x++) {
-            const u = 1 - Math.hypot(x / fw, y / 1.4);
-            if (u > 0 && u * 0.9 > th(Math.round(bx / P) + x, Math.round(fy) + y)) jput(bx / P + x, fy + y, u > 0.5 ? 2 : 1);
-          }
-          J.body(k, bx / P, by / P, R / P, jst);
-        }
-        jflush();
+        // The orb: round dots drawn on the page's canvas in draw() (vdots), over a translucent white disc. The cells
+        // it covers are marked, so the patch shown (and wiped next frame) holds all of it.
+        vdots.length = 0;
+        const dot = (x, y, r, shade) => vdots.push(x, y, r, shade);
+        Object.assign(jst, { asleep: !!Roamie.asleep, dt: jst.dt });
+        vdisc = form === 'cursor' ? null : [bx, by, R * 1.42];
+        if (form === 'cursor') J.cursor({ dot, L, th }, bx / P, by / P, bx / P - AX, by / P - AY, jst);
+        else J.body({ dot, L, th }, bx / P, by / P, R / P, jst);
+        const ext = vdisc ? vdisc[2] / P + 1 : 6;
+        const gx0 = Math.floor(bx / P - ext), gx1 = Math.ceil(bx / P + ext), gy0 = Math.floor(by / P - ext), gy1 = Math.ceil(by / P + ext);
+        if (gx0 < dx0) dx0 = Math.max(0, gx0); if (gx1 > dx1) dx1 = Math.min(gw - 1, gx1);
+        if (gy0 < dy0) dy0 = Math.max(0, gy0); if (gy1 > dy1) dy1 = Math.min(gh - 1, gy1);
       };
 
       // Following the cursor: how far the body is from its grid cell (dx, dy in CSS px) and that cell, or null.
@@ -835,14 +849,13 @@
             else if (q.size === 2 && q.life > 0.45) { put(gx, gy, q.lvl); put(gx - 1, gy, q.lvl - 1); put(gx + 1, gy, q.lvl - 1); put(gx, gy - 1, q.lvl - 1); put(gx, gy + 1, q.lvl - 1); }
             else put(gx, gy, q.lvl);
           }
-          if (act && act.a > 0.18 && act.a < act.dur - 0.15 && !plug?.calm?.()) {
+          if (act && look !== 'hydra' && act.a > 0.18 && act.a < act.dur - 0.15 && !plug?.calm?.()) {
             const icon = { wave: 'heart', hype: 'bolt', remind: act.a % 1.2 < 0.6 ? 'excl' : 'clock', upset: 'anger', motivate: 'flame' }[A];
             const side = A === 'remind' && hands[0].x > hands[1].x - R ? -1 : 1;
             const sf = env.safe ?? {}, top = Math.ceil(((sf.top ?? 0) + R * 0.9) / P);
             const gx = clamp(Math.round((bx + side * R * 0.95) / P), Math.ceil(((sf.left ?? 0) + R * 0.4) / P), Math.floor((env.w - (sf.right ?? 0) - R * 0.4) / P));
             const gy = Math.max(top, Math.round((by - R * 1.3) / P) - Math.round(Math.abs(Math.sin(act.a * 6))));
-            if (look === 'jarvis') Roamie.jarvis?.readout({ put, L }, gx, gy, icon, act.a, act.dur, !(P < 6 && form === 'default'));
-            else bubble(gx, gy, icon);
+            bubble(gx, gy, icon);
           }
           plug?.gridOver?.(env);
           pd = dx1 >= dx0 ? [dx0, dy0, dx1 + 1, dy1 + 1] : null;
@@ -868,7 +881,7 @@
           // A fingerprint of the picture: the lit cells, where the patch sits and the glide offset. NaN (never equal)
           // whenever something is also drawn outside the grid or the CRT effect is playing.
           let sig = NaN;
-          if (clear && pd && !performing && !crtXform() && !mo && (!plug || plug.quiet?.())) {
+          if (look !== 'hydra' && clear && pd && !performing && !crtXform() && !mo && (!plug || plug.quiet?.())) {
             let h = 2166136261 ^ (rect[0] * 73856093) ^ (rect[1] * 19349663) ^ (rect[2] * 83492791) ^ rect[3];
             for (let y = pd[1] * K; y < pd[3] * K; y++) for (let i = y * IW + pd[0] * K, e = y * IW + pd[2] * K; i < e; i++) h = Math.imul(h ^ u32[i], 16777619);
             const glide = !!m.drive && pres.state === 'shown';
@@ -904,7 +917,7 @@
             ctx.save();
             ctx.translate(bx, by - mx.lift); ctx.rotate(mx.rot); ctx.scale(Math.max(mx.sx, 0.0001), Math.max(mx.sy, 0.0001)); ctx.translate(-bx, -by);
           }
-          if (!crt || crt.sx > 0.01) ctx.drawImage(off, sx, sy, sw, sh, X, Y, DW, DH);
+          if (!crt || crt.sx > 0.01) { ctx.drawImage(off, sx, sy, sw, sh, X, Y, DW, DH); drawOrb(ctx); }
           if (crt && crt.flash > 0.01 && crt.sx > 0.01) {
             // over-exposed tube warming up / cooling down
             ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = crt.flash * 0.85;
@@ -955,9 +968,5 @@
     },
   });
 
-  Roamie.register(Roamie.ditherKit({
-    id: 'dither', label: 'Dither blob', bg: '#0f380f',
-    pal: [[15, 56, 15], [48, 98, 48], [139, 172, 15], [155, 188, 15]],
-    grid: 'rgba(15,56,15,0.18)',
-  }));
+
 })();

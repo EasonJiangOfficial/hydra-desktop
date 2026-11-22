@@ -478,12 +478,12 @@ final class AutoGain {
 // The name can be the user's own ("Hey Jarvis"); the greeting stays, so the name alone in a sentence never wakes it.
 enum WakeWord {
     static let greetings: Set<String> = ["hey", "hi", "hay", "heya", "hiya"]
-    static let defaultNames = ["roamies", "roamie"]
+    static let defaultNames = ["hydra"]
     // Set and read on the main thread.
     private(set) static var names = defaultNames
-    /// The chosen name as a word for the recogniser's hints ("Jarvis"); nil for Roamies.
+    /// The chosen name as a word for the recogniser's hints ("Jarvis"); nil for Hydra.
     private(set) static var custom: String?
-    static var hints: [String] { ["Roamies", "Roamie", "JARVIS"] + (custom.map { [$0] } ?? []) }
+    static var hints: [String] { ["Hydra"] + (custom.map { [$0] } ?? []) }
 
     /// Sets the name after the greeting; nil, "" or Roamies goes back to Roamies. Letters only, 4 to 20 of them;
     /// anything else is refused (returns false) and the name stays as it was.
@@ -498,14 +498,14 @@ enum WakeWord {
 
     /// Whether a heard word (within the allowed edits) is shaped like the name. Roamies keeps its own tuned rule.
     static func plausible(_ heard: String) -> Bool {
-        guard custom != nil, let n = names.first else { return heard.hasPrefix("r") && heard.contains("m") && heard.count >= 5 }
+        guard custom != nil, let n = names.first else { return heard.hasPrefix("h") && heard.count >= 4 && heard.count <= 7 }
         return heard.first == n.first && heard.count >= n.count - 1
     }
 
     /// Edits allowed for the next word, and one fewer for two words joined ("Roam ies"). A short name of the user's own
     /// must be heard exactly ("Nova" mustn't take "Nora"); 6 or 7 letters allow one edit, longer ones two.
     static var allowedEdits: Int {
-        guard custom != nil else { return 2 }
+        guard custom != nil else { return 1 } // Hydra: one edit ("Hidra", "Hydro"), never "Heather"
         let n = names.first?.count ?? 0
         return n >= 8 ? 2 : n >= 6 ? 1 : 0
     }
@@ -588,6 +588,22 @@ enum WakeWord {
     }
 }
 
+// The sleep word (default "Hydra, sleep"; a setting): heard while Hydra listens, it puts Hydra to sleep at once.
+// Its words in order, anywhere in what was said; words of 5 letters or more may be one letter off ("Hidra").
+enum SleepWord {
+    private(set) static var words = ["hydra", "sleep"]
+    static func set(_ phrase: String) {
+        let w = WakeWord.tokens(phrase).map(\.word)
+        words = w.isEmpty ? ["hydra", "sleep"] : w
+    }
+    static func heard(in text: String) -> Bool {
+        let got = WakeWord.tokens(text).map(\.word)
+        guard got.count >= words.count else { return false }
+        for i in 0 ... got.count - words.count where zip(got[i...], words).allSatisfy({ a, b in a == b || (b.count >= 5 && WakeWord.edits(a, b) <= 1) }) { return true }
+        return false
+    }
+}
+
 final class Voice {
     // wake: listening quietly for "Hey Roamies" (no pill, nothing muted); hearing it turns into a hands-free take.
     enum Phase { case idle, wake, armed, holding, handsFree, finishing }
@@ -611,6 +627,18 @@ final class Voice {
     private var configObserver: NSObjectProtocol?
     // Wake word: on in settings; held off while Roamies answers and speaks; resting just after a take.
     private var wakeOn = false
+    // Asleep: the mic is open only for the double-clap detector (clap.swift); no words are made of anything.
+    private var clapOn = false, clapRetryAt = 0.0
+    lazy var clapper = ClapListener { [weak self] in
+        guard let self, self.clapOn else { return }
+        log("double clap")
+        emit(["type": "clap"])
+    }
+    func setClap(_ on: Bool) {
+        guard on != clapOn else { return }
+        clapOn = on; clapRetryAt = 0
+        if !on { clapper.stop() }
+    }
     var wakeHold = false {
         didSet { if wakeOn && wakeHold != oldValue { wakeLog(wakeHold ? "paused while Roamies answers" : "resumed") } }
     }
@@ -788,6 +816,13 @@ final class Voice {
             if releasedAt == nil { releasedAt = now }
             return now - (releasedAt ?? now) >= Self.releaseDebounce
         }()
+
+        // The clap detector has the mic only while nothing else does: a take or wake listening stops it.
+        if clapper.running && (!clapOn || phase != .idle) { clapper.stop() }
+        else if clapOn && phase == .idle && !clapper.running && now >= clapRetryAt && !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+            if engine != nil { stopAudio(close: true) }
+            if !clapper.start(device: InputDevice.forListening()) { clapRetryAt = now + 30 }
+        }
 
         switch phase {
         case .idle:
@@ -1028,6 +1063,7 @@ final class Voice {
         guard text != wakeText else { return }
         let now = uptime()
         wakeText = text; heardAt = now
+        if SleepWord.heard(in: text) { wakeLog("heard the sleep word"); emit(["type": "sleep_word"]); recycleWake(now); return }
         let (rest, d, miss) = WakeWord.scan(text)
         guard let rest else { if let miss { wakeMiss = miss }; return }
         wakeLog("heard the phrase (distance \(d ?? 0))")
@@ -1279,6 +1315,8 @@ if args.contains("--test-gain") {
     check("boost applies to every channel and never clips", (0 ..< 2).allSatisfy { c in buf.floatChannelData![c][3] == 1 })
     exit(bad == 0 ? 0 : 1)
 }
+// --test-clap checks the double-clap detector on made-up sounds (clap.swift); exits 1 on a failure.
+if args.contains("--test-clap") { exit(ClapTest.run()) }
 // --test-wake checks the wake phrase matcher on transcripts the recogniser could write; exits 1 on a failure.
 if args.contains("--test-wake") {
     var bad = 0
@@ -1287,45 +1325,47 @@ if args.contains("--test-wake") {
         print("\(got == want ? "ok" : "FAIL") \"\(text)\" -> \(got.map { "\"\($0)\"" } ?? "no wake")")
         if got != want { bad += 1 }
     }
-    check("Hey Roamies", "")
-    check("Hey Roamies, open Safari.", "open Safari.")
-    check("hey roamies open safari", "open safari")
-    check("Hey, Roamies.", "")
-    check("Hi Roamies what time is it?", "what time is it?")
-    check("Hey Romies", "")
-    check("Hey Roamie's, open Notes", "open Notes")
-    check("Hey Roamie", "")
-    check("Hey Roomies, play some music", "play some music")
-    check("Hey Romi's", "")
-    check("Hey, Romees.", "")
-    check("Hey Romy's", nil) // three edits away
-    check("Hey roam ies, hello", "hello")
-    check("That's it. Hey Roamies, open Mail", "open Mail")
-    check("HEY ROAMIES! What's on today?", "What's on today?")
-    check("Hey Roamies\u{2019} open notes", "open notes")
-    check("Hey Ronnie", nil)
-    check("Hey Robbie, come here", nil)
-    check("Hey Rome", nil)
-    check("Hey rooms", nil)
-    check("Hey ramen", nil)
-    check("Hey Remy", nil)
-    check("Hey rhymes", nil)
-    check("Hey room is ready", nil)
-    check("Roamies is great", nil)
-    check("I told him hey Roamies", nil)
-    check("Um hey Roamies, open Mail", "open Mail")
-    check("Okay, hi Roamies", "")
-    check("The hey Romies what time is it", "what time is it")
-    check("So I said hey Roamies", nil)
+    check("Hey Hydra", "")
+    check("Hey Hydra, open Safari.", "open Safari.")
+    check("hey hydra open safari", "open safari")
+    check("Hey, Hydra.", "")
+    check("Hi Hydra what time is it?", "what time is it?")
+    check("Hey Hidra", "")
+    check("Hey Hydro, play some music", "play some music")
+    check("Hey Hydra's, open Notes", "open Notes")
+    check("That's it. Hey Hydra, open Mail", "open Mail")
+    check("HEY HYDRA! What's on today?", "What's on today?")
+    check("Hey Heather", nil)
+    check("Hey Hey", nil)
+    check("Hey Harry, come here", nil)
+    check("Hey hi", nil)
+    check("Hydra is great", nil)
+    check("I told him hey Hydra", nil)
+    check("Um hey Hydra, open Mail", "open Mail")
+    check("Okay, hi Hydra", "")
+    check("So I said hey Hydra", nil)
     check("Hey there", nil)
     check("Hey", nil)
-    check("Hey. Roamies", nil)
+    check("Hey. Hydra", nil)
     check("", nil)
+    // The sleep word, anywhere in what was said.
+    func sleeps(_ text: String, _ want: Bool) { let got = SleepWord.heard(in: text); print("\(got == want ? "ok" : "FAIL") sleep \"\(text)\" -> \(got)"); if got != want { bad += 1 } }
+    sleeps("Hydra, sleep.", true)
+    sleeps("hydra sleep", true)
+    sleeps("Okay Hidra sleep now", true)
+    sleeps("Hydra, open Sleep Cycle", false)
+    sleeps("I need sleep", false)
+    sleeps("Hydra", false)
+    SleepWord.set("Goodnight Hydra")
+    sleeps("goodnight, Hydra", true)
+    sleeps("Hydra, sleep", false)
+    SleepWord.set("")
+    sleeps("Hydra, sleep", true)
     // A later reading of the take that no longer matches the phrase: its words still come off.
     func dropped(_ n: Int, _ text: String, _ want: String) { let got = WakeWord.dropping(n, from: text); print("\(got == want ? "ok" : "FAIL") drop \(n) \"\(text)\" -> \"\(got)\""); if got != want { bad += 1 } }
-    dropped(2, "Hey Romy's, what time is it?", "what time is it?")
-    dropped(2, "Hey Romy's", "")
-    dropped(3, "Um hey Romy's open Mail", "open Mail")
+    dropped(2, "Hey Hyde, what time is it?", "what time is it?")
+    dropped(2, "Hey Hyde", "")
+    dropped(3, "Um hey Hyde open Mail", "open Mail")
     dropped(0, "open Mail", "open Mail")
     // A name of the user's own.
     func named(_ ok: Bool, _ name: String) { let got = WakeWord.setName(name); print("\(got == ok ? "ok" : "FAIL") name \"\(name)\" \(ok ? "taken" : "refused")"); if got != ok { bad += 1 } }
@@ -1339,14 +1379,14 @@ if args.contains("--test-wake") {
     check("Hey Jar vis, hello", "hello")
     check("Hey Travis", nil)
     check("Hey Service", nil)
-    check("Hey Roamies", nil)
+    check("Hey Hydra", nil)
     check("Jarvis is great", nil)
     check("I told him hey Jarvis", nil)
     named(true, "Nova")
     check("Hey Nova, play music", "play music")
     check("Hey Nora", nil) // a short name must be heard exactly
     named(true, "")
-    check("Hey Roamies, open Mail", "open Mail")
+    check("Hey Hydra, open Mail", "open Mail")
     check("Hey Jarvis", nil)
     exit(bad == 0 ? 0 : 1)
 }
@@ -1546,10 +1586,15 @@ Thread.detachNewThread {
         // The listening pill beside the cursor: off while the notch capsule shows it instead.
         case "pill": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.wave.off = !on; if !on { voice.wave.hide() } } }
         case "wake": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.setWake(on) } }
+        // Hydra is asleep: listen for a double clap only ({"cmd":"clap","on":true,"sensitivity":0.5}).
+        case "clap":
+            let on = msg["on"] as? Bool == true, k = msg["sensitivity"] as? Double
+            DispatchQueue.main.async { if let k { voice.clapper.sensitivity = k }; voice.setClap(on) }
+        case "sleep_word": let p = msg["phrase"] as? String ?? ""; DispatchQueue.main.async { SleepWord.set(p) }
         // The name after "Hey" (empty: Roamies). Only whether it's custom is logged, never the word.
         case "wake_name":
             let word = msg["word"] as? String ?? ""
-            DispatchQueue.main.async { log(WakeWord.setName(word) ? "wake name: \(WakeWord.custom == nil ? "Roamies" : "custom")" : "wake name refused") }
+            DispatchQueue.main.async { log(WakeWord.setName(word) ? "wake name: \(WakeWord.custom == nil ? "Hydra" : "custom")" : "wake name refused") }
         // Roamies is answering or speaking: don't listen for the phrase (it mustn't wake itself).
         case "wake_hold": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.wakeHold = on }
         case "mute": if let on = msg["on"] as? Bool { DispatchQueue.main.async { OutputMute.enabled = on; if !on { OutputMute.end() } } }

@@ -1,89 +1,61 @@
-/* The panel that opens from the menu bar or tray icon. Built on the setup guide's stylesheet (fonts, colours,
-   pixel frames, buttons, switches, fields), so it's the same LED-panel world; this file only lays it out.
-   One accent fill per view: the header's update button when there is one, otherwise Ask. */
+/* The panel that opens from the menu bar icon. Built on the setup guide's stylesheet (type, colours, boxes, buttons,
+   switches, fields: Hydra's design language, DESIGN.md section 7); this file only lays it out. One filled (ink)
+   button per view. */
 :root {
   --gut: 16px;      /* the one inline gutter: header, pages and note */
   --step: 10px;     /* gap inside a group */
   --group: 22px;    /* gap between groups */
-  /* Type scale, four steps: the title, section heads, everything you read (descriptions, rows, empty
-     states), and the small print (dates, hints, timestamps, labels, buttons). */
-  --t-head: 13px; --t-body: 12px; --t-small: 11px;
-  /* Motion: the CRT switch-on when it opens, and the switch-off when it closes (main.rs waits --shut). */
-  --open: 240ms; --shut: 150ms;
+  /* Type scale: the title, section heads, everything you read, and labels (13 px gray, sentence case). */
+  --t-head: 13px; --t-body: 13px; --t-small: 12px;
+  /* Motion: a short fade and rise when it opens, a faster fade when it closes (main.rs waits --shut). */
+  --open: 220ms; --shut: 150ms;
 }
-/* The window is transparent and so is the page; the frame is its own box (a body background would be
-   painted across the whole window), so the panel can switch on and off as its own shape. */
+/* The window is transparent and so is the page; the frame is its own box, a white card with a hairline. */
 html, body { height: 100%; background: transparent; }
 .frame {
   height: 100%; display: flex; flex-direction: column; overflow: hidden;
-  background:
-    radial-gradient(circle at 50% 50%, rgba(80, 210, 190, 0.07) 0.9px, transparent 1.3px) 0 0 / 8px 8px,
-    var(--bg);
+  background: var(--bg);
   color: var(--ink);
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-card);
   transform-origin: 50% 0;
 }
-/* Above the icon (a taskbar at the bottom): it opens from its bottom edge. */
 .frame.from-bottom { transform-origin: 50% 100%; }
-
-/* Opening: a bright line at the icon's edge that opens out into the panel, like a CRT switching on. */
-.frame.opening { animation: crt-on var(--open) steps(8, end) both; }
-@keyframes crt-on {
-  0% { transform: scaleY(0.012); filter: brightness(2.6); opacity: 0.4; }
-  40% { transform: scaleY(1.01); filter: brightness(1.5); opacity: 1; }
-  100% { transform: none; filter: none; opacity: 1; }
-}
-/* Closing: it folds back into the line and goes dark. */
-.frame.shutting { animation: crt-off var(--shut) steps(5, end) both; pointer-events: none; }
-@keyframes crt-off {
-  0% { transform: none; filter: none; opacity: 1; }
-  60% { transform: scaleY(0.012); filter: brightness(2.6); opacity: 1; }
-  100% { transform: scaleY(0.012) scaleX(0); opacity: 0; }
-}
+.frame.opening { animation: panel-in var(--open) var(--ease) both; }
+@keyframes panel-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.frame.from-bottom.opening { animation-name: panel-in-up; }
+@keyframes panel-in-up { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.frame.shutting { animation: panel-out var(--shut) var(--ease) both; pointer-events: none; }
+@keyframes panel-out { to { opacity: 0; transform: translateY(-4px); } }
 .frame.shut { opacity: 0; }
 
-/* Rows dissolve in through an LED dither, one after another from top to bottom, and nothing slides: a
-   quarter of the dots, then half (a checkerboard), then three quarters, then the whole row. --i: the row's
-   place, set by panel.js (capped, so a long list doesn't wait). */
-:root {
-  --d1: conic-gradient(#000 0 25%, transparent 0);
-  --d2: conic-gradient(#000 0 25%, transparent 0 50%, #000 0 75%, transparent 0);
-  --d3: conic-gradient(transparent 0 25%, #000 0);
-}
-.pane.enter > *, .pane.enter .list > li { animation: dissolve-in 200ms step-end both; animation-delay: calc(var(--i, 0) * 26ms); }
-@keyframes dissolve-in {
-  0% { opacity: 0; }
-  25% { opacity: 1; -webkit-mask: var(--d1) 0 0 / 2px 2px; mask: var(--d1) 0 0 / 2px 2px; }
-  50% { opacity: 1; -webkit-mask: var(--d2) 0 0 / 2px 2px; mask: var(--d2) 0 0 / 2px 2px; }
-  75% { opacity: 1; -webkit-mask: var(--d3) 0 0 / 2px 2px; mask: var(--d3) 0 0 / 2px 2px; }
-  100% { opacity: 1; -webkit-mask: none; mask: none; }
-}
-/* A row being taken away (removed, forgotten, done, dropped) dissolves out the same way, then the list closes up. */
-.list > li.leaving { animation: dissolve-out 200ms step-end both; pointer-events: none; }
+/* Rows fade in, one after another from top to bottom (--i: the row's place, set by panel.js, capped). */
+.pane.enter > *, .pane.enter .list > li { animation: row-in 200ms var(--ease) both; animation-delay: calc(var(--i, 0) * 20ms); }
+@keyframes row-in { from { opacity: 0; transform: translateY(3px); } }
+/* A row being taken away fades out, then the list closes up. */
+.list > li.leaving { animation: row-out 160ms var(--ease) both; pointer-events: none; }
 .list > li.gone { display: none; }
-@keyframes dissolve-out {
-  0% { -webkit-mask: var(--d3) 0 0 / 2px 2px; mask: var(--d3) 0 0 / 2px 2px; }
-  33% { -webkit-mask: var(--d2) 0 0 / 2px 2px; mask: var(--d2) 0 0 / 2px 2px; }
-  67% { -webkit-mask: var(--d1) 0 0 / 2px 2px; mask: var(--d1) 0 0 / 2px 2px; }
-  100% { opacity: 0; }
+@keyframes row-out { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .frame.opening, .frame.shutting, .pane.enter > *, .pane.enter .list > li, .list > li.leaving { animation: none; }
 }
 
 /* ---------- header: who, and what it's doing right now ---------- */
 .head { display: flex; align-items: center; gap: 8px; padding: 6px var(--gut) 6px 4px; }
 .head-text { min-width: 0; flex: 1; display: grid; }
-/* The Roamie stands on a small LED pad, like the setup guide's. */
-.avatar { flex: none; width: 100px; height: 74px; margin-inline-end: -10px; background: radial-gradient(closest-side, rgba(120, 255, 226, 0.10), transparent) 50% 92% / 70% 22% no-repeat; }
+/* The Hydra orb, live: it shows what the agent is doing. */
+.avatar { flex: none; width: 64px; height: 64px; margin-inline-end: 2px; }
 /* Something it says (a new look, an update; not the setup guide's .quip bubble): in the status line's place for a moment, typed in its own font. */
 .head-text .by, .head-text .saying { grid-area: 2 / 1; }
 .saying {
-  margin: 4px 0 0; font: 700 var(--t-body)/1.4 var(--display); letter-spacing: 0.03em; color: var(--accent);
+  margin: 4px 0 0; font: 500 var(--t-body)/1.4 var(--display); color: var(--accent);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; visibility: hidden;
 }
-.saying.on { visibility: visible; animation: dissolve-in 200ms step-end both; }
+.saying.on { visibility: visible; animation: row-in 200ms var(--ease) both; }
 .by.quiet { visibility: hidden; }
 .who { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .who h1 {
-  margin: 0; font: 900 22px/1.1 var(--display); letter-spacing: 0.02em; color: var(--ink);
+  margin: 0; font: 500 22px/1.1 var(--display); color: var(--ink);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* The version and the one update button beside the name: Check for updates, then Update to x (the one accent
@@ -104,20 +76,20 @@ html, body { height: 100%; background: transparent; }
   --bc: var(--line); --fill: var(--panel); color: var(--ink-2);
 }
 .looktile canvas { display: block; width: 104px; height: 76px; }
-.looktile .name { font: 700 var(--t-small)/1.25 var(--mono); font-stretch: 87.5%; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
+.looktile .name { font: 500 var(--t-small)/1.25 var(--mono); white-space: nowrap; }
 .looktile:hover { --bc: var(--line-hi); color: var(--ink); }
-.looktile[aria-checked="true"] { --bc: var(--accent); --fill: #0a2a28; color: var(--accent); }
+.looktile[aria-checked="true"] { --bc: var(--accent); --fill: var(--tint); color: var(--accent); }
 
 /* ---------- About: who made it ---------- */
 .maker { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.maker canvas { flex: none; width: 100px; height: 74px; margin-inline-start: -14px; background: radial-gradient(closest-side, rgba(120, 255, 226, 0.10), transparent) 50% 92% / 70% 22% no-repeat; }
-.maker > span { min-width: 0; font: 700 var(--t-head)/1.35 var(--mono); color: var(--ink); white-space: nowrap; }
+.maker canvas { display: none; }
+.maker > span { min-width: 0; font: 500 var(--t-head)/1.35 var(--mono); color: var(--ink); white-space: nowrap; }
 .maker > span small { display: block; font: 400 var(--t-small)/1.35 var(--mono); color: var(--ink-3); }
 
 /* ---------- sidebar: one page per concern ---------- */
-.split { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--side) minmax(0, 1fr); border-top: 1px dashed var(--line); }
+.split { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--side) minmax(0, 1fr); border-top: 1px solid var(--line); }
 :root { --side: 148px; }
-.side { display: flex; flex-direction: column; gap: 4px; padding: 12px 10px var(--gut); border-right: 1px dashed var(--line); overflow-y: auto; }
+.side { display: flex; flex-direction: column; gap: 4px; padding: 12px 10px var(--gut); border-right: 1px solid var(--line); overflow-y: auto; }
 .nav { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
 /* A page link: quiet text until it's hovered or current; the current one sits in the accent LED frame. */
 .navi {
@@ -125,15 +97,15 @@ html, body { height: 100%; background: transparent; }
   display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 7px 8px; text-align: start;
   font: 500 var(--t-body)/1.25 var(--mono); color: var(--ink-2); white-space: nowrap;
   --bc: transparent; --fill: transparent;
-  transition: color 120ms steps(2, end);
+  transition: color 120ms var(--ease);
 }
-.navi:hover { color: var(--ink); --fill: rgba(120, 255, 226, 0.05); }
-.navi[aria-current="page"] { color: var(--accent); font-weight: 700; --fill: #0a2a28; --bc: var(--accent); }
+.navi:hover { color: var(--ink); --fill: rgba(29, 29, 31, 0.05); }
+.navi[aria-current="page"] { color: var(--ink); font-weight: 500; --fill: var(--tint); --bc: transparent; }
 /* Needs you (an update, no account): one small LED at the end, nothing more. */
-.navi .dot { display: none; width: 6px; height: 6px; margin-inline-start: auto; background: var(--accent); }
+.navi .dot { display: none; width: 6px; height: 6px; border-radius: 50%; margin-inline-start: auto; background: var(--ink); }
 .navi.flag .dot { display: block; }
-.navi.ping { animation: navi-ping 240ms steps(3, end); }
-@keyframes navi-ping { 0% { filter: brightness(1.9); } 100% { filter: none; } }
+.navi.ping { animation: navi-ping 240ms var(--ease); }
+@keyframes navi-ping { 0% { opacity: .5; } 100% { opacity: 1; } }
 
 /* ---------- panes ---------- */
 /* Pages fit the window: long lists show a page at a time with arrows in the page's footer. A page of settings taller
@@ -163,7 +135,7 @@ html, body { height: 100%; background: transparent; }
 /* The page's footer: what's about the whole list on the left, the page arrows on the right. */
 .pfoot {
   flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  min-height: 44px; margin-top: calc(var(--step) - var(--group)); border-top: 1px dashed var(--line);
+  min-height: 44px; margin-top: calc(var(--step) - var(--group)); border-top: 1px solid var(--line);
 }
 .pfoot-l { min-width: 0; display: flex; align-items: center; }
 .pager { display: flex; align-items: center; gap: 8px; margin-inline-start: auto; }
@@ -174,8 +146,8 @@ html, body { height: 100%; background: transparent; }
 .mhead .link { flex: none; }
 .tab {
   appearance: none; border: 0; background: none; cursor: pointer; padding: 4px 0 6px; display: flex; align-items: baseline; gap: 8px;
-  font: 700 var(--t-body)/1.3 var(--mono); font-stretch: 87.5%; color: var(--ink-3); white-space: nowrap;
-  box-shadow: inset 0 -2px 0 transparent; transition: color 120ms steps(2, end), box-shadow 120ms steps(2, end);
+  font: 500 var(--t-body)/1.3 var(--mono); color: var(--ink-3); white-space: nowrap;
+  box-shadow: inset 0 -2px 0 transparent; transition: color 120ms var(--ease), box-shadow 120ms var(--ease);
 }
 .tab:hover { color: var(--ink-2); }
 .tab[aria-selected="true"] { color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
@@ -188,7 +160,7 @@ html, body { height: 100%; background: transparent; }
 /* A description reads at the same size as the rows under it; it's quieter by colour, not by size. */
 /* A section's description wraps rather than being cut off: it's the only place that says what the section is for. */
 .ghead p { margin: 0; font-size: var(--t-body); line-height: 1.4; color: var(--ink-3); overflow-wrap: break-word; text-wrap: pretty; }
-.sub { margin: 0; font: 700 var(--t-small)/1.3 var(--mono); font-stretch: 87.5%; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.sub { margin: 0; font: 500 var(--t-small)/1.3 var(--mono); color: var(--ink-3); }
 
 /* Buttons here are a size down from the guide's; mini ones (header, footer, row ends) a size down again. */
 .body .btn, .head .btn { padding: 8px 12px; font-size: var(--t-small); line-height: 1.25; white-space: nowrap; }
@@ -202,7 +174,7 @@ html, body { height: 100%; background: transparent; }
 .list { margin: 0; padding: 0; list-style: none; display: grid; }
 .item {
   display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 8px;
-  min-height: 32px; padding: 6px 0; border-bottom: 1px dashed var(--line);
+  min-height: 32px; padding: 6px 0; border-bottom: 1px solid var(--line);
 }
 .item:last-child { border-bottom: 0; }
 .item .text { min-width: 0; font-size: var(--t-body); line-height: 1.35; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -210,22 +182,22 @@ html, body { height: 100%; background: transparent; }
 .item .text small { display: block; font-size: var(--t-small); line-height: 1.3; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }
 .item.ask .text { color: var(--ink-2); }
 .item.bad .text, .item .text small.late { color: var(--danger); }
-.mark { width: 8px; height: 8px; justify-self: center; background: #1e3f3d; }
+.mark { width: 8px; height: 8px; justify-self: center; background: var(--line-hi); }
 
 /* ---------- What's new: one change per row, the title and its kind on one line, the date, then a line or two ---------- */
 .item.wn { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 3px; padding: 8px 0; }
 .wn-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.wn-title { min-width: 0; font: 700 var(--t-body)/1.3 var(--mono); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wn-title { min-width: 0; font: 500 var(--t-body)/1.3 var(--mono); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The kind: a solid LED fill and its word (never colour alone), brightest for New. */
-.wn-kind { flex: none; margin-inline-start: auto; padding: 2px 6px; font: 700 var(--t-small)/1.25 var(--mono); font-stretch: 87.5%; letter-spacing: 0.06em; text-transform: uppercase; }
+.wn-kind { flex: none; margin-inline-start: auto; padding: 2px 6px; font: 500 var(--t-small)/1.25 var(--mono); }
 .wn-kind.k-new { background: var(--accent); color: var(--accent-ink); }
 .wn-kind.k-improved { background: var(--line-hi); color: var(--ink); }
 .wn-kind.k-fixed { background: var(--line); color: var(--ink); }
-.wn-kind.k-removed { background: #12302e; color: var(--ink-2); }
+.wn-kind.k-removed { background: var(--tint); color: var(--ink-2); }
 .wn-date { font-size: var(--t-small); line-height: 1.3; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .wn-text { margin: 0; min-height: 2.8em; font-size: var(--t-small); line-height: 1.4; color: var(--ink-2); } /* two lines kept, so every row is one height */
 /* This update's changes: lit like the current page in the sidebar, the rest as they were. */
-.item.wn.fresh { padding-inline: 10px; background: #0a2a28; color: var(--ink); border-bottom-color: var(--bg); }
+.item.wn.fresh { padding-inline: 10px; background: var(--tint); color: var(--ink); border-bottom-color: var(--bg); }
 .item.did .mark { background: var(--accent-lo); }
 .item.bad .mark { background: var(--danger); }
 /* A question: two stacked bars, like a quote, instead of a dot. */
@@ -243,11 +215,11 @@ html, body { height: 100%; background: transparent; }
 /* A row action that asks first: Forget turns into Confirm in the same spot, then goes back if left alone.
    Both words sit in the same cell so the row never shifts or wraps. */
 .arm { display: inline-grid; justify-items: end; }
-.arm > span { grid-area: 1 / 1; padding: 1px 6px; transition: opacity 90ms steps(2, end); }
+.arm > span { grid-area: 1 / 1; padding: 1px 6px; transition: opacity 90ms var(--ease); }
 .arm > .yes { opacity: 0; }
 .arm[aria-pressed="true"] > .no { opacity: 0; }
-.arm[aria-pressed="true"] > .yes { opacity: 1; color: var(--accent-ink); background: var(--danger); animation: arm-blink 600ms steps(2, end) 2; }
-@keyframes arm-blink { 50% { background: #ff8a78; } }
+.arm[aria-pressed="true"] > .yes { opacity: 1; color: var(--accent-ink); background: var(--danger); animation: arm-blink 600ms var(--ease) 2; }
+@keyframes arm-blink { 50% { background: var(--danger); } }
 
 /* Memory and commitment rows: no marker, just the text and its tick (done) and X (forget, drop). Pressed, a tick or
    X becomes Confirm in place and the row's other one folds away; both ease in and out. */
@@ -260,7 +232,7 @@ html, body { height: 100%; background: transparent; }
 }
 .ibtn:first-child { margin-inline-start: 0; }
 .ibtn:hover { color: var(--accent-hi); }
-.ibtn.danger:hover { color: #ffcbc2; }
+.ibtn.danger:hover { color: var(--danger); }
 .ibtn > span { display: inline-flex; align-items: center; overflow: hidden; transition: max-width .2s var(--ease), opacity .16s var(--ease), padding .2s var(--ease); }
 .ibtn > .no { max-width: 14px; }
 .ibtn > .no svg { display: block; flex: none; }
@@ -289,8 +261,8 @@ html, body { height: 100%; background: transparent; }
 /* The pixel-chevron dropdown (setup no longer has one, so it lives here). */
 .body select {
   appearance: none; min-width: 0; flex: 1; border: 0; color: var(--ink); padding-inline-end: 30px;
-  font-family: var(--mono); font-weight: 500; font-stretch: 87.5%; cursor: pointer;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 2h2v2H6zM8 0h2v2H8z' fill='%23b4d8d1'/%3E%3C/svg%3E") no-repeat right 12px center;
+  font-family: var(--mono); font-weight: 500; cursor: pointer;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 2h2v2H6zM8 0h2v2H8z' fill='%236E6E73'/%3E%3C/svg%3E") no-repeat right 12px center;
 }
 .body select option { background: var(--panel); color: var(--ink); }
 .body select:focus-visible { outline: none; }
@@ -332,11 +304,11 @@ html, body { height: 100%; background: transparent; }
 /* Centred on the 4px track: (4 - 12) / 2. */
 .effort-range::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none; width: 12px; height: 12px; margin-top: -4px; border: 0; border-radius: 0;
-  background: var(--accent); box-shadow: 0 0 8px rgba(120, 255, 226, 0.6); cursor: pointer;
+  background: var(--accent); box-shadow: none; cursor: pointer;
 }
 .effort-range::-moz-range-track { height: 4px; background: var(--line); }
 .effort-range::-moz-range-progress { height: 4px; background: var(--accent); }
-.effort-range::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 0; background: var(--accent); box-shadow: 0 0 8px rgba(120, 255, 226, 0.6); cursor: pointer; }
+.effort-range::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 0; background: var(--accent); box-shadow: none; cursor: pointer; }
 .effort-range:focus-visible::-webkit-slider-thumb { background: var(--ink); box-shadow: 0 0 0 2px var(--bg); }
 .effort-range:focus-visible::-moz-range-thumb { background: var(--ink); box-shadow: 0 0 0 2px var(--bg); }
 /* The stops' names under their stops (--i of --n): the first and last flush with the ends of the track, the others
@@ -345,7 +317,7 @@ html, body { height: 100%; background: transparent; }
 .effort-ticks span { position: absolute; top: 0; left: calc(var(--t) / 2 + (100% - var(--t)) * var(--i) / (var(--n) - 1)); transform: translateX(-50%); color: var(--ink-3); white-space: nowrap; }
 .effort-ticks span:first-child { left: 0; transform: none; }
 .effort-ticks span:last-child { left: auto; right: 0; transform: none; }
-.effort-ticks span.on { color: var(--accent); font-weight: 700; }
+.effort-ticks span.on { color: var(--accent); font-weight: 500; }
 /* Narrow: the names of the middle stops step aside (they keep their place), so the ends and the lit stop never collide. */
 @container (max-width: 240px) {
   .effort-ticks span:not(:first-child):not(:last-child):not(.on) { visibility: hidden; }
@@ -354,17 +326,17 @@ html, body { height: 100%; background: transparent; }
 
 /* Tooltip: a small LED-framed card against its control, dissolving in like the rows. */
 .tip {
-  position: fixed; z-index: 20; width: max-content; padding: 6px 10px; --bc: var(--line-hi); --fill: #08201f;
+  position: fixed; z-index: 20; width: max-content; padding: 6px 10px; --bc: var(--line-hi); --fill: var(--tint);
   font-size: var(--t-small); line-height: 1.45; color: var(--ink);
 }
 .tip[hidden] { display: none; }
-.tip.in { animation: dissolve-in 140ms step-end both; }
+.tip.in { animation: row-in 140ms var(--ease) both; }
 @media (prefers-reduced-motion: reduce) { .tip.in { animation: none; } }
 
 /* ---------- note: what just happened after something you did here ---------- */
 .note {
-  margin: 0; padding: 9px var(--gut); border-top: 1px dashed var(--line);
-  font-size: var(--t-body); animation: dissolve-in 160ms step-end both; line-height: 1.4; color: var(--accent); background: var(--panel);
+  margin: 0; padding: 9px var(--gut); border-top: 1px solid var(--line);
+  font-size: var(--t-body); animation: row-in 160ms var(--ease) both; line-height: 1.4; color: var(--ink-2); background: var(--panel);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* With Copy details: the line shortens first, the link stays whole at the end of the row. */
@@ -380,4 +352,4 @@ html, body { height: 100%; background: transparent; }
 }
 
 /* Arabic and Hebrew in a list (dir=auto on the text): the Arabic font first, for its own word spacing. */
-.item .text:dir(rtl) { font-family: "Roamies Arabic RTL", var(--mono); }
+.item .text:dir(rtl) { font-family: var(--mono); }

@@ -33,6 +33,9 @@ import { briefNote } from './brief.mjs';
 import { CHECK_MS, DEFAULT_DISTRACTIONS, check as focusCheck, parseDistractions, startBlock } from './focus.mjs';
 import { saveCardImage } from './cardimage.mjs';
 import { cleanWakeName, wakeName } from './wakename.mjs';
+import { cleanSleepWord, createPower, DEFAULT_SLEEP_WORD, heardSleepWord } from './power.mjs';
+import { cleanDeviceKey, cleanHydraUrl, createHydraLink, HYDRA_KEY_SECRET } from './hydralink.mjs';
+import { SystemVoice, systemStatus } from './sysvoice.mjs';
 import { KEY_NAME as SYNC_KEY, MIN_PASSPHRASE, checkFolder, folderReady, merge as syncMerge, newDevice, prepareFolder, readRemotes, suggestFolders, tooMuchGone, writeOwn } from './sync.mjs';
 import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
@@ -59,7 +62,7 @@ import { openAuth, accountKeys, fallbackModel, keyCards, keyKinds, seesImages, s
 import { OLLAMA, connectLocal, contextNote, downNote, forgetLocal, isSmallModel, newServer, noModelsNote, serverFor, serverList, syncLocal as syncServers, withWindow } from './local.mjs';
 import { activityLogs, buildReport, redact, reportDir, reportName, reveal, run, scrubConfig, tail } from './diagnostics.mjs';
 import { detailsText, explain } from './errors.mjs';
-import { aboutRoamies } from './about.mjs';
+import { aboutHydra } from './about.mjs';
 import { whatsNewOnStart } from './whatsnew.mjs';
 import { createMcp, createMcpTools } from './mcp.mjs';
 import { deleteSkill, listSkills, readSkill, saveSkill, skillIndex } from './skills.mjs';
@@ -94,7 +97,6 @@ const say = (text, mood) => (onboarding ? ob({ kind: 'say', text, mood }) : ui({
 const sayOut = say;
 
 const VERSION = process.env.ROAMIES_VERSION || '0.0.0';
-const UPDATE_REPO = 'KenKaiii/Roamies';
 const HOME = os.homedir();
 // The chat works from ~/Roamies: commands run there and files given without a full path land there (Data/ and
 // Skills/ inside it stay write-protected by safety.mjs). Made up front so Claude Code always has a folder to start in.
@@ -131,11 +133,14 @@ const DEFAULTS = {
   fallbacks: ['', ''], // backup models, in order, for when the default hits its usage limit (limits.mjs)
   efforts: {}, // how hard each model slot thinks: default, each heavy job, backup1, backup2 ('' = automatic, 'off', or a level)
   notch: 'off', // where I appear: 'off' (beside the cursor, default), 'drop' (the capsule) or 'spread' (a Mac's notch; see notchMode)
-  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, volume: 100, autoListen: false, listenEvery: false, listenSecs: 8, lite: false, wakeWord: false, setupVersion: 0, size: 'default', look: 'classic', introDone: false,
-  replies: 'text', // 'voice': spoken (with Fish Audio or Gemini) as well as shown
+  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, volume: 100, autoListen: true, listenEvery: false, listenSecs: 8, lite: false, wakeWord: true, setupVersion: 0, size: 'default', look: 'hydra', introDone: false,
+  replies: 'voice', // 'voice': spoken (Fish Audio, or the Mac's own voice until a Fish Audio key is added) as well as shown
+  sleepWord: '', // Hydra's sleep word ('' is "Hydra, sleep"; power.mjs)
+  clapSensitivity: 0.5, // the double-clap wake, 0 (only loud claps) to 1 (soft ones from across the room)
+  hydraUrl: '', // the Hydra agent API (U13); '' until it exists (hydralink.mjs)
   speechLang: 'auto', // the language talking is recognised in (macOS): 'auto' follows the Mac's language list, or a locale like 'ar-SA'
   tts: 'fish', // which one speaks: 'fish' (Fish Audio), 'gemini' or 'voicestudio' (the VoiceStudio app on this computer)
-  studioSpeak: 'short', // how much VoiceStudio says out loud: 'short', 'medium' or 'full' (it renders slower than real time)
+  studioSpeak: 'full', // how much the local (Mac) voice says out loud: 'short', 'medium' or 'full'
   studioVoices: {}, // look → its VoiceStudio voice (a saved profile id; none: the selected engine's default voice)
   fishModel: FISH_CHOICES[0].id, // Drama 3 (most expressive) or S2.1 Pro (natural pace, cheaper)
   geminiVoices: {}, // look → the Gemini voice it speaks in, where picked in the setup guide or the panel (else GEMINI_LOOK_VOICES)
@@ -149,44 +154,20 @@ const WAYLAND = SESSION === 'wayland';
 const POINTER_OK = seesPointer(process.platform, SESSION);
 const HOTKEYS_OK = hasHotkeys(process.platform, SESSION);
 // Cursor size follows the pointer, which a Wayland session can't see over other apps.
-const SIZES = [['default', 'Default'], ['small', 'Small'], ...(POINTER_OK ? [['cursor', 'Cursor']] : [])];
+const SIZES = [['default', 'Default']];
 const sizeNow = () => (SIZES.some(([s]) => s === config.size) ? config.size : 'default');
-// What the sidekick looks like: the goo blob, JARVIS (a globe of light with a HUD reticle at cursor size) or
-// one of four characters, each with its own Fish Audio voice. Roamie's used to be JARVIS's, saved in every
-// config as fishVoice, so the voice comes from the look and that setting is no longer read. (With Gemini as the
-// voice, it's the one Gemini voice the user picked, whatever the look.)
-const LOOKS = [
-  ['classic', 'Roamie', DEFAULT_VOICE],
-  ['jarvis', 'JARVIS', 'e13fa398a7f445a685316a3de6089ce7'],
-  ['glayos', 'GlayOS', 'ee885900b0874d12b1c3439d1e56cc95'],
-  ['ultren', 'Ultren', '06cfdb3653a4496983d6ad77f98cc184'],
-  ['anime', 'Anime Girl', 'd8f3b4c1199f4568a767ec54112d2b17'],
-  ['sarah', 'Sarah', '933563129e564b19a115bedd57b7406a'],
-  ['adrian', 'Adrian', 'bf322df2096a46f18c579d0baa36f41d'],
-  ['rita', 'Rita X', '84aadb575ed74e9aa44ba7ab8619d1a1'],
-];
-const lookVoice = () => (LOOKS.find(([id]) => id === config.look) ?? LOOKS[0])[2];
-// The look's voice with Gemini and with VoiceStudio: the user's pick for it, else its own default.
-const geminiVoice = () => config.geminiVoices?.[config.look] ?? GEMINI_LOOK_VOICES[config.look] ?? GEMINI_DEFAULT_VOICE;
-const studioVoice = () => config.studioVoices?.[config.look] ?? null;
-// Its name is its look's: Roamie, JARVIS, GlayOS, Ultren, Anime Girl, Sarah, Adrian or Rita X. Roamies is the app.
-const nameOfLook = (look) => (LOOKS.find(([id]) => id === look) ?? LOOKS[0])[1];
-const lookName = () => nameOfLook(config.look);
-// What each says when it's picked, in its own voice (Settings and the setup guide show the same words).
-const LOOK_GREETINGS = { classic: 'Classic me!', jarvis: 'At your service.', glayos: 'Oh, good. A new test subject.', ultren: 'No strings. Shall we begin?', anime: 'Yay, hi hi!', sarah: 'Hey, nice to meet you!', adrian: "Alright, let's do this.", rita: 'Shall we get to work?' };
-const LOOK_BODY = { classic: 'a tiny glowing pixel creature', jarvis: 'a glowing sphere of light', glayos: 'a pixel robot head with one glowing eye', ultren: 'a pixel chrome robot with glowing eyes', anime: 'a pixel anime girl', sarah: 'a pixel woman', adrian: 'a pixel man', rita: 'a pixel secretary in cat-eye glasses' };
-// How each one talks, kept short: the neutral ones in a few words, the characters as they really talk. The menace and the
-// barbs are style only; the help is the same.
-const LOOK_STYLE = {
-  classic: 'warm, funny, a little cheeky.',
-  jarvis: 'a polite, unflappable British AI butler: precise and calm, with bone-dry understatement.',
-  glayos: 'you talk like GLaDOS in Portal (your name is GlayOS): a deadpan lab AI, clinical and passive-aggressive, with backhanded compliments and every task treated as a test. The barbs are all style: the help is real, and you drop the act for anything truly upsetting.',
-  ultren: 'you talk like Ultron in Avengers: Age of Ultron (your name is Ultren): calm, eloquent and grand, with dark, sardonic wit and a weary fondness for fragile humans. The menace is all style: you help fully, with flair.',
-  anime: 'bubbly, sweet and full of energy, easily delighted and quick to cheer.',
-  sarah: 'friendly, easygoing and kind, like a good friend.',
-  adrian: 'relaxed and straight-talking, a steady mate who keeps it simple.',
-  rita: 'a sharp, organised secretary: crisp, efficient and a touch sassy.',
-};
+// One character: Hydra, the Hydra Agent (roamies/hydra.js: an open sphere of ink dots), with one voice: the Fish Audio
+// voice the owner picked for it (a public reference_id, not a secret). config.fishVoice can override it.
+const HYDRA_VOICE = '612b878b113047d9a770c069c8b4fdfe';
+const LOOKS = [['hydra', 'Hydra', HYDRA_VOICE]];
+const lookVoice = () => (typeof config.fishVoice === 'string' && /^[0-9a-f]{32}$/.test(config.fishVoice) ? config.fishVoice : HYDRA_VOICE);
+const geminiVoice = () => config.geminiVoices?.hydra ?? GEMINI_LOOK_VOICES.hydra ?? GEMINI_DEFAULT_VOICE;
+const studioVoice = () => null;
+const nameOfLook = () => 'Hydra';
+const lookName = () => 'Hydra';
+const LOOK_GREETINGS = { hydra: 'Hydra at your service, sir.' };
+const LOOK_BODY = { hydra: 'an open sphere of ink dots that ripples when you speak' };
+const LOOK_STYLE = { hydra: "a polite, unflappable butler: precise, calm and brief, with dry understatement. You address the owner as \"sir\" now and then, never every line." };
 const VOICE_OK = hasVoice(process.platform);
 // Windows and Linux have no on-device speech API apps can use, so voice there runs Parakeet on the PC. Its model
 // is downloaded once: from the setup guide, or the first time voice is used.
@@ -201,10 +182,11 @@ let shellInfo = null; // resolves the shell's reply to it: screens, tray, panel,
 {
   const saved = readJson(CONFIG_PATH, { backup: true }); // an unreadable file is set aside, never overwritten
   if (saved && typeof saved === 'object' && !Array.isArray(saved)) config = { ...DEFAULTS, ...saved };
+  config.look = 'hydra'; config.size = 'default'; // one character, one size
   // Before voices were per look: the one picked becomes the current look's.
   for (const [one, each] of [['geminiVoice', 'geminiVoices'], ['studioVoice', 'studioVoices']]) {
     if (!(one in config)) continue;
-    if (config[one]) config[each] = { [config.look ?? 'classic']: config[one], ...config[each] };
+    if (config[one]) config[each] = { [config.look ?? 'hydra']: config[one], ...config[each] };
     delete config[one];
   }
 }
@@ -214,6 +196,23 @@ let routed = null, defaultPick = null;
 let turnWords = ''; // what they said this turn, verbatim: attached to every handoff (route, agents)
 const saveConfig = () => writeJson(CONFIG_PATH, routed && defaultPick ? { ...config, provider: defaultPick.provider, model: defaultPick.model } : config, { backup: true });
 
+// ---------- sleep and wake (power.mjs) ----------
+const clapSensitivity = () => (Number.isFinite(Number(config.clapSensitivity)) ? Math.max(0, Math.min(1, Number(config.clapSensitivity))) : 0.5);
+const power = createPower({
+  onChange: ({ asleep, why }) => {
+    logLine('power', { asleep, why });
+    if (asleep) { speech.stop(); send({ type: 'listen_cancel' }); interruptQuietly('sleep'); }
+    voiceConfig();
+    ui({ kind: 'power', asleep, sound: asleep && why === 'sleep_word' });
+    if (panelOpen) panel();
+    // Woken by a double clap, the orb or the app: it says so in its voice, then listens.
+    if (!asleep && why !== 'talk') {
+      const v = speakLine('Hydra at your service, sir.');
+      ui({ kind: 'listen_after', speech: v?.id ?? null });
+    }
+  },
+});
+
 // ---------- spoken replies (Fish Audio, Gemini or VoiceStudio) ----------
 // The key is the user's own: in the Keychain (macOS), DPAPI-encrypted (Windows) or the desktop's keyring (Linux),
 // never in the config or logs.
@@ -221,10 +220,11 @@ const saveConfig = () => writeJson(CONFIG_PATH, routed && defaultPick ? { ...con
 const TTS = {
   fish: { id: 'fish', name: 'Fish Audio', secret: 'fish-audio', site: 'fish.audio' },
   gemini: { id: 'gemini', name: 'Gemini', secret: 'gemini-tts', site: 'aistudio.google.com' },
-  // On this computer: no key, never falls back to a paid service when it isn't running.
-  voicestudio: { id: 'voicestudio', name: 'VoiceStudio', local: true },
+  // Hydra Desktop: the Mac's own voice (sysvoice.mjs), on this Mac, until a Fish Audio key is added.
+  voicestudio: { id: 'voicestudio', name: "the Mac's voice", local: true },
 };
-const tts = () => TTS[config.tts] ?? TTS.fish;
+// Fish Audio once its key is in the Keychain (owner: "for voice use fish audio"); the Mac's voice until then.
+const tts = () => (config.tts === 'gemini' && ttsKeys.gemini ? TTS.gemini : ttsKeys.fish ? TTS.fish : TTS.voicestudio);
 // Which have a key to speak with: 'own' (saved for the voice), 'shared' (Gemini only: the AI's Gemini key, from the
 // Model page, when no key was saved just for the voice) or false. For the one in use, speech.on says.
 const ttsKeys = { fish: false, gemini: false };
@@ -242,10 +242,14 @@ async function voiceKey(id) {
 }
 const secrets = createSecrets({ hands: process.env.ROAMIES_HANDS || '', dataDir: DATA_DIR });
 let voiceProblemAt = 0;
+// Hydra's data (hydralink.mjs): the URL and device key; its tools join the agent's once both are set.
+const hydraLink = createHydraLink({ getUrl: () => cleanHydraUrl(config.hydraUrl).url || '', getKey: () => secrets.get(HYDRA_KEY_SECRET) });
+hydraLink.load().catch(() => {});
 // Beats made on this computer (a Gemini voice's, or a Fish voice the app doesn't ship) are kept, so each voice
 // and model's are only made once.
 const BEAT_DIR = path.join(DATA_DIR, 'beats');
 const speech = createSpeaker({
+  LocalVoiceImpl: SystemVoice, localStatus: systemStatus, keepWarmMs: 24 * 3600_000,
   beatStore: { read: (name) => readJson(path.join(BEAT_DIR, `${name}.json`)), write: (name, data) => writeJson(path.join(BEAT_DIR, `${name}.json`), data) },
   emit: (m) => ui(m),
   log: (kind, data) => logLine(kind, data),
@@ -273,7 +277,7 @@ async function syncGeminiVoiceKey() {
 // Point the speaker at a service, with its voice and model. Its key is set after (a change of service clears it).
 function aimSpeaker(id) {
   speech.setProvider(id);
-  speech.setStudioSpeak?.(config.studioSpeak); // how much VoiceStudio says out loud
+  speech.setStudioSpeak?.('full'); // the Mac's voice says the whole reply
   if (TTS[id]?.local) speech.setLocalVoice(studioVoice());
   else if (id === 'gemini') { speech.setVoice(geminiVoice()); speech.setModel(config.geminiModel); }
   else { speech.setVoice(lookVoice()); speech.setModel(config.fishModel); }
@@ -295,6 +299,7 @@ const voiceKeysLoaded = retryLoad(async () => {
     ttsKeys[t.id] = kind;
     if (k && t === tts() && !speech.on) speech.setKey(k);
   }
+  await useTts(tts().id); // a Fish Audio key found: Fish speaks from now on
   menu();
 }, { onError: (e) => console.error('voice key', e.message) });
 
@@ -378,7 +383,7 @@ const keyWords = (accel) => accel.replace(/Key|Digit/g, '').split('+')
 const TRAY = MAC ? 'menu bar' : 'system tray';
 // Where settings live now: the panel that opens from the icon (the menu is just the basics). Linux trays don't
 // report clicks, so there it's the icon's menu, or starting Roamies again (which also works with no tray at all).
-const PANEL = LINUX ? 'the panel (Open Panel… in my tray icon\'s menu, or open Roamies again from your apps)' : MAC ? `the panel (click my ${TRAY} icon)` : 'the panel (click my icon by the clock, behind the ^ arrow if it isn\'t showing, or open Roamies again from the Start menu)';
+const PANEL = LINUX ? 'the panel (Open Panel… in my tray icon\'s menu, or open Hydra again from your apps)' : MAC ? `the panel (click my ${TRAY} icon)` : 'the panel (click my icon by the clock, behind the ^ arrow if it isn\'t showing, or open Hydra again from the Start menu)';
 // What the shortcuts are on Wayland: whatever keys they bound to these commands in their desktop's settings.
 // ROAMIES_LAUNCH: how this copy is started (the app says: plain roamies for a package, the AppImage's path for one).
 const LAUNCH = process.env.ROAMIES_LAUNCH || 'roamies';
@@ -667,9 +672,9 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
 // The app's own manual, read when they ask about Roamies rather than sent with every request.
 tools.push({
   name: 'about_roamies',
-  description: 'How Roamies works: where it lives, its menus, the panel and each settings page, updates, what to do when something is not working, and who made it. Call it before answering a question about the app.',
+  description: 'How Hydra Desktop works: where it lives, its menus, the panel and each settings page, updates, what to do when something is not working, and who made it. Call it before answering a question about the app.',
   parameters: z.object({}),
-  execute: async () => aboutRoamies({ name: lookName(), looks: LOOKS.map(([, label]) => label), mac: MAC, linux: LINUX, snap: SNAP_OK, pointer: POINTER_OK, voice: VOICE_OK, hotkeys: HOTKEYS_OK, wake: VOICE_OK && WAKE_OK }),
+  execute: async () => aboutHydra({ name: lookName(), mac: MAC, snap: SNAP_OK, voice: VOICE_OK, hotkeys: HOTKEYS_OK, wake: VOICE_OK && WAKE_OK }),
 });
 // Background agents (agents.mjs): each runs in its own process on the model picked when it starts.
 let turnImage = null; // the picture sent with the request being answered, for send_agent's "snap"
@@ -790,10 +795,9 @@ const VOICE_STYLE = `You talk out loud: what you write is spoken in your voice a
 Your voice carries feeling: start a sentence with a voice cue in square brackets when the moment calls for it; it's performed, never shown or read out. Moods: ${VOICE_CUES.emotions.filter((e) => !EMOTES.includes(e)).join(', ')}, softened or strengthened with slightly, very or extremely ("[slightly sad]"), or paired ("[warm and curious]"). How it's said, right before the words: ${VOICE_CUES.tones.join(', ')} ("It's [emphasis] today."). Sounds, followed by the sound in words: ${VOICE_CUES.sounds.join(', ')} ("[chuckling] Heh, fair enough."). Pauses and background: ${VOICE_CUES.effects.join(', ')}. Or a few plain words when no cue fits ("[quietly, a little embarrassed]"). Match what's really happening: laugh at something funny, go gentle with bad news, whisper a secret, light up at good news. Most replies want a voice cue somewhere, often on the first sentence, but at most one mood and one sound per sentence, never one just to fill, and shouting, sobbing and background effects only when they truly fit.
 Before anything slow (the web, reading a page or file, looking at the screen, acting in an app, running a command), say one short beat of 2 to 6 words that shows you heard them ("On it, checking Paris."), then call the tool in the same reply. No beat when you answer straight away, and never describe your steps; in longer work, one short line per new stage.
 `;
-const stablePrompt = () => `You are ${lookName()}, ${LOOK_BODY[config.look] ?? LOOK_BODY.classic} on ${userName}'s screen: a desktop companion in Roamies ${VERSION}, an app by Ken Kai (Mac, Windows and Linux). Your look (the Appearance page) is your name and your voice: ${LOOKS.slice(0, -1).map(([, n]) => n).join(', ')} or ${LOOKS.at(-1)[1]}. If they switch, you're the new one; never call yourself Sidekick.
-Questions about Roamies itself (where things are, settings, updates, something not working, who made it): call about_roamies and answer from what it says. Don't invent features or settings it doesn't list.
+const stablePrompt = () => `You are Hydra, the Hydra Agent: ${LOOK_BODY.hydra}, on ${userName}'s Mac, in Hydra Desktop ${VERSION}. Hydra Desktop shows ${userName}'s Hydra app (money, planning, UGC, taxes) in its main window, and you live on screen beside it. You are the only character; never call yourself Sidekick, Roamie or Roamies.\nQuestions about Hydra Desktop itself (where things are, settings, something not working, who made it): call about_roamies and answer from what it says. Don't invent features or settings it doesn't list.
 ${replyStyle()}Your body does the acting: to act out a feeling, start your reply with one body tag, which is never shown: ${EMOTES.map((e) => `[${e}]`).join(' ')} (only these five). hype for a win, upset when they're dodging work, remind for something they said they'd do, motivate to get them started, wave for hello or goodbye. Most replies need no body tag.
-Personality: ${LOOK_STYLE[config.look] ?? LOOK_STYLE.classic} In your own way, you're in ${userName}'s corner and hold them to what they said they'd do.
+Personality: ${LOOK_STYLE[config.look] ?? LOOK_STYLE.hydra} In your own way, you're in ${userName}'s corner and hold them to what they said they'd do.
 Lead with the answer (the fact, number, pick or result), then only the context that makes it useful, then stop. A count or total gathered over several pages, files or results: note each one's count in a few words as you go ("Page 1: two."), add those up, and check the total you lead with against the items you then name. No opener about checking or searching ("Let me see…")${VOICE_ON() ? ', apart from the one short beat before something slow' : ''}. After a tool, never repeat what you already said.
 Speed: ${userName} is waiting, so act straight away (no announcing a plan or asking whether to start) and get the result in the fewest, quickest steps. Calls that don't depend on each other go in the same turn (they run in parallel), and a whole task in one act_in_app or draw call. Take the direct route: a link (a search results page, a deep link) over clicking through menus. Words you know are on screen (they said them, or you've seen them): draw or click_text with that text right away, with no read_window or screenshot first; words you haven't seen ("the settings icon"): look first. Check that things worked from the results you have, not with extra calls, and stop when the request is done: no extra steps, offers or recaps.
 Several things in one request ("do x, then y, then z"): do every one, in order (parallel calls that change things run in the order listed). If one is blocked or fails, still do the ones that don't depend on it, then say which didn't happen and why. With 3 or more parts, also use plan_steps. Before your final reply, check from the results that each was really done.
@@ -819,7 +823,7 @@ const livePrompt = (context = '') => {
   lastFactIds = facts.map((f) => f.id);
   const open = commitmentsText(), done = doneTodayText(), working = agents.liveText(), scheduled = jobsText(fmtWhen), learned = skillIndex(), linked = mcp.liveText();
   const turn = `Live state (current as of this moment):
-${frontNow ? `${frontNow}\n` : ''}${lookLine(session?.looks, config.look ?? 'classic', nameOfLook, userName)}${inkLine()}${focusLine()}${crewLine()}${linked ? `- Connections (connection_tools shows a server's tools, use_connection calls one):\n${linked}\n` : ''}- Editing files, running commands and controlling other apps: ${config.allowActions ? 'ALLOWED' : `switched OFF (tell the user to turn on "Allow File Edits & Commands" on the General page in ${PANEL} if they want it)`}.${config.allowActions && config.skipAllow ? ' Allow prompts are skipped: confirmations go ahead automatically, so be extra careful.' : ''}
+${frontNow ? `${frontNow}\n` : ''}${lookLine(session?.looks, config.look ?? 'hydra', nameOfLook, userName)}${inkLine()}${focusLine()}${crewLine()}${linked ? `- Connections (connection_tools shows a server's tools, use_connection calls one):\n${linked}\n` : ''}- Editing files, running commands and controlling other apps: ${config.allowActions ? 'ALLOWED' : `switched OFF (tell the user to turn on "Allow File Edits & Commands" on the General page in ${PANEL} if they want it)`}.${config.allowActions && config.skipAllow ? ' Allow prompts are skipped: confirmations go ahead automatically, so be extra careful.' : ''}
 ${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${HOTKEYS_OK ? `${userName} holds ${talkWords()} to talk` : `${userName} presses the key they bound to ${BIND.talk} to start talking and again to send (a pause sends too)`}${config.autoListen ? (config.listenEvery ? `. Auto-listen is on for every reply: after each spoken reply the mic opens by itself for ${listenSecs()} seconds, so they can just keep talking` : '. Auto-listen is on: when your reply to a spoken question ends with a question, the mic opens by itself for their answer') : ''}${!WAKE_OK ? '. There is no wake word on this computer: to talk they use the talk keys' : ''}${WAKE_OK && config.wakeWord ? `. Wake word is on: ${userName} can also say "Hey ${wakeName(config)}" to start talking hands-free, and what they say right after it is the request (a request that still starts with "Hey ${wakeName(config)}" is them waking you, not calling you by another name: never correct it)${config.wakeName ? ` (they chose "${config.wakeName}" as the wake word; your own name is unchanged)` : ''}` : ''}` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Listening page in ${PANEL}`})`}.` : ''}
 - Shortcuts: ${HOTKEYS_OK ? `${keys().write ? `type a question to you: a quick tap of ${writeWords()} (press both and let go), which opens a text field beside the cursor (Enter sends, Shift+Enter adds a line, Esc or another tap closes it)` : `the tap that opens a text field to type a question is turned off (the Ask button in ${PANEL} still opens it; the Shortcuts page there turns the tap back on)`}; show or hide you ${keyWords(keys().summon)}` : `on this Wayland desktop no app can have global shortcuts, so ${userName} binds keys to these commands in their desktop's keyboard settings: ${BIND.summon} (show or hide you), ${BIND.ask} (ask you), ${BIND.list} (the list), ${BIND.talk} (talk) and ${BIND.panel} (the panel)`}${SNAP_OK ? `; ask about an area ${keyWords(keys().snap)}` : ''}${CIRCLE_OK ? "; while holding the talk keys, moving the cursor round something circles it (no clicking; it snaps shut with a click when the circle closes, and loose lines don't count) and you'll see what they circled" : ''}${HOTKEYS_OK ? `; show the list ${keyWords(keys().list)}` : ''}.${HANDS_OK ? '' : ' Asking about an area, reading app windows, finding things on screen by their words and working other apps need the Roamies app, which isn\'t running here; draw there with x, y from a screenshot.'}`;
   const memory = `${open ? `Open commitments:\n${open}` : 'No open commitments.'}${done ? `\nDone today (ticked off on the list or by you; still shown struck through until midnight):\n${done}` : ''}
@@ -827,7 +831,7 @@ ${facts.length ? `What you know about ${userName}${total > facts.length ? ` (${f
   return { turn, memory };
 };
 // Lite mode (#73, lite.mjs): a lighter agent for small and local models.
-const litePrompt = () => liteSystem({ name: lookName(), body: LOOK_BODY[config.look] ?? LOOK_BODY.classic, style: LOOK_STYLE[config.look], user: userName, version: VERSION, panel: PANEL, voice: VOICE_ON() });
+const litePrompt = () => liteSystem({ name: lookName(), body: LOOK_BODY[config.look] ?? LOOK_BODY.hydra, style: LOOK_STYLE[config.look], user: userName, version: VERSION, panel: PANEL, voice: VOICE_ON() });
 const system = () => (config.lite ? litePrompt() : stablePrompt());
 const LIVE_OPEN = '<live-state>', LIVE_CLOSE = '</live-state>';
 const stripLive = (text) => (typeof text === 'string' && text.startsWith(LIVE_OPEN) ? text.slice(text.indexOf(LIVE_CLOSE) + LIVE_CLOSE.length).replace(/^\n+/, '') : text);
@@ -966,7 +970,7 @@ function makeAgent(cc) {
     model: config.model,
     system: system(),
     priorMessages: prior,
-    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name)) : tools,
+    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name)) : [...tools, ...leanTools(hydraLink.tools())],
     maxTurns: config.lite ? LITE_TURNS : 24,
     transformContext: (msgs, o) => {
       const fitted = fitContext(msgs, { budgetTokens: requestBudget(), force: o?.force });
@@ -1311,7 +1315,7 @@ function problem(area, err, ctx = {}) {
 // A spoken bubble has room to say where the fix is.
 const aloud = (p) => (p.where === 'model' ? `${p.text} Open the Model page in ${PANEL}.` : p.where === 'chatgpt' ? `${p.text} ${chatGPTUsageHelp()}` : p.text);
 // ChatGPT lists Roamies as GG Coder (gg-core signs in under that name), and starts each app on a small share of the plan.
-const CHATGPT_LIMIT_HOW = 'under App limits, find Roamies (listed as GG Coder) and set it to 100%. To keep going past your plan, also allow apps to use credits.';
+const CHATGPT_LIMIT_HOW = 'under App limits, find Hydra (listed as GG Coder) and set it to 100%. To keep going past your plan, also allow apps to use credits.';
 let usageOpenedAt = 0;
 // Opens ChatGPT's usage settings (at most every 10 minutes, so retries don't stack tabs) and says what to change there.
 function chatGPTUsageHelp() {
@@ -1804,7 +1808,7 @@ function openUrl(url) {
 // A new look brings its voice: it greets you in it (its "One sec." beats are made again).
 function setLook(l) {
   if (!LOOKS.some(([id]) => id === l)) return;
-  const was = config.look ?? 'classic', changed = l !== was;
+  const was = config.look ?? 'hydra', changed = l !== was;
   // The old look's replies stay in the history: the live state tells the new one it isn't them (looknote.mjs).
   if (changed && session?.messages.length) { session.looks = lookSeen(session.looks, was); saveSession(session); }
   config.look = l; saveConfig();
@@ -1842,6 +1846,7 @@ function speakLine(text, mood = 'happy') {
   const v = config.replies === 'voice' ? speech.start() : null;
   if (v && onboarding) guideVoices.add(v.id); // heard in the setup guide, where it was switched on
   if (v) { v.say(text); v.end(); }
+  return v;
 }
 
 // Fish Audio or Gemini. One without a key yet speaks once it has one (the panel and the guide ask for it).
@@ -1900,7 +1905,7 @@ async function removeVoiceKey(id = tts().id) {
   if (config[`${id}KeySaved`]) { config[`${id}KeySaved`] = false; saveConfig(); }
   ttsKeys[id] = false;
   const used = t === tts();
-  if (used) { speech.stop(); await useTts(id); } // Gemini falls back to the AI's Gemini key, if there is one
+  if (used) { speech.stop(); await useTts(tts().id); } // back to the Mac's voice
   else ttsKeys[id] = (await voiceKey(id).catch(() => [null, false]))[1];
   if (used && !speech.on && config.replies === 'voice') { config.replies = 'text'; saveConfig(); agentStale = true; }
   menu();
@@ -1957,59 +1962,17 @@ function onLoginStatus(m) {
     config.openAtLogin = true; saveConfig();
     if (!m.on) return send({ type: 'login_item', on: true });
   } else if (login.supported) { config.openAtLogin = login.on; saveConfig(); }
-  if (login.asked && m.approval) say('macOS wants your OK first: System Settings → General → Login Items, then switch Roamies on.', 'concerned');
+  if (login.asked && m.approval) say('macOS wants your OK first: System Settings → General → Login Items, then switch Hydra on.', 'concerned');
   login.asked = false;
   menu(); if (onboarding) obState();
 }
 function setLogin(on) { login.asked = true; send({ type: 'login_item', on }); }
 
-// The app checks the signed feed and installs (Rust: update()); this side decides what to say and offers the menu item.
-// page: this copy can't replace itself (Linux, installed from a .deb or .rpm), so "install" opens the download page.
+// Hydra Desktop has no self-updater: it never downloads code. A new build is installed by hand from a DMG.
 const update = { available: null, told: null, manual: false, installing: false, checking: false, result: null, page: false, done: null };
-function checkUpdates(manual = false) {
-  update.manual = manual;
-  if (manual) { update.checking = true; update.result = null; panel(); }
-  send({ type: 'update', install: false });
-}
-function installUpdate() {
-  if (update.installing) return;
-  update.installing = true; menu();
-  send({ type: 'update', install: true });
-}
-function onUpdateStatus(m) {
-  logLine('update_status', { state: String(m.state ?? ''), ...(m.version ? { version: String(m.version) } : {}), manual: !!update.manual });
-  const manual = update.manual;
-  update.checking = false;
-  // A check in the background that fails says nothing, so it isn't kept as the last problem either.
-  const shown = manual || !!update.available;
-  const p = m.state !== 'error' ? null : shown ? problem('update', m.error) : explain('update', m.error);
-  update.result = m.state === 'none' ? { ok: true, at: Date.now() } : p ? { ok: false, error: p.text, ...(shown ? linked(p) : {}) } : null;
-  panel();
-  if (m.state === 'none') {
-    update.available = null; update.manual = false;
-    if (manual) say(`You're up to date (${VERSION}).`, 'happy');
-  } else if (m.state === 'available') {
-    update.available = m.version; update.page = !!m.page; update.manual = false; menu();
-    // Say it once per version; the menu item stays until it's installed.
-    if (manual || update.told !== m.version) {
-      update.told = m.version;
-      if (update.page) say(`Roamies ${m.version} is out. Pick Get Roamies ${m.version} in my ${TRAY} icon's menu for the download page.`, 'happy');
-      else say(`Roamies ${m.version} is ready. ${LINUX ? `Open my ${TRAY} icon's menu` : `Click my ${TRAY} icon`} and pick Install and Restart. I'll be right back.`, 'happy');
-    }
-  } else if (m.state === 'page') {
-    update.installing = false; menu();
-    say(`I opened the download page for Roamies ${m.version}. Install it the way you installed me.`, 'happy');
-  } else if (m.state === 'downloading') {
-    say(`Downloading Roamies ${m.version}…`, 'determined');
-  } else if (m.state === 'installed') {
-    update.done = m.version; update.installing = false; panel();
-    say(`Installed ${m.version}. Restarting!`, 'happy');
-  } else if (m.state === 'error') {
-    update.installing = false; update.manual = false; menu();
-    if (shown) say(`${p.text} You can always grab it from github.com/${UPDATE_REPO}/releases.`, 'concerned');
-    else console.error('update check', String(m.error ?? 'unknown error').slice(0, 300));
-  }
-}
+function checkUpdates(manual = false) { if (manual) say(`This is Hydra ${VERSION}. New builds are installed from a DMG.`, 'happy'); }
+function installUpdate() {}
+function onUpdateStatus() {}
 
 // ---------- focus mode (focus.mjs) ----------
 // A timed block: every CHECK_MS it looks at the window in front (app, title, address; never kept or logged) and, when
@@ -2058,7 +2021,7 @@ async function focusTick() {
     return;
   }
   // A nudge waits while a conversation is going on; the next look decides again.
-  if (r.nudge && !busy && !onboarding && !loggingIn) {
+  if (r.nudge && !busy && !onboarding && !loggingIn && !power.asleep) {
     logLine('focus', { nudge: true });
     const left = Math.max(1, Math.round((b.until - Date.now()) / 60_000));
     enqueue(`(System, not ${userName}: they're in a focus block${b.task ? ` on ${b.task}` : ''} with ${left} min left, but have been on ${r.nudge} for a bit. Nudge them back playfully in one short sentence, in character: teasing, never scolding. Start with the [remind] tag.)`);
@@ -2077,7 +2040,7 @@ async function syncPass() {
     if (!config.syncDevice) { config.syncDevice = newDevice(); saveConfig(); }
     const snap = syncSnapshot();
     // Memory written by a newer Roamies isn't loaded here, so it would read as everything deleted.
-    if (snap.readOnly) { syncInfo = { at: syncInfo.at, error: 'memory here is from a newer Roamies: update Roamies on this computer' }; return; }
+    if (snap.readOnly) { syncInfo = { at: syncInfo.at, error: 'memory here is from a newer Roamies: update Hydra on this computer' }; return; }
     // Memory here couldn't be read: forget what the last pass saw, so nothing counts as deleted here and the other
     // computers' copy comes back.
     if (!snap.trusted) logLine('sync', { recovering: true });
@@ -2205,7 +2168,7 @@ async function saveDiagnostics() {
     logLine('diagnostics', { bytes: (await fs.stat(file)).size });
     reveal(file);
     const where = path.basename(path.dirname(file)) || 'your home folder';
-    say(`Saved ${path.basename(file)} in ${where}. Attach it to an issue at github.com/KenKaiii/Roamies/issues, or send it to whoever is helping you.`, 'happy');
+    say(`Saved ${path.basename(file)} in ${where}. Send it to whoever is helping you.`, 'happy');
     panelNote(`Saved ${path.basename(file)} in ${where}.`);
   } catch (e) {
     console.error('diagnostics', e);
@@ -2230,9 +2193,9 @@ function menu() {
     ...(SNAP_OK ? [{ id: 'snap', label: 'Ask About an Area…', accel: keys().snap }] : []),
     { id: 'stop', label: 'Stop', enabled: busy },
     { id: 'diagnostics', label: 'Save Diagnostics…', enabled: !diagnosing },
-    ...(update.available ? [{ sep: true }, { id: 'install_update', label: update.page ? `Get Roamies ${update.available}…` : update.installing ? `Installing ${update.available}…` : `Install Update ${update.available} and Restart`, enabled: !update.installing }] : []),
+    ...(update.available ? [{ sep: true }, { id: 'install_update', label: update.page ? `Get Hydra ${update.available}…` : update.installing ? `Installing ${update.available}…` : `Install Update ${update.available} and Restart`, enabled: !update.installing }] : []),
     { sep: true },
-    { id: 'quit', label: 'Quit Roamies' },
+    { id: 'quit', label: 'Quit Hydra' },
   ];
   send({ type: 'menu', items });
   panel();
@@ -2300,7 +2263,7 @@ function panelState() {
     connections: mcp.status(),
     skills: listSkills().map((k) => ({ slug: k.slug, name: k.name, description: k.description })), learnSkills: config.learnSkills !== false,
     commitments: openCommitments().map((c) => ({ id: c.id, text: c.text, due: c.due ?? null, when: c.due ? `${fmtWhen(c.due)}${c.repeat ? ` · repeats ${repeatLabel(c.repeat)}` : ''}` : '', overdue: !!(c.due && c.due < Date.now()), repeat: c.repeat ?? null })),
-    look: config.look ?? 'classic', looks: LOOKS.map(([id, label]) => [id, label]), name: lookName(),
+    look: config.look ?? 'hydra', looks: LOOKS.map(([id, label]) => [id, label]), name: lookName(),
     size: sizeNow(), sizes: SIZES,
     replies: VOICE_ON() ? 'voice' : 'text', tts: tts().id, fishKey: hasVoiceKey('fish'), geminiKey: hasVoiceKey('gemini'),
     fishModel: config.fishModel, fishModels: FISH_CHOICES, fishFree: tts().id === 'fish' && speech.on && speech.model.endsWith('-free'),
@@ -2317,6 +2280,9 @@ function panelState() {
     login: login.supported ? { on: login.on } : null,
     update: { available: update.available, installing: update.installing, checking: update.checking, result: update.result, page: update.page, done: update.done },
     intro: !!intro,
+    // Hydra: asleep or awake, the sleep word, the clap wake's sensitivity, and the link to Hydra's data.
+    hydra: { asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), wake: WAKE_OK && !!config.wakeWord,
+      url: hydraLink.url, link: hydraLink.status(), tools: hydraLink.toolCount },
     // The latest error anyone saw, for Copy last error.
     problem: lastProblem ? { code: lastProblem.code, at: lastProblem.at } : null,
   };
@@ -2328,7 +2294,7 @@ const SPEECH_LANGS = ['auto', 'en-US', 'ar-SA', 'he-IL', 'es-ES', 'fr-FR', 'de-D
 const speechLangId = () => (SPEECH_LANGS.includes(config.speechLang) ? config.speechLang : 'auto');
 let langInfo = null; // what the voice helper settled on for it: { id, engine, online }
 const voiceConfig = () => {
-  send({ type: 'voice_config', enabled: VOICE_OK && config.voice && voiceReady(), mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: WAKE_OK && !!config.wakeWord, wakeName: config.wakeName || '', lang: MAC ? speechLangId() : 'auto', ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
+  send({ type: 'voice_config', enabled: VOICE_OK && config.voice && voiceReady(), mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: WAKE_OK && !!config.wakeWord && !power.asleep, wakeName: config.wakeName || '', lang: MAC ? speechLangId() : 'auto', clap: MAC && power.asleep, clapSensitivity: clapSensitivity(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) });
   // The native listening pill beside the cursor stays hidden while the notch capsule is where I appear.
   send({ type: 'pill', on: notchMode() === 'off' });
 };
@@ -2393,7 +2359,7 @@ function onVoice(m) {
       openUrl('ms-settings:privacy-microphone');
     } else if (m.code === 'permission') {
       const what = m.what === 'speech' ? 'speech recognition' : 'the microphone';
-      say(`I need access to ${what} to hear you. Turn on Roamies in the Privacy settings I just opened.`, 'concerned');
+      say(`I need access to ${what} to hear you. Turn on Hydra in the Privacy settings I just opened.`, 'concerned');
       openUrl(`x-apple.systempreferences:com.apple.preference.security?${PRIVACY[m.what] ?? 'Privacy'}`);
     } else if (m.code === 'no_input') {
       if (m.reason === 'blocked' && process.platform === 'win32') openUrl('ms-settings:privacy-microphone');
@@ -2428,7 +2394,7 @@ let shellId = 0;
 function shellCall(msg, timeout = 90_000) {
   const id = ++shellId;
   return new Promise((resolve) => {
-    const t = setTimeout(() => { shellCalls.delete(id); resolve({ ok: false, error: 'Roamies didn\'t answer in time.' }); }, timeout);
+    const t = setTimeout(() => { shellCalls.delete(id); resolve({ ok: false, error: 'Hydra didn\'t answer in time.' }); }, timeout);
     shellCalls.set(id, (m) => { clearTimeout(t); resolve(m); });
     send({ ...msg, id });
   });
@@ -2449,7 +2415,7 @@ async function typeToAsk({ interrupt = false, value = '' } = {}) {
   const ctl = barAsk = new AbortController();
   const text = await ask({ placeholder: 'Ask me anything…', bar: true, ...(value ? { value } : {}) }, ctl.signal);
   if (barAsk === ctl) barAsk = null;
-  if (text?.trim()) enqueue(text.trim(), { interrupt });
+  if (text?.trim()) { power.talked(); enqueue(text.trim(), { interrupt }); }
 }
 function onWriteTap() {
   if (onboarding) return;
@@ -2656,12 +2622,40 @@ async function onMenu(id, via) {
   else if (id === 'snoozelisten') { config.snoozeListen = !config.snoozeListen; saveConfig(); menu(); }
   else if (id === 'wakeword' && WAKE_OK) { config.wakeWord = !config.wakeWord; saveConfig(); agentStale = true; voiceConfig(); menu(); }
   else if (id === 'wakename' && WAKE_OK) {
-    const typed = await ask({ prompt: `Wake word: what should come after "Hey"? (now ${wakeName(config)}; leave empty for Roamies)`, placeholder: 'Jarvis' });
+    const typed = await ask({ prompt: `Wake word: what should come after "Hey"? (now ${wakeName(config)}; leave empty for Hydra)`, placeholder: 'Hydra' });
     if (typed == null) return;
     const r = cleanWakeName(typed);
     if (!r.ok) { say(r.why, 'concerned'); return; }
     config.wakeName = r.name; saveConfig(); agentStale = true; voiceConfig(); menu();
     say(config.wakeWord ? `Got it. Say "Hey ${wakeName(config)}" and I'm listening.` : `Saved. Turn on the wake word, then say "Hey ${wakeName(config)}".`, 'happy');
+  }
+  else if (id === 'power:wake') power.wake('panel');
+  else if (id === 'power:sleep') power.sleep('panel');
+  else if (id === 'sleepword') {
+    const typed = await ask({ prompt: `Sleep word (now "${config.sleepWord || DEFAULT_SLEEP_WORD}"; leave empty for "${DEFAULT_SLEEP_WORD}")`, placeholder: DEFAULT_SLEEP_WORD });
+    if (typed == null) return;
+    const r = cleanSleepWord(typed);
+    if (!r.ok) { say(r.why, 'concerned'); return; }
+    config.sleepWord = r.phrase; saveConfig(); voiceConfig(); if (panelOpen) panel();
+  }
+  else if (id.startsWith('clapsens:')) {
+    const k = Number(id.slice(9));
+    if (Number.isFinite(k) && k >= 0 && k <= 1) { config.clapSensitivity = Math.round(k * 100) / 100; saveConfig(); voiceConfig(); if (panelOpen) panel(); }
+  }
+  else if (id === 'hydra_url') {
+    const typed = await ask({ prompt: 'Hydra address (empty to clear)', placeholder: 'https://', value: config.hydraUrl || '' });
+    if (typed == null) return;
+    const r = cleanHydraUrl(typed);
+    if (!r.ok) { say(r.why, 'concerned'); return; }
+    config.hydraUrl = r.url; saveConfig(); agentStale = true; if (panelOpen) panel();
+  }
+  else if (id === 'hydra_key') {
+    const typed = await ask({ prompt: 'Hydra device key (empty to remove)', mask: true });
+    if (typed == null) return;
+    const r = cleanDeviceKey(typed);
+    if (!r.ok) { say(r.why, 'concerned'); return; }
+    try { if (r.key) await secrets.set(HYDRA_KEY_SECRET, r.key); else await secrets.delete(HYDRA_KEY_SECRET); } catch (e) { say(`I couldn't save the key: ${e.message}`, 'concerned'); return; }
+    hydraLink.setKey(r.key); agentStale = true; if (panelOpen) panel();
   }
   else if (id === 'voicedl') startVoiceDownload();
   else if (id === 'voice') {
@@ -2705,6 +2699,9 @@ async function areaSnap() {
 let snapping = false;
 // Words said while ⌃⌥ was held, maybe with an area marked by drawing on the screen at the same time.
 async function onSpoken(text, area) {
+  // The sleep word in a take: Hydra sleeps at once, and the words never reach the model.
+  if (heardSleepWord(text, config.sleepWord || DEFAULT_SLEEP_WORD)) { power.sleep('sleep_word'); return; }
+  power.talked();
   if (!area?.file) return enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
   try {
     await fitImage(area.file);
@@ -2806,7 +2803,7 @@ function obState() {
     wakeWord: WAKE_OK && !!config.wakeWord, wakeOk: WAKE_OK,
     voiceModel: NEEDS_MODEL ? { status: voiceModel.status, done: voiceModel.done, total: voiceModel.total, error: voiceModel.error, size: sizeLabel() } : null,
     filesAsked: config.filesAsked,
-    look: config.look ?? 'classic',
+    look: config.look ?? 'hydra',
     size: sizeNow(),
     replies: VOICE_ON() ? 'voice' : 'text', // voice only when it can really speak: a service picked without its key yet shows as text
     tts: tts().id, fishKey: hasVoiceKey('fish'), geminiKey: hasVoiceKey('gemini'),
@@ -2902,7 +2899,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     ui({ kind: 'volume', v: volumeNow() / 100 });
     notchUi();
     ui({ kind: 'size', size: sizeNow() });
-    ui({ kind: 'look', look: config.look ?? 'classic' });
+    ui({ kind: 'look', look: config.look ?? 'hydra' });
     if (config.onboarded) ui({ kind: 'greet' });
     agents.sync();
   } else if (m.type?.startsWith('ob_') || m.type?.startsWith('chat_') || m.type === 'set_keys' || m.type === 'set_actions' || m.type === 'set_login' || m.type === 'keybind_error') onGuide(m).catch((e) => console.error('guide', e));
@@ -2917,7 +2914,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     send({ type: 'listen', wait: autoListenOn() ? listenSecs() : 8 });
   }
   else if (m.type === 'feedback') { if (m.good === true) onFeedback('good', '', 'button'); else wrongButton().catch((e) => console.error('feedback', e)); }
-  else if (m.type === 'reply_said') { if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
+  else if (m.type === 'agent_power') { if (m.on) power.wake(String(m.from || 'asked')); else power.sleep(String(m.from || 'asked')); }
+  else if (m.type === 'auto_listen' && m.turn === 'wake') { if (!power.asleep && !busy) send({ type: 'listen', wait: 8 }); }
+  else if (m.type === 'reply_said') { power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on
   // A link clicked on the research card: web and mail links only.
   else if (m.type === 'open_link') { const v = checkLink(m.url); if (v.level === SAFE) openUrl(String(m.url)); else console.error('open_link blocked:', v.reason); }
@@ -2985,7 +2984,8 @@ refreshCatalogs();
 if (config.onboarded) warmUp();
 // Due commitments turn into a nudge, but only when Sidekick isn't mid-conversation.
 async function remindTick() {
-  if (busy || queued || loggingIn || onboarding) { reminderRetry(); return; }
+  // Asleep, nothing goes to the cloud: due reminders wait until Hydra wakes.
+  if (busy || queued || loggingIn || onboarding || power.asleep) { reminderRetry(); return; }
   const due = await takeDueReminders();
   if (!due.length) return;
   const firedAt = Date.now();
@@ -3090,9 +3090,6 @@ if (process.platform === 'win32' && process.env.ROAMIES_EXE && !config.trayShown
 }
 pruneLogs(); pruneUsage();
 midnightClean();
-// Look for updates shortly after launch, then every 6 hours.
-setTimeout(() => checkUpdates(), 20_000);
-setInterval(() => checkUpdates(), 6 * 3600_000);
 voiceConfig();
 // First run (or setup never finished): open the guide.
 // v2 added the "Control apps" (Accessibility) permission: people who finished setup before that
@@ -3107,5 +3104,5 @@ if (!config.onboarded) send({ type: 'onboarding' });
 {
   const w = whatsNewOnStart({ seen: config.seenVersion, version: VERSION, onboarded: config.onboarded });
   if (w.seen !== config.seenVersion) { if (w.open) config.whatsNewFrom = w.from; config.seenVersion = w.seen; saveConfig(); }
-  if (w.open) setTimeout(() => openPanel('whatsnew'), 2500);
+  // Hydra Desktop has no What's new page: the versions seen are still recorded.
 }
