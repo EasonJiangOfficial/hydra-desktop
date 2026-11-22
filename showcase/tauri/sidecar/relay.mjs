@@ -194,27 +194,34 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
   const { emit, signal, onInput = () => {}, done } = h;
   const usage = {};
   let prompt = text, again = 0;
+  // carried: this run's prompt is the owner's additions (missed, or held at done), already counted seen: a run cut
+  // short (an error, max turns) leaves them unanswered too, and says so (R11i-6).
+  let carried = false, told = false;
+  const unsaid = () => { if (!told) emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' }); told = true; };
   // R11-2: words the session took (so Hydra counts them seen) but ended before answering (max turns, an error).
   const left = () => (typeof agent.unanswered === 'function' ? agent.unanswered() : []);
   for (;;) {
     const stream = agent.prompt(prompt);
     onInput((t) => agent.addInput(`${INPUT_PREFIX}${t}`));
+    let cut = false;
     try {
       for await (const e of agentEvents(stream)) {
         if (e.type === 'agent_done') for (const [k, v] of Object.entries(e.totalUsage ?? {})) if (Number.isFinite(v)) usage[k] = (usage[k] ?? 0) + v;
+        if (e.type === 'max_turns') cut = true;
         onEvent(e);
       }
     } catch (e) {
-      if (signal?.aborted || !left().length) throw e;
+      if (signal?.aborted || (!carried && !left().length)) throw e;
       throw Object.assign(new Error(`${String(e?.message ?? e).slice(0, 400)} What you added while I worked was not answered. Say it again.`), e?.code ? { code: e.code } : {});
     }
     if (signal?.aborted) throw new Error('Stopped.');
     onRound();
+    if (carried && cut) unsaid();
     // Taken but not answered (it hit max turns): answered in the same session before the turn ends, capped.
     const missed = left();
     if (missed.length) {
-      if (++again <= HOLD_MAX) { prompt = missed.join('\n\n'); continue; }
-      emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' });
+      if (++again <= HOLD_MAX) { prompt = missed.join('\n\n'); carried = true; continue; }
+      unsaid();
       emit(TOO_MANY_ADDED);
       return;
     }
@@ -223,6 +230,7 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
     const more = await done({ usage: u });
     if (!more.length) return;
     prompt = more.map((t) => `${INPUT_PREFIX}${t}`).join('\n\n');
+    carried = true;
   }
 }
 

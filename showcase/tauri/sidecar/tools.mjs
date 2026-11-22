@@ -312,6 +312,18 @@ export function appMatches(w, want) {
   if (['browser', 'web browser', 'my browser'].includes(x)) return names.some((n) => HELPER_BROWSERS.has(n));
   return names.some((a) => a === x || a.includes(x) || x.includes(a));
 }
+/** What this platform's helper itself finds on screen for 'app:X', never more (main.swift appMatches: its own browser
+ *  names, no '.exe' taken off; hands-win app_matches: 'browser' by program file name): a window only appMatches takes
+ *  (LibreWolf for 'browser' on a Mac) isn't one the helper finds, so it brings a hidden app forward instead (R11i-3). */
+const MAC_BROWSERS = ['Brave Browser', 'Google Chrome', 'Safari', 'Arc', 'Firefox', 'Microsoft Edge', 'Opera', 'Vivaldi', 'Chromium', 'Orion', 'Zen'];
+const WIN_BROWSER_EXES = ['chrome', 'msedge', 'brave', 'firefox', 'opera', 'vivaldi', 'chromium', 'arc', 'zen', 'librewolf', 'waterfox', 'floorp', 'thorium'];
+export function helperFinds(w, want, win = process.platform === 'win32') {
+  const low = (s) => String(s ?? '').toLowerCase().normalize('NFC');
+  const x = win ? low(want).trim().replace(/\.exe$/, '') : low(want).replace(/^[\p{Zs}\t]+|[\p{Zs}\t]+$/gu, '');
+  if (!x) return false;
+  if (['browser', 'web browser', 'my browser'].includes(x)) return win ? WIN_BROWSER_EXES.includes(low(w?.exe)) : MAC_BROWSERS.includes(String(w?.app ?? ''));
+  return [w?.app, ...(win ? [w?.exe] : [])].map(low).filter(Boolean).some((a) => a === x || a.includes(x) || x.includes(a));
+}
 
 export function stepsText(steps, { clipboard } = {}) {
   const q = (t) => JSON.stringify(String(t ?? ''));
@@ -378,27 +390,28 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // A relay turn (R11h-4): to find 'app:X' the helpers bring a running app with no window on screen forward (main.swift
   // resolveWin unhides and activates it; hands-win restores a minimised one), on a Mac the owner isn't at. That's a Mac
   // action of its own: asked first, naming the app, before any helper call that can do it (hands() checks every one).
-  // forward: the apps said yes to in this request; looked: those whose window that yes was to look at too (one
-  // question for both, not two).
-  let forward = { turn: -1, apps: new Set(), looked: new Set() };
+  // forward: the apps said yes to in this request.
+  let forward = { turn: -1, apps: new Set() };
   const TARGET_AT = { locate: 1, ui: 1, 'locate-control': 1, 'ocr-find': 1, capture: 2 };
   const appOf = (args) => {
     if (args[0] === 'act') { try { const p = JSON.parse(args[1]); return p.window == null && p.app ? String(p.app) : null; } catch { return null; } }
     const t = args[TARGET_AT[args[0]]];
     return typeof t === 'string' && t.startsWith('app:') ? t.slice(4) : null;
   };
+  // look: the question asks to look at its window too (one question, not two). Returns the name said yes to then, for
+  // that one read's windowShows only (looked), or null (R11i-1, R11i-5).
   async function bringForward(name, ctx, look = false) {
-    if (!remote() || !String(name ?? '').trim()) return;
-    if (forward.turn !== turn) forward = { turn, apps: new Set(), looked: new Set() };
+    if (!remote() || !String(name ?? '').trim()) return null;
+    if (forward.turn !== turn) forward = { turn, apps: new Set() };
     const k = String(name).trim().toLowerCase();
-    if (forward.apps.has(k)) return;
-    // Listed (on screen): the helper finds it as it is. The list couldn't be read: asked, as for a hidden app.
-    if ((await hands('windows', 'all').catch(() => null))?.windows?.some((w) => appMatches(w, name))) return;
+    if (forward.apps.has(k)) return null;
+    // Listed (on screen) as the helper itself finds it: it uses that window as it is. The list couldn't be read: asked,
+    // as for a hidden app.
+    if ((await hands('windows', 'all').catch(() => null))?.windows?.some((w) => helperFinds(w, name))) return null;
     if (!(await confirm(`Bring ${name} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx))) throw new Error(`${userName} said no, so I didn't bring ${name} forward.`);
     forward.apps.add(k);
-    if (look) forward.looked.add(k);
+    return look ? k : null;
   }
-  const lookedAt = (w) => remote() && forward.turn === turn && [...forward.looked].some((n) => appMatches(w, n));
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Hydra app.');
     if (remote()) await bringForward(appOf(args));
@@ -436,7 +449,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   }
   async function readWindow(target = 'front', ctx) {
     const t = String(target || 'front');
-    if (t !== 'front') await bringForward(t, ctx, true);
+    const looked = t !== 'front' ? await bringForward(t, ctx, true) : null;
     const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
     const [res, all] = await read().catch(async (err) => {
       if (t === 'front' || !/No matching window/.test(String(err?.message ?? err))) throw err;
@@ -445,7 +458,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       if (!(await launchApp(t, hands))) throw err;
       return read();
     });
-    await windowShows(res.window, ctx);
+    await windowShows(res.window, ctx, { looked });
     lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
     const others = (all?.windows ?? []).filter((w) => w.app === res.window.app && w.id !== res.window.id).length;
     const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which draw with text also searches)` : ''}`;
@@ -484,7 +497,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // list ran past the relay's 500 characters and the whole screen could never be asked (R11c-7). A key file still blocks.
   // ok: windows said yes to already (as they showed then), skipped; the ones said yes to now are added.
   // blockOnly: a key file still blocks, nothing asks (draw on this Mac, R11f-3).
-  async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null, blockOnly = false } = {}) {
+  // looked: the app the owner just said yes to bringing forward and looking at, for this read only (bringForward): its
+  // question named that app alone, so it covers only windows of exactly that app (not Adobe Photoshop 2025 for Photos,
+  // R11i-1), never a later read in the request (the window after act_in_app's steps, R11i-5).
+  async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null, blockOnly = false, looked = null } = {}) {
     const asks = whole && !blockOnly ? [whole] : [], key = (w) => JSON.stringify([w?.id, w?.app, w?.title, w?.document, w?.url]);
     const list = [wins].flat();
     for (const w of list) {
@@ -492,7 +508,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
       if (whole || blockOnly || ok?.has(key(w))) continue;
       if (v.level === ASK && v.app && okApp && !remote() && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
-      if (v.level === ASK && v.app && lookedAt(w)) continue;
+      if (v.level === ASK && v.app && looked && remote() && v.app.trim().toLowerCase().normalize('NFC') === looked.normalize('NFC')) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
     if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
@@ -520,7 +536,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       await windowShows(ws, ctx, { whole: WHOLE_SCREEN, blockOnly });
       return { ids: new Set(ws.map((w) => w.id)), boxes: ws.map((w) => w.bounds).filter((b) => Array.isArray(b) && b.length === 4) };
     }
-    if (spec.startsWith('app:')) await bringForward(spec.slice(4), ctx, true);
+    const looked = spec.startsWith('app:') ? await bringForward(spec.slice(4), ctx, true) : null;
     const all = (await hands('windows').catch(() => null))?.windows ?? [];
     const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
     const name = spec.startsWith('app:') ? spec.slice(4) : null;
@@ -530,7 +546,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // front app's windows.
     const same = (w) => (name != null ? appMatches(w, name) : !!app && String(w.app ?? '').toLowerCase() === app.toLowerCase());
     const wins = [...(front ? [front] : []), ...(one ? [] : await addressed(all.filter((w) => same(w) && w.id !== front?.id)))];
-    await windowShows(wins, ctx, { ok, blockOnly, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
+    await windowShows(wins, ctx, { ok, blockOnly, looked, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
     return { front, ids: new Set(wins.map((w) => w.id)) };
   }
   // Every window on the whole screen, checked before anything off it is read (R11h-3, R11h-7): 'windows all'
@@ -548,7 +564,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
   async function handsShot(file, t, ctx) {
     const spec = t === 'screen' || t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
-    if (spec.startsWith('app:')) await bringForward(t, ctx, true);
+    const looked = spec.startsWith('app:') ? await bringForward(t, ctx, true) : null;
     // Shot straight away, with nothing played on screen (the Roamie only shows a "looking" tag).
     // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
     // itself and says the final size; an older helper doesn't, so sips does it here.
@@ -562,7 +578,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     try {
       if (Array.isArray(res.shown) && res.shown.length >= 60) throw new Error(TOO_MANY_WINDOWS);
       const shown = res.window ? [res.window] : Array.isArray(res.shown) ? res.shown : ((await screenWins()) ?? [null]);
-      await windowShows(shown, ctx, { whole: remote() && t === 'screen' ? WHOLE_SCREEN : null });
+      await windowShows(shown, ctx, { looked, whole: remote() && t === 'screen' ? WHOLE_SCREEN : null });
     } catch (e) { await fs.unlink(file).catch(() => {}); throw e; }
     const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
     const bounds = res.window?.bounds ?? res.bounds;

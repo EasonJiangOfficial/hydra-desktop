@@ -41,25 +41,30 @@ function main(a) {
   const listed = onScreen.filter((w) => w.listed !== false);
   const lines = (w) => String(w.text ?? '').split('\n');
   const BROWSERS = ['Brave Browser', 'Google Chrome', 'Safari', 'Arc', 'Firefox', 'Microsoft Edge', 'Opera', 'Vivaldi', 'Chromium', 'Orion', 'Zen'];
-  // appMatches (main.swift) / app_matches (logic.rs: the exe too).
+  const BROWSER_EXES = ['chrome', 'msedge', 'brave', 'firefox', 'opera', 'vivaldi', 'chromium', 'arc', 'zen', 'librewolf', 'waterfox', 'floorp', 'thorium'];
+  // hands-win's exe: the program's file name without .exe (win.rs proc_names).
+  const exe = (w) => String(w.exe ?? w.app.toLowerCase()).replace(/\.exe$/i, '');
+  // appMatches (main.swift: its browser names) / app_matches (logic.rs: the exe too, '.exe' off what's asked, 'browser'
+  // by exe).
   const matches = (w, want) => {
-    const x = want.trim().toLowerCase().replace(/\.exe$/, '');
+    const x = win ? want.trim().toLowerCase().replace(/\.exe$/, '') : want.trim().toLowerCase();
     if (!x) return false;
-    if (['browser', 'web browser', 'my browser'].includes(x)) return BROWSERS.includes(w.app);
-    return [w.app, win ? w.exe ?? '' : ''].map((n) => n.toLowerCase()).some((n) => n && (n === x || n.includes(x) || x.includes(n)));
+    if (['browser', 'web browser', 'my browser'].includes(x)) return win ? BROWSER_EXES.includes(exe(w).toLowerCase()) : BROWSERS.includes(w.app);
+    return [w.app, win ? exe(w) : ''].map((n) => n.toLowerCase()).some((n) => n && (n === x || n.includes(x) || x.includes(n)));
   };
   const info = (w) => ({ id: w.id, app: w.app, title: w.title, bounds: B(w) });
   // winShows: the file (AXDocument) and, unless url: false, a browser's address. hands-win: win_info only.
   const shows = (w, url = true) => (win ? info(w) : { ...info(w), ...(w.doc ? { document: w.doc } : {}), ...(url && w.url ? { url: w.url } : {}) });
   const mainWindow = (ws) => ws[0] ?? null;
-  // resolveWin: 'app:X' with no window on screen but running hidden brings it forward (UNHIDE logged) and looks again.
+  // resolveWin: 'app:X' with no window on screen but running hidden brings it forward (UNHIDE logged) and looks again:
+  // on a Mac the app named X itself first, then the fuzzy match (pickRunning); hands-win the first minimised match.
   const resolve = (t) => {
     if (t === 'front') return mainWindow(listed.filter((w) => w.pid === st.frontPid)) ?? listed[0] ?? null;
     if (t.startsWith('window:')) return listed.find((w) => w.id === +t.slice(7)) ?? null;
     if (!t.startsWith('app:')) return null;
     const name = t.slice(4), w = mainWindow(listed.filter((x) => matches(x, name)));
     if (w) return w;
-    const h = st.wins.find((x) => hidden.has(x.app) && matches(x, name));
+    const h = (!win && st.wins.find((x) => hidden.has(x.app) && x.app.toLowerCase() === name.trim().toLowerCase())) || st.wins.find((x) => hidden.has(x.app) && matches(x, name));
     if (!h) return null;
     log(['UNHIDE', h.app]);
     fs.writeFileSync(file, JSON.stringify({ ...st, hidden: [...hidden].filter((n) => n !== h.app) }));
@@ -72,12 +77,12 @@ function main(a) {
     case 'windows': {
       // main.swift: 30 unless 'all' (then every one, and says so); hands-win: take(30), the exe, never 'all'.
       const every = !win && a[1] === 'all';
-      done({ ok: true, ...(win ? {} : { all: every }), windows: (every ? listed : listed.slice(0, 30)).map((w) => ({ ...shows(w, false), ...(win ? { exe: w.exe ?? `${w.app.toLowerCase()}.exe` } : {}), ...(w.pid === st.frontPid ? { frontApp: true } : {}) })) });
+      done({ ok: true, ...(win ? {} : { all: every }), windows: (every ? listed : listed.slice(0, 30)).map((w) => ({ ...shows(w, false), ...(win ? { exe: exe(w) } : {}), ...(w.pid === st.frontPid ? { frontApp: true } : {}) })) });
     }
     case 'front': {
       const w = resolve('front');
       if (!w) done({ ok: true });
-      done({ ok: true, app: w.app, ...(win ? { exe: w.exe ?? `${w.app.toLowerCase()}.exe` } : {}), ...(w.title ? { title: w.title } : {}), ...(w.url ? { url: w.url } : {}), ...(!win && w.doc ? { document: w.doc } : {}) });
+      done({ ok: true, app: w.app, ...(win ? { exe: exe(w) } : {}), ...(w.title ? { title: w.title } : {}), ...(w.url ? { url: w.url } : {}), ...(!win && w.doc ? { document: w.doc } : {}) });
     }
     case 'locate': {
       if (a[1] === 'screen') done({ ok: true, what: 'screen' });

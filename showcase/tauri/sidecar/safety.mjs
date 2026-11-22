@@ -281,9 +281,11 @@ const BROWSER_APPS = /^(safari|google chrome|chrome|chromium|arc|firefox|microso
 // with a folder after the name, Vim's "id_rsa + (~/.ssh) - VIM" and Sublime's "C:\\keys\\id_rsa (keys) - Sublime Text"
 // (R11h-2). Each piece with its marks (Vim's +, =, -, [+], [RO]) and folder taken off, its first word, the folder,
 // and the name in that folder ("config (~/.ssh)" is ~/.ssh/config).
-const MARKS = /(\s+(\[[^\]]*\]|[+=-]{1,2}))+$/u;
+// Vim and Neovim put the file list's counter last when more than one file is open: "config (~/.ssh) (1 of 2) - VIM",
+// "config + (~\\.kube) ((2) of 3) - GVIM" (R11i-2); it's taken off before the folder.
+const MARKS = /(\s+(\[[^\]]*\]|[+=-]{1,2}))+$/u, ARGS = /\s*\(\(?\d+\)? of \d+\)$/u;
 const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) => {
-  let name = x.replace(/^[*●•\s]+|[*●•\s]+$/gu, '').replace(MARKS, '').trim(), dir = '';
+  let name = x.replace(/^[*●•\s]+|[*●•\s]+$/gu, '').replace(MARKS, '').replace(ARGS, '').replace(MARKS, '').trim(), dir = '';
   const p = /\s*\(([^()]*)\)$/u.exec(name);
   if (p) { dir = p[1].trim(); name = name.slice(0, p.index).replace(MARKS, '').trim(); }
   const first = name.split(/\s+/)[0];

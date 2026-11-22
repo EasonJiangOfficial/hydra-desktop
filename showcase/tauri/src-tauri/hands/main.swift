@@ -63,6 +63,12 @@ func appMatches(_ app: String, _ want: String) -> Bool {
     let a = app.lowercased()
     return a == w || a.contains(w) || w.contains(a)
 }
+/// The running app 'app:X' brings forward when none of its windows is on screen: one named X itself first, then the
+/// fuzzy match (as manage picks it). "Photos" is Photos, not Adobe Photoshop 2025 running before it (R11i-1).
+func pickRunning(_ names: [String], _ want: String) -> Int? {
+    let w = want.lowercased().trimmingCharacters(in: .whitespaces)
+    return names.firstIndex { $0.lowercased() == w } ?? names.firstIndex { appMatches($0, want) }
+}
 
 /// Resolves a target to a window. "front" = the frontmost app that isn't Roamies.
 func resolve(_ target: String) -> Win? {
@@ -113,7 +119,9 @@ func resolveWin(_ target: String) -> Win? {
         let name = String(target.dropFirst(4))
         if let w = mainWindow(all.filter { appMatches($0.app, name) }) { return w }
         // Running but no visible window (hidden or minimised): bring it forward and look again.
-        if let app = NSWorkspace.shared.runningApplications.first(where: { appMatches($0.localizedName ?? "", name) }) {
+        let running = NSWorkspace.shared.runningApplications
+        if let i = pickRunning(running.map { $0.localizedName ?? "" }, name) {
+            let app = running[i]
             app.unhide()
             app.activate(options: [.activateAllWindows])
             Thread.sleep(forTimeInterval: 0.6)
@@ -1851,6 +1859,8 @@ case "--self-test":
     check("a titled small window in front is kept", mainWindow([win(1, "Export", 300, 200), win(2, "Doc", 1800, 1066)])?.id == 1)
     check("a sizeable untitled window in front is kept", mainWindow([win(1, "", 900, 600), win(2, "Doc", 1800, 1066)])?.id == 1)
     check("an app with only a small window still has it", mainWindow([win(1, "", 183, 88)])?.id == 1)
+    check("app:Photos brings Photos forward, not Adobe Photoshop running before it", pickRunning(["Adobe Photoshop 2025", "Photos"], "Photos") == 1)
+    check("a part of the name still finds its app", pickRunning(["Finder", "Google Chrome"], "chrome") == 1 && pickRunning(["Finder"], "Notes") == nil)
     let main = Win(id: 2, pid: 1, app: "CapCut", title: "CapCut", x: 0, y: 39, w: 1800, h: 1066), badge = Win(id: 1, pid: 1, app: "CapCut", title: "", x: 1625, y: 1029, w: 183, h: 88)
     check("a capture that also shows a child window maps over both", shotArea(main, [badge, main], [1568, 935]) == CGRect(x: 0, y: 39, width: 1808, height: 1078))
     check("a capture of the window alone maps over the window", shotArea(main, [badge, main], [1568, 929]) == nil)

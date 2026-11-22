@@ -228,7 +228,7 @@ if (['darwin', 'win32'].includes(process.platform)) {
   fake.set({ win: true, frontPid: 300, wins: many });
   assert.equal(helper('windows', 'all').windows.length, 30);
   assert.equal(helper('windows', 'all').all, undefined);
-  assert.equal(helper('windows').windows[0].exe, 'textedit.exe');
+  assert.equal(helper('windows').windows[0].exe, 'textedit');
 
   assert.ok(!fs.existsSync(launched), `nothing launched: ${fs.existsSync(launched) ? fs.readFileSync(launched, 'utf8') : ''}`);
 }
