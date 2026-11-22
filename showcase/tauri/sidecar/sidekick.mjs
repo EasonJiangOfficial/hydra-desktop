@@ -3096,7 +3096,7 @@ function applyHydraSettings(next, before) {
 function localHydraTools() {
   if (!hydraKey) return [];
   return [
-    ...hydraTools.tools({ onConfirm: ({ summary }) => say(`That needs your yes in Hydra: ${summary}`, 'concerned'), confirm: async (q, signal) => isYes(await ask({ placeholder: q, choices: ['Allow', "Don't allow"], always: true }, signal)) }),
+    ...hydraTools.tools({ onConfirm: ({ summary }) => say(`That needs your yes in Hydra: ${summary}`, 'concerned') }),
     showTool({ onUi: (action) => { send({ type: 'main_show' }); pushWeb({ ui: { ...action, at: Date.now() } }); } }),
   ];
 }
@@ -3155,7 +3155,7 @@ async function relayTurn(turn, { emit, signal, approve, alive = async () => true
       if (!MAC_READS.has(t.name) && !(await alive())) throw new Error(TURN_OVER);
       return inRelay(() => t.execute(a, ctx));
     } })),
-    ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive, confirm: async (q) => (await approve({ summary: q, danger: DANGER.test(q) })) === 'approved' }).filter((t) => may('hydra', t.name)),
+    ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive }).filter((t) => may('hydra', t.name)),
     showTool({ onUi: (action) => emit({ type: 'ui', action }) }),
   ];
   const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');

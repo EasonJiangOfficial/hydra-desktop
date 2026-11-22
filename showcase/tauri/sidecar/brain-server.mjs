@@ -126,7 +126,7 @@ export function createBrainTurn({ hydraTools, executable, settings = async () =>
     if (!p.said) throw new Error('The turn had no words.');
     const may = toolFilter(turn.allowedTools);
     const tools = [
-      ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive, confirm: async (q) => (await approve({ summary: q, danger: DANGER.test(q) })) === 'approved' }).filter((t) => may('hydra', t.name)),
+      ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive }).filter((t) => may('hydra', t.name)),
       showTool({ onUi: (action) => emit({ type: 'ui', action }) }),
     ];
     const { model, thinking } = brainFor(await Promise.resolve().then(settings).catch(() => SETTINGS_DEFAULTS), turn.surface);

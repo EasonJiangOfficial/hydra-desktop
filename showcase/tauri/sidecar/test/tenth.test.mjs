@@ -136,27 +136,29 @@ const { LIMITS } = await import('../relayschema.mjs');
   assert.deepEqual(await store.learnFactsAsked([{ text: 'x y' }], async () => { throw new Error('gone'); }), [], 'a failed ask is a no');
 }
 
-// ---- R10-8: a Hydra tool that isn't read-only asks here before it runs at all; none to ask: it doesn't run.
+// ---- R10-8 (owner, 2026-11-22): Hydra's server owns the ask for its own data. A write runs with no second ask on this
+// side; the server's gate (an approval id) still holds it until the owner answers.
 {
   const { createHydraTools } = await import('../hydramcp.mjs');
   const calls = [];
   const api = { req: async (_p, o) => {
-    calls.push(o.body.method);
+    calls.push([o.body.method, o.body.params?.arguments?.approvalId ?? null]);
+    const gated = o.body.method === 'tools/call' && o.body.params?.name === 'delete_task' && !o.body.params?.arguments?.approvalId;
     const result = o.body.method === 'tools/list'
-      ? { tools: [{ name: 'add_task', description: 'Adds a task', inputSchema: { type: 'object', properties: {} } }, { name: 'list_tasks', annotations: { readOnlyHint: true }, inputSchema: { type: 'object' } }] }
+      ? { tools: [{ name: 'add_task', inputSchema: { type: 'object', properties: {} } }, { name: 'delete_task', inputSchema: { type: 'object' } }, { name: 'list_tasks', annotations: { readOnlyHint: true }, inputSchema: { type: 'object' } }] }
+      : gated ? { content: [{ type: 'text', text: JSON.stringify({ needsApproval: true, approvalId: 'ap-1', summary: 'Delete Pay rent' }) }], structuredContent: { needsApproval: true, approvalId: 'ap-1', summary: 'Delete Pay rent' } }
       : { content: [{ type: 'text', text: 'ok' }] };
     return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), text: async () => JSON.stringify({ jsonrpc: '2.0', id: o.body.id, result }) };
   } };
   const ht = createHydraTools({ api });
   await ht.refresh();
-  const [add, list] = ht.tools({});
-  await assert.rejects(add.execute({ title: 'Pay rent' }), /said no/);
-  assert.deepEqual(calls, ['tools/list'], 'never reached Hydra');
-  assert.equal(await list.execute({}), 'ok', "reading Hydra's data is free");
-  const qs = [];
-  const [add2] = ht.tools({ confirm: async (q) => { qs.push(q); return true; } });
-  assert.equal(await add2.execute({ title: 'Pay rent' }), 'ok');
-  assert.ok(qs[0].includes('add task') && qs[0].includes('"title":"Pay rent"'), qs[0]);
+  const asked = [];
+  const [add, del, list] = ht.tools({ onConfirm: (c) => asked.push(c.summary), waitFor: async () => 'approved' });
+  assert.equal(await add.execute({ title: 'Pay rent' }), 'ok', 'a plain write runs: the server gate did not ask');
+  assert.equal(await list.execute({}), 'ok');
+  assert.equal(await del.execute({ id: 't1' }), 'ok');
+  assert.deepEqual(asked, ['Delete Pay rent'], 'one ask, the server gate\'s');
+  assert.deepEqual(calls.filter(([m]) => m === 'tools/call').map(([, a]) => a), [null, null, null, 'ap-1'], 'the gated call goes again with its approval id');
 }
 
 // ---- The tools, against a fake helper: R10-5, R10-6, R10-7, R10-9, R10-11, R10-12.
