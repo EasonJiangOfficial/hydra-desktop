@@ -64,7 +64,7 @@ const win = n.window ?? { id: 3, app: 'Terminal', title: 'zsh', bounds: [0, 0, 8
 let o = { ok: true, window: win, controls: [], texts: [], note: '' };
 if (a[0] === 'find-text') o = { ok: true, matches: (n.find ?? []).map((m) => ({ window: { id: win.id, app: win.app, title: win.title, bounds: win.bounds }, ...m })) }; // the real helpers name each match's window
 if (a[0] === 'ocr-find') o = { ok: true, matches: n.ocr ?? [] };
-if (a[0] === 'windows') o = { ok: true, windows: n.windows ?? [] };
+if (a[0] === 'windows') o = { ok: true, windows: n.windows ?? [win] }; // as the real helpers: a window locate finds is listed
 if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = a[2] === 'screen' ? { ok: true, file: a[1], what: 'screen', bounds: [0, 0, 1440, 900], shown: n.shown ?? [], pixels: [1440, 900] } : { ok: true, file: a[1], window: win, pixels: [800, 600] }; }
 console.log(JSON.stringify(o));
 `);
@@ -90,7 +90,7 @@ console.log(JSON.stringify(o));
   await assert.rejects(ring('front', 'OPENAI'), /said no/);
   assert.ok(asks[0].includes('"zsh"') && asks[0].includes('"ssh prod"'), asks[0]);
   // The whole screen always asks, naming it, even with no window listed.
-  reset();
+  reset({ windows: [] });
   await assert.rejects(ring('screen', 'OPENAI'), /said no/);
   assert.ok(asks[0].includes('whole screen'), asks[0]);
   assert.deepEqual(reads(), []);

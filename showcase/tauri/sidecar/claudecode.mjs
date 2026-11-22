@@ -227,7 +227,8 @@ const preview = (c) => (typeof c === 'string' ? c : c.map((b) => (b.type === 'te
 const toMcpContent = (c) => (typeof c === 'string' ? (c ? [{ type: 'text', text: c }] : [])
   : c.map((b) => (b.type === 'text' ? { type: 'text', text: b.text } : b.type === 'image' ? { type: 'image', data: b.data, mimeType: b.mediaType } : { type: 'text', text: `[${b.mediaType} omitted: not supported here]` })));
 
-export function createToolBridge({ tools, signal, maxToolResultChars, onEvent }) {
+// onReply(toolCallId): just before a result is handed back to Claude Code (on the same stdin as the owner's additions).
+export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, onReply }) {
   const results = new Map(), invalidCounts = new Map();
   async function callTool(name, args, toolCallId, cancel) {
     const t0 = Date.now();
@@ -293,7 +294,7 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent })
           const metaId = params._meta?.['claudecode/toolUseId'];
           const toolCallId = typeof metaId === 'string' ? metaId : `gg_call_${++callCount}`;
           void callTool(String(params.name), params.arguments ?? {}, toolCallId, controller.signal)
-            .then((result) => { results.set(toolCallId, result); reply(id, { result: { content: toMcpContent(result.content), ...(result.isError ? { isError: true } : {}) } }); })
+            .then((result) => { results.set(toolCallId, result); onReply?.(toolCallId); reply(id, { result: { content: toMcpContent(result.content), ...(result.isError ? { isError: true } : {}) } }); })
             .finally(() => inFlight.delete(id));
           return;
         }
@@ -353,7 +354,7 @@ export const connectorTool = (name) => { const m = /^mcp__(.+?)__(.+)$/.exec(nam
 // o.connectors: the owner's claude.ai connectors load too, and every call to one goes through o.gate(name, input,
 // signal) → true to run it (the desktop risk gate: reads run, anything else asks the owner).
 function sdkOptions(o, resume, link) {
-  const bridge = createToolBridge({ tools: o.tools ?? [], signal: () => link.signal, onEvent: (event) => link.onEvent?.(event) });
+  const bridge = createToolBridge({ tools: o.tools ?? [], signal: () => link.signal, onEvent: (event) => link.onEvent?.(event), onReply: (id) => link.onReply?.(id) });
   const abortController = new AbortController();
   const effort = effortForThinking(o.thinking);
   const options = {
@@ -458,19 +459,25 @@ async function* claudeCodeLoop(messages, o) {
   // this turn took so far (user_message_uuids on its replies): all a crash leaves to go by (R11f-1).
   let turnAt = 0, turnTook = null;
   // folds: where a tool round ended and a new message began after it (R11g-5). Claude Code folds what was queued into a
-  // turn only there, and a typed turn's stream names none of it (sdk.d.ts: only its first frame is stamped). Each is the
-  // step its tool results came back at (the fold is made then, not when the next message starts), else that message's.
-  let toolAt = 0, lastStop = null;
-  const folds = [];
+  // turn only there, and a typed turn's stream names none of it (sdk.d.ts: only its first frame is stamped). Counted
+  // only where the order is provable (R11h-1): our tools' results go back to Claude Code on the same stdin as the
+  // additions, so one added before the bridge handed back a result of the round was read before the round ended. The
+  // fold is the step of the round's last such hand-back. A round of results Claude Code made itself (a connector's)
+  // proves nothing: an addition still on its way then waits for its own turn.
+  let roundAt = 0, lastStop = null;
+  const folds = [], handed = new Map();
+  link.onReply = (id) => { handed.set(id, ++step); };
   const tookOf = (m) => (Array.isArray(m?.user_message_uuids) ? m.user_message_uuids : typeof m?.user_message_uuid === 'string' ? [m.user_message_uuid] : null);
   // Claude Code named what a turn took (R11c-B1): from then on, whatever it didn't take is unanswered. A turn that
   // ended well answered all it took; one cut short (an error result, max turns, a crash) only if its last message was
   // its final answer, as all it took was folded in before that (R11f-1).
-  const settle = (took, ok) => {
+  // guess: took is only the stream's stamps (a crash, a result with no uuids, a plain end), so a fold counts too. A
+  // result that names what its turn took is believed as it is.
+  const settle = (took, ok, guess = false) => {
     if (!took) return;
     byUuid = true;
     // Cut short after its final answer: what was sent before a fold in this turn was taken in and answered too.
-    if (ok || (finalAt === answeredAt && finalAt > turnAt)) for (const a of added) if (took.includes(a.uuid) || (!ok && folds.some((f) => f > a.at && f > turnAt))) a.done = true;
+    if (ok || (finalAt === answeredAt && finalAt > turnAt)) for (const a of added) if (took.includes(a.uuid) || (guess && folds.some((f) => f > a.at && f > turnAt))) a.done = true;
   };
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
   // After begin(): the first message is on the input already, so an addition always comes after it.
@@ -498,11 +505,11 @@ async function* claudeCodeLoop(messages, o) {
     for await (const item of channel) {
       if (item.kind === 'wake') continue;
       if (item.kind === 'event') { if (!aborted) yield item.event; continue; }
-      if (item.kind === 'end') { settle(turnTook, false); break; }
+      if (item.kind === 'end') { settle(turnTook, false, true); break; }
       if (item.kind === 'error') {
         // Only a Stop ends quietly: an error that merely says "abort" is an error (R11c-B2), so what was added is named.
         if (aborted) break;
-        settle(turnTook, false);
+        settle(turnTook, false, true);
         throw item.error instanceof Error ? item.error : new Error(String(item.error));
       }
       const message = item.message;
@@ -513,21 +520,22 @@ async function* claudeCodeLoop(messages, o) {
         if (!message.parent_tool_use_id) {
           if (message.type === 'stream_event' && message.event?.type === 'message_start') {
             streamed = true;
-            const prev = msgAt;
             answeredAt = msgAt = ++step;
-            if (lastStop === 'tool_use') folds.push(toolAt > prev ? toolAt : msgAt);
-            lastStop = null;
+            if (lastStop === 'tool_use' && roundAt) folds.push(roundAt);
+            lastStop = null; roundAt = 0;
           } else if (message.type === 'stream_event' && message.event?.type === 'message_delta') { lastStop = message.event.delta?.stop_reason ?? lastStop; if (lastStop === 'end_turn') finalAt = msgAt; }
           else if (message.type === 'assistant' && !streamed) { answeredAt = ++step; if (message.message?.stop_reason === 'end_turn') finalAt = step; }
-          else if (message.type === 'user' && Array.isArray(message.message?.content) && message.message.content.some((b) => b?.type === 'tool_result')) toolAt = ++step;
+          else if (message.type === 'user' && Array.isArray(message.message?.content)) {
+            for (const b of message.message.content) if (b?.type === 'tool_result' && handed.has(b.tool_use_id)) roundAt = Math.max(roundAt, handed.get(b.tool_use_id));
+          }
           const s = tookOf(message);
           if (s) turnTook = [...new Set([...(turnTook ?? []), ...s])];
         }
         yield* mapper.handle(message); continue;
       }
       // Read before an error throws or max turns breaks: an error result names what its turn took too (R11f-1).
-      const took = tookOf(message) ?? turnTook;
-      if (message.subtype !== 'success' || message.is_error) settle(took, false);
+      const own = tookOf(message), took = own ?? turnTook;
+      if (message.subtype !== 'success' || message.is_error) settle(took, false, !own);
       if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();

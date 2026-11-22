@@ -277,8 +277,18 @@ const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime playe
 // file it reports (R11c-6), so it asks.
 const DOC_APPS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint))$/i;
 const BROWSER_APPS = /^(safari|google chrome|chrome|chromium|arc|firefox|microsoft edge|msedge|brave browser|brave|opera|vivaldi|orion|zen)$/i;
-// The file names a title shows: ".env - Notepad", "*id_rsa - Notepad", "id_rsa — Edited", "● .env — shop — Code".
-const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).map((x) => x.replace(/^[*●•\s]+|[*●•\s]+$/gu, '')).filter(Boolean);
+// The file names a title shows: ".env - Notepad", "*id_rsa - Notepad", "id_rsa — Edited", "● .env — shop — Code", and
+// with a folder after the name, Vim's "id_rsa + (~/.ssh) - VIM" and Sublime's "C:\\keys\\id_rsa (keys) - Sublime Text"
+// (R11h-2). Each piece with its marks (Vim's +, =, -, [+], [RO]) and folder taken off, its first word, the folder,
+// and the name in that folder ("config (~/.ssh)" is ~/.ssh/config).
+const MARKS = /(\s+(\[[^\]]*\]|[+=-]{1,2}))+$/u;
+const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) => {
+  let name = x.replace(/^[*●•\s]+|[*●•\s]+$/gu, '').replace(MARKS, '').trim(), dir = '';
+  const p = /\s*\(([^()]*)\)$/u.exec(name);
+  if (p) { dir = p[1].trim(); name = name.slice(0, p.index).replace(MARKS, '').trim(); }
+  const first = name.split(/\s+/)[0];
+  return [name, first, dir, ...(dir && name ? [`${dir}/${name}`, `${dir}/${first}`] : [])].filter(Boolean);
+});
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -286,8 +296,9 @@ export function checkWindow(win, home, { viewers = true } = {}) {
   // No file or address said (hands-win never says one; some Mac editors set no document): a key file's name in the
   // title blocks it as the file itself would (R11g-3).
   if (!files.length && !win?.url) {
-    const homes = homesOf(home), key = titleNames(win?.title).find((n) => hits(SECRET, [norm(n, home)], homes));
-    if (key) return verdict(BLOCK, `${app || 'That window'} shows ${key}, so I won't read it or look at it. Its name is a file that holds passwords or keys.`);
+    // Its words are never quoted: a title is an email's subject, a page's name or a command (R11h-5).
+    const homes = homesOf(home);
+    if (titleNames(win?.title).some((n) => hits(SECRET, [norm(n, home)], homes))) return verdict(BLOCK, `${app ? `${app}'s window title` : "That window's title"} names a file that holds passwords or keys, so I won't read it or look at it.`);
   }
   let worst = verdict(SAFE);
   for (const f of files) {

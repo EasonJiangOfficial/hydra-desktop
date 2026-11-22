@@ -172,6 +172,9 @@ const ACT_FIXED = [
   'Finder came to the front: clicks and keys there can rename, move, open or delete files\\.',
   `A Save or Open panel is up in ${ACT_APP}: in it any file in any folder can be picked, uploaded or made\\.`,
 ].map((x) => new RegExp(`^${x}$`));
+const TOO_MANY_WINDOWS = 'Too many windows are open for me to check them all. Name the app.';
+// A box [x, y, w, h] inside another (a point of slack for rounding).
+const inside = (m, b) => Array.isArray(m) && m.length === 4 && m[0] >= b[0] - 1 && m[1] >= b[1] - 1 && m[0] + m[2] <= b[0] + b[2] + 1 && m[1] + m[3] <= b[1] + b[3] + 1;
 const STALE_ID = 'The page changed since read_window, so that id is out of date. Call read_window again and use the new ids.';
 // An app named in read_window or act_in_app that isn't open: open it (with the open tool's safety check) and wait
 // up to 6 s for its window. True when it's there. Only plain app names, never paths or links.
@@ -372,8 +375,33 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const where = !inWhat || inWhat === 'front' ? 'the app in front' : inWhat;
     return `${/^Step \d+/.exec(t)?.[0] ?? 'A step'} didn't work in ${where}. What its window shows isn't passed on until ${userName} says yes to reading it.`;
   }
+  // A relay turn (R11h-4): to find 'app:X' the helpers bring a running app with no window on screen forward (main.swift
+  // resolveWin unhides and activates it; hands-win restores a minimised one), on a Mac the owner isn't at. That's a Mac
+  // action of its own: asked first, naming the app, before any helper call that can do it (hands() checks every one).
+  // forward: the apps said yes to in this request; looked: those whose window that yes was to look at too (one
+  // question for both, not two).
+  let forward = { turn: -1, apps: new Set(), looked: new Set() };
+  const TARGET_AT = { locate: 1, ui: 1, 'locate-control': 1, 'ocr-find': 1, capture: 2 };
+  const appOf = (args) => {
+    if (args[0] === 'act') { try { const p = JSON.parse(args[1]); return p.window == null && p.app ? String(p.app) : null; } catch { return null; } }
+    const t = args[TARGET_AT[args[0]]];
+    return typeof t === 'string' && t.startsWith('app:') ? t.slice(4) : null;
+  };
+  async function bringForward(name, ctx, look = false) {
+    if (!remote() || !String(name ?? '').trim()) return;
+    if (forward.turn !== turn) forward = { turn, apps: new Set(), looked: new Set() };
+    const k = String(name).trim().toLowerCase();
+    if (forward.apps.has(k)) return;
+    // Listed (on screen): the helper finds it as it is. The list couldn't be read: asked, as for a hidden app.
+    if ((await hands('windows', 'all').catch(() => null))?.windows?.some((w) => appMatches(w, name))) return;
+    if (!(await confirm(`Bring ${name} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx))) throw new Error(`${userName} said no, so I didn't bring ${name} forward.`);
+    forward.apps.add(k);
+    if (look) forward.looked.add(k);
+  }
+  const lookedAt = (w) => remote() && forward.turn === turn && [...forward.looked].some((n) => appMatches(w, n));
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Hydra app.');
+    if (remote()) await bringForward(appOf(args));
     // Acting in an app may take the real cursor: meanwhile clicks go through the overlay, even where the Sidekick or
     // its bubble sits on the spot being clicked.
     const acting = args[0] === 'act';
@@ -408,6 +436,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   }
   async function readWindow(target = 'front', ctx) {
     const t = String(target || 'front');
+    if (t !== 'front') await bringForward(t, ctx, true);
     const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
     const [res, all] = await read().catch(async (err) => {
       if (t === 'front' || !/No matching window/.test(String(err?.message ?? err))) throw err;
@@ -463,6 +492,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
       if (whole || blockOnly || ok?.has(key(w))) continue;
       if (v.level === ASK && v.app && okApp && !remote() && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
+      if (v.level === ASK && v.app && lookedAt(w)) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
     if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
@@ -478,13 +508,20 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // Returns { front, ids }: the windows checked. The helper's own search can reach others (past its 30-window list, a
   // front app that changed since, R11e-2..4), so draw keeps only what these show.
   // blockOnly: draw on this Mac, where only a key file stops it (as read_window), R11f-3.
+  // 'screen': returns { ids, boxes } too, every window checked and where it is: words read off the screen's pixels
+  // count only inside one (R11h-3).
   async function searchedShows(spec, ctx, ok = null, blockOnly = false) {
-    const all = (await hands('windows').catch(() => null))?.windows ?? [];
     // 'windows' leaves out a browser's address (a walk of each window, main.swift): each browser window checked gets
     // its own here, so a key file open as a file:// page is blocked as one open in an editor is (R11g-2). hands-win
     // reads none; the title check covers it there (checkWindow).
     const addressed = (ws) => (process.platform === 'win32' ? ws : Promise.all(ws.map((w) => (w?.url || !appMatches(w, 'browser') ? w : hands('locate', `window:${w.id}`).then((r) => ({ ...w, ...r?.window }), () => w)))));
-    if (spec === 'screen') return windowShows(await addressed(all), ctx, { whole: WHOLE_SCREEN, blockOnly }).then(() => ({}));
+    if (spec === 'screen') {
+      const ws = await addressed((await screenWins()) ?? []);
+      await windowShows(ws, ctx, { whole: WHOLE_SCREEN, blockOnly });
+      return { ids: new Set(ws.map((w) => w.id)), boxes: ws.map((w) => w.bounds).filter((b) => Array.isArray(b) && b.length === 4) };
+    }
+    if (spec.startsWith('app:')) await bringForward(spec.slice(4), ctx, true);
+    const all = (await hands('windows').catch(() => null))?.windows ?? [];
     const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
     const name = spec.startsWith('app:') ? spec.slice(4) : null;
     const app = String(front?.app ?? name ?? '').trim();
@@ -496,9 +533,22 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     await windowShows(wins, ctx, { ok, blockOnly, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
     return { front, ids: new Set(wins.map((w) => w.id)) };
   }
+  // Every window on the whole screen, checked before anything off it is read (R11h-3, R11h-7): 'windows all'
+  // (main.swift) lists them all. A helper that lists at most 30 (hands-win) and sent 30 may have left some out, so the
+  // screen isn't read then. null: the helper couldn't list them.
+  // ponytail: a window the helpers never list (a panel above layer 0, one 80x60 or smaller) isn't checked, and drawn
+  // over a checked window its words count as that window's; list every layer in the helpers if that matters.
+  async function screenWins() {
+    const r = await hands('windows', 'all').catch(() => null);
+    if (!r) return null;
+    const ws = r.windows ?? [];
+    if (!r.all && ws.length >= 30) throw new Error(TOO_MANY_WINDOWS);
+    return ws;
+  }
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
   async function handsShot(file, t, ctx) {
     const spec = t === 'screen' || t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
+    if (spec.startsWith('app:')) await bringForward(t, ctx, true);
     // Shot straight away, with nothing played on screen (the Roamie only shows a "looking" tag).
     // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
     // itself and says the final size; an older helper doesn't, so sips does it here.
@@ -508,9 +558,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     if (!res) return null;
     // The window in the picture is checked like read_file first; for the whole screen, every window on it (V8-5: an
     // editor showing a key beside the front app is in the picture too). A helper that doesn't list them (Windows'):
-    // the front one.
+    // every window 'windows' lists, as draw checks the screen (R11h-7). main.swift lists at most 60 in it.
     try {
-      const shown = res.window ? [res.window] : Array.isArray(res.shown) ? res.shown : [await hands('front').catch(() => null)];
+      if (Array.isArray(res.shown) && res.shown.length >= 60) throw new Error(TOO_MANY_WINDOWS);
+      const shown = res.window ? [res.window] : Array.isArray(res.shown) ? res.shown : ((await screenWins()) ?? [null]);
       await windowShows(shown, ctx, { whole: remote() && t === 'screen' ? WHOLE_SCREEN : null });
     } catch (e) { await fs.unlink(file).catch(() => {}); throw e; }
     const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
@@ -691,7 +742,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         const where = lastShot?.turn === turn && lastShot.win != null ? `window:${lastShot.win}` : spec;
         const checked = await gate(where);
         // A relay turn: the very window checked, not the front app as it is a moment later (R11e-4).
-        return (await hands('ocr-find', checked?.front ? `window:${checked.front.id}` : where, String(find), 'all').catch(() => null))?.matches ?? [];
+        const found = (await hands('ocr-find', checked?.front ? `window:${checked.front.id}` : where, String(find), 'all').catch(() => null))?.matches ?? [];
+        // The whole screen's pixels: only words inside a window checked (R11h-3). OCR gives each hit's whole line.
+        return checked?.boxes ? found.filter((m) => checked.boxes.some((b) => inside(m?.bounds, b))) : found;
       },
       async findText(find) {
         if (!HANDS) throw new Error('Finding words on screen needs the Hydra app; take a screenshot and give x, y instead.');
@@ -1034,6 +1087,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const firstClick = steps.findIndex((s) => ['click', 'click_text', 'hover'].includes(s.do));
           const upTo = firstClick < 0 ? steps.length : firstClick + 1;
           const spec = t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
+          // Before the locate below, whose failure is passed over: a no ends it here.
+          if (spec.startsWith('app:')) await bringForward(t, ctx);
           const live = steps.slice(0, upTo).some((s) => s.id != null) ? await liveControls(spec) : null;
           const mapped = [];
           for (const [i, s] of steps.entries()) {

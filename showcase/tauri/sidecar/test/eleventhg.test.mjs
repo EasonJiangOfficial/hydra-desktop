@@ -8,6 +8,8 @@ import path from 'node:path';
 import { ClaudeCodeAgent } from '../claudecode.mjs';
 import { agentEvents } from '../agentstream.mjs';
 import { BLOCK, checkWindow } from '../safety.mjs';
+import { fakeHands } from './fakehands.mjs';
+import { z } from 'zod';
 
 const HOME = fs.realpathSync.native(os.homedir());
 assert.ok(HOME.includes('roamies-test-') || HOME.startsWith(fs.realpathSync.native(os.tmpdir())), 'runs only with a temp home');
@@ -19,9 +21,10 @@ for (const title of ['.env - Notepad', '*id_rsa - Notepad', 'id_rsa — Edited',
 for (const w of [{ app: 'Notepad', title: 'notes.txt - Notepad' }, { app: 'TextEdit', title: 'my-env - draft' }, { app: 'Google Chrome', title: 'Token', url: 'https://example.com/' }])
   assert.notEqual(checkWindow(w, HOME).level, BLOCK, w.title);
 
-// ---- The tools against a fake helper modeled on hands/main.swift (and, with win: true, hands-win): 'windows' sends each
-// window's file but no address (win: neither, plus exe), 'locate' and 'ui' its file and address (win: neither),
-// find-text 'screen' every window, 'front' the front app's, 'app:X' every match; each match's window bare.
+// ---- The tools against the shared fake helper (fakehands.mjs), modeled on hands/main.swift (and, with win: true,
+// hands-win): 'windows' sends each window's file but no address (win: neither, plus exe), 'locate' and 'ui' its file and
+// address (win: neither), find-text 'screen' every window, 'front' the front app's, 'app:X' every match; each match's
+// window bare.
 if (['darwin', 'win32'].includes(process.platform)) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-11g-'));
   const bin = path.join(dir, 'bin'), launched = path.join(dir, 'launched.log');
@@ -30,38 +33,15 @@ if (['darwin', 'win32'].includes(process.platform)) {
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   const doc = path.join(HOME, 'Documents', 'n.txt'), env = path.join(HOME, 'Documents', 'shop', '.env');
   for (const f of [doc, env]) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'x'); }
-  const log = path.join(dir, 'calls.jsonl'), fake = path.join(dir, 'hands.mjs'), state = path.join(dir, 'state.json');
-  fs.writeFileSync(fake, `import fs from 'node:fs'; const a = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(a) + '\\n');
-const st = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, 'utf8'));
-const W = st.wins, win = !!st.win;
-const info = (w) => ({ id: w.id, app: w.app, title: w.title, bounds: [0, 0, 800, 600] });
-const shows = (w, url = true) => (win ? info(w) : { ...info(w), ...(w.doc ? { document: w.doc } : {}), ...(url && w.url ? { url: w.url } : {}) });
-const match = (app, want) => { const x = app.toLowerCase(), y = want.toLowerCase(); return x === y || x.includes(y) || y.includes(x); };
-const resolve = (t) => t === 'front' ? W.find((w) => w.pid === st.frontPid) ?? W[0] : t.startsWith('window:') ? W.find((w) => w.id === +t.slice(7)) : t.startsWith('app:') ? W.find((w) => match(w.app, t.slice(4))) : null;
-const done = (o) => { console.log(JSON.stringify(o)); process.exit(0); };
-if (a[0] === 'windows') done({ ok: true, windows: W.map((w) => ({ ...shows(w, false), ...(win ? { exe: w.exe ?? w.app } : {}) })) });
-if (a[0] === 'locate') { const w = resolve(a[1]); done(w ? { ok: true, window: shows(w) } : { ok: false, error: 'No matching window is open.' }); }
-if (a[0] === 'front') { const w = resolve('front'); done(w ? { ok: true, app: w.app, title: w.title } : { ok: true }); }
-if (a[0] === 'find-text') {
-  const t = a[1], f = resolve('front');
-  const ws = t === 'screen' ? W : t === 'front' ? W.filter((w) => w.pid === f?.pid) : t.startsWith('app:') ? W.filter((w) => match(w.app, t.slice(4))) : [resolve(t)].filter(Boolean);
-  done({ ok: true, matches: ws.filter((w) => w.text.includes(a[2])).map((w) => ({ text: w.text, role: 'AXStaticText', bounds: [10, 10, 50, 10], window: info(w) })) });
-}
-if (a[0] === 'ocr-find') done({ ok: true, matches: [] });
-if (a[0] === 'refine') done({ ok: true, boxes: [null] });
-if (a[0] === 'act') done(st.act);
-done({ ok: true });
-`);
-  process.env.ROAMIES_HANDS = fake;
+  const fake = fakeHands(dir);
   const { createTools } = await import('../tools.mjs');
   const asks = [], opened = [];
   let remote = true, onDraw = null;
   const t = createTools({ remote: () => remote, allowActions: () => true, ui: (msg) => { if (msg?.e?.type === 'draw') { setTimeout(() => t.ink.started(msg.e.id, msg.e.seg), 5); onDraw?.(msg.e); } }, ask: async (o) => { asks.push(o.placeholder); return 'Allow'; }, openUrl: async (u) => { opened.push(u); }, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME, skills: { changed: () => {} } });
   const T = (n) => t.tools.find((x) => x.name === n);
-  const calls = () => fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  const set = (st) => fs.writeFileSync(state, JSON.stringify(st));
-  const reset = (st, relay) => { fs.writeFileSync(log, ''); asks.length = 0; opened.length = 0; onDraw = null; remote = relay; set(st); t.nextTurn(); };
+  const calls = () => fake.calls();
+  const set = (st) => fake.set(st);
+  const reset = (st, relay) => { fake.clear(); asks.length = 0; opened.length = 0; onDraw = null; remote = relay; set(st); t.nextTurn(); };
   const said = (p) => p.then((x) => String(x), (e) => String(e?.message ?? e));
   const ring = (target, text) => said(T('draw').execute({ target, beats: [{ say: 'Here.', marks: [{ kind: 'ring', at: { text } }] }] }, { toolCallId: `g${Math.random()}` }));
   const KEY = 'OPENAI_API_KEY=sk-live-abc123';
@@ -106,7 +86,7 @@ done({ ok: true });
   for (const relay of [false, true]) {
     reset({ win: true, frontPid: 70, wins: [{ id: 21, pid: 70, app: 'Notepad', exe: 'notepad.exe', title: '.env - Notepad', text: KEY }] }, relay);
     const g3 = await ring('Notepad', 'OPENAI_API_KEY');
-    assert.ok(!g3.includes('sk-live') && g3.includes('Blocked for safety: Notepad shows .env'), g3);
+    assert.ok(!g3.includes('sk-live') && !g3.includes('.env') && g3.includes("Blocked for safety: Notepad's window title names a file"), g3);
     assert.deepEqual(asks, []);
     assert.ok(!calls().some((c) => c[0] === 'find-text'), 'nothing is read off a key file\'s window');
   }
@@ -140,7 +120,7 @@ done({ ok: true });
 // ---- G5: stamped as sdk.d.ts says a typed turn is (only its first frame of each kind names the uuids; folded messages
 // appear on the result alone). An addition folded in between tool rounds and answered by the final answer is not named
 // when the run then crashes, gets a zeroed error result or just ends; one sent after the round's tool results came
-// back (it waits for its own turn) still is.
+// back (it waits for its own turn) still is. The tool runs through the bridge (R11h-1): only there is the order provable.
 const ev = (event, stamp) => ({ type: 'stream_event', parent_tool_use_id: null, event, ...(stamp ? { user_message_uuid: stamp.at(-1), user_message_uuids: stamp } : {}) });
 const step = (text, stop, stamp) => [ev({ type: 'message_start', message: { usage: {} } }, stamp), ev({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }), ev({ type: 'message_delta', delta: { stop_reason: stop }, usage: {} }), ev({ type: 'message_stop' })];
 const toolResult = { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } };
@@ -152,8 +132,17 @@ const firstStamps = async function* (src) {
     yield m;
   }
 };
-const fakeQuery = (gen) => ({ prompt }) => { const it = prompt[Symbol.asyncIterator](); return Object.assign(firstStamps(gen(it)), { interrupt: async () => {}, close: () => {} }); };
-const agentWith = (query) => new ClaudeCodeAgent({ model: 'm', system: 's', tools: [], executable: '/bin/claude', cwd: '/', env: {}, query, onRateLimit: () => {} });
+// The bridge as Claude Code drives it: call(id) runs our tool and waits for its result to be handed back.
+const fakeQuery = (gen) => ({ prompt, options }) => {
+  const it = prompt[Symbol.asyncIterator](), waiting = new Map();
+  const transport = { async send(msg) { waiting.get(msg.id)?.(msg); } };
+  const ready = options.mcpServers.gg.instance.connect(transport);
+  let n = 0;
+  const call = async (id) => { await ready; return new Promise((r) => { const k = ++n; waiting.set(k, r); transport.onmessage({ jsonrpc: '2.0', id: k, method: 'tools/call', params: { name: 'look', arguments: {}, _meta: { 'claudecode/toolUseId': id } } }); }); };
+  return Object.assign(firstStamps(gen(it, call)), { interrupt: async () => {}, close: () => {} });
+};
+const look = { name: 'look', description: 'Look.', parameters: z.object({}), execute: async () => 'ok' };
+const agentWith = (query) => new ClaudeCodeAgent({ model: 'm', system: 's', tools: [look], executable: '/bin/claude', cwd: '/', env: {}, query, onRateLimit: () => {} });
 // The owner speaks after what came before has reached the loop (the fake would otherwise run ahead of it).
 const later = () => new Promise((r) => setTimeout(r, 20));
 const runIt = async (agent, text = 'clean up my desktop') => { try { for await (const e of agentEvents(agent.prompt(text))) void e; return 'ended'; } catch (e) { return e.message; } };
@@ -161,14 +150,14 @@ const ends = { crash: () => { throw new Error('Claude Code process exited with c
 for (const [end, tail] of Object.entries(ends)) {
   for (const late of [false, true]) {
     let agent;
-    agent = agentWith(fakeQuery(async function* (it) {
+    agent = agentWith(fakeQuery(async function* (it, call) {
       const first = (await it.next()).value;
       yield* step('Looking at the desktop.', 'tool_use', [first.uuid]);
-      if (late) yield toolResult;
+      if (late) { await call('t1'); yield toolResult; }
       await later();
       assert.equal(agent.addInput('and delete the old draft too'), true);
       await it.next();
-      if (!late) yield toolResult;
+      if (!late) { await call('t1'); yield toolResult; }
       yield* step('Done: desktop tidied and the old draft deleted.', 'end_turn', [first.uuid]);
       yield* tail();
     }));
@@ -179,7 +168,7 @@ for (const [end, tail] of Object.entries(ends)) {
 // The same in a run's second turn (after a result that named its uuids): only this turn's folds count.
 {
   let agent;
-  agent = agentWith(fakeQuery(async function* (it) {
+  agent = agentWith(fakeQuery(async function* (it, call) {
     const first = (await it.next()).value;
     agent.addInput('and Friday?');
     yield* step('Thursday: dentist.', 'end_turn', [first.uuid]);
@@ -189,6 +178,7 @@ for (const [end, tail] of Object.entries(ends)) {
     await later();
     agent.addInput('and delete the old draft too');
     await it.next();
+    await call('t1');
     yield toolResult;
     yield* step('Friday: free. Old draft deleted.', 'end_turn', [a.uuid]);
     throw new Error('Claude Code process exited with code 1');

@@ -7,13 +7,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { ClaudeCodeAgent } from '../claudecode.mjs';
 import { agentEvents } from '../agentstream.mjs';
+import { fakeHands } from './fakehands.mjs';
 
 const HOME = fs.realpathSync.native(os.homedir());
 assert.ok(HOME.includes('roamies-test-') || HOME.startsWith(fs.realpathSync.native(os.tmpdir())), 'runs only with a temp home');
 
-// ---- The tools against a fake helper that sends what the real ones send (hands/main.swift): 'windows' each window's
-// file (no address), 'locate' and 'ui' its file and address, find-text each match's window without either. On Windows
-// as hands-win does: no file or address anywhere (win_info), so a key file is known by its window's title (R11g-3).
+// ---- The tools against the shared fake helper (fakehands.mjs), which sends what hands/main.swift sends: 'windows' each
+// window's file (no address), 'locate' and 'ui' its file and address, find-text each match's window without either.
 if (['darwin', 'win32'].includes(process.platform)) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-11f-'));
   const bin = path.join(dir, 'bin'), launched = path.join(dir, 'launched.log');
@@ -22,34 +22,15 @@ if (['darwin', 'win32'].includes(process.platform)) {
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   const doc = path.join(HOME, 'Documents', 'n.txt'), env = path.join(HOME, 'Documents', 'shop', '.env'), key = path.join(HOME, '.ssh', 'id_rsa');
   for (const f of [doc, env, key]) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'x'); }
-  const log = path.join(dir, 'calls.jsonl'), fake = path.join(dir, 'hands.mjs'), state = path.join(dir, 'state.json');
-  fs.writeFileSync(fake, `import fs from 'node:fs'; const a = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(a) + '\\n');
-const st = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, 'utf8'));
-const W = st.wins;
-const info = (w) => ({ id: w.id, app: w.app, title: w.title, bounds: [0, 0, 800, 600] });
-const shows = (w, url = true) => (process.platform === 'win32' ? info(w) : { ...info(w), ...(w.doc ? { document: w.doc } : {}), ...(url && w.url ? { url: w.url } : {}) });
-const sel = (t) => t === 'front' ? [W[0]] : t.startsWith('app:') ? W.filter((w) => w.app.toLowerCase().includes(t.slice(4).toLowerCase())) : t.startsWith('window:') ? W.filter((w) => w.id === +t.slice(7)) : [];
-let o = { ok: true };
-if (a[0] === 'windows') o = { ok: true, windows: W.map((w) => shows(w, false)) };
-if (a[0] === 'locate') { const w = sel(a[1])[0]; o = w ? { ok: true, window: shows(w) } : { ok: false, error: 'No matching window is open' + (a[1].startsWith('app:') ? ' for ' + a[1].slice(4) : '') + '.' }; }
-if (a[0] === 'front') o = W[0] ? { ok: true, app: W[0].app, title: W[0].title } : { ok: true };
-if (a[0] === 'ui') { const w = sel(a[1])[0]; o = { ok: true, window: shows(w), controls: [], texts: [w.text], elsewhere: [], note: '' }; }
-if (a[0] === 'find-text') o = { ok: true, matches: sel(a[1]).filter((w) => w.text.includes(a[2])).map((w) => ({ text: w.text, role: 'AXStaticText', bounds: [10, 10, 50, 10], window: info(w) })) };
-if (a[0] === 'ocr-find') o = { ok: true, matches: [] };
-if (a[0] === 'capture') { const w = sel(a[2])[0]; fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1], window: shows(w), pixels: [800, 600] }; }
-if (a[0] === 'refine') o = { ok: true, boxes: [null] };
-if (a[0] === 'act') o = st.act;
-console.log(JSON.stringify(o));
-`);
-  process.env.ROAMIES_HANDS = fake;
+  // The shared fake (fakehands.mjs): windows without a pid are all the front app's, the first one in front.
+  const fake = fakeHands(dir);
   const { createTools } = await import('../tools.mjs');
   const asks = [];
   let remote = true, answer = () => 'Allow';
   const t = createTools({ remote: () => remote, allowActions: () => true, ui: (msg) => { if (msg?.e?.type === 'draw') setTimeout(() => t.ink.started(msg.e.id, msg.e.seg), 5); }, ask: async (o) => { asks.push(o.placeholder); return answer(o.placeholder); }, openUrl: async () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME, skills: { changed: () => {} } });
   const T = (n) => t.tools.find((x) => x.name === n);
-  const calls = () => fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  const reset = (st, { relay = true } = {}) => { fs.writeFileSync(log, ''); asks.length = 0; answer = () => 'Allow'; remote = relay; fs.writeFileSync(state, JSON.stringify(st)); t.nextTurn(); };
+  const calls = () => fake.calls();
+  const reset = (st, { relay = true } = {}) => { fake.clear(); asks.length = 0; answer = () => 'Allow'; remote = relay; fake.set(st); t.nextTurn(); };
   const said = (p) => p.then((x) => String(x), (e) => String(e?.message ?? e));
   const ring = (target, text) => said(T('draw').execute({ target, beats: [{ say: 'Here.', marks: [{ kind: 'ring', at: { text } }] }] }, { toolCallId: `f${Math.random()}` }));
   const preview = { id: 3, app: 'Preview', title: 'n.txt', doc, text: 'Hello' };

@@ -2011,7 +2011,10 @@ case "windows":
     // Each window's file too (R11f-3): a key file open in an editor is blocked, not asked about as a window with no file.
     // No browser addresses here (a walk per browser window), so the list stays cheap: the sidecar reads each browser
     // window's own with locate before draw reads it (R11g-2), so a file:// key file there is blocked too.
-    out(["ok": true, "windows": windows().prefix(30).map { var i = winShows($0, url: false); if $0.pid == front { i["frontApp"] = true }; return i }])
+    // windows all: every one, not the first 30, and says so (R11h-3): the sidecar checks each window on the whole screen
+    // before draw reads its words or pixels, and reads none when a list may have left some out.
+    let every = args.count >= 2 && args[1] == "all", list = windows()
+    out(["ok": true, "all": every, "windows": (every ? list : Array(list.prefix(30))).map { var i = winShows($0, url: false); if $0.pid == front { i["frontApp"] = true }; return i }])
 
 // Where the user is right now, for each message's live state: the app in front (never Roamies), its focused
 // window's title, and for a browser the page's address. Accessibility for the title and address; the window list
