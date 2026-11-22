@@ -52,6 +52,11 @@ pub(crate) fn start_voice(app: &AppHandle) {
     if let Ok(dir) = app.path().resource_dir() {
         cmd.arg("--ort").arg(dir.join(if cfg!(windows) { "onnxruntime.dll" } else { "libonnxruntime.so" }));
     }
+    // Hydra's cues (voice/cue.swift): the overlay's rendered chimes, bundled as a resource (tauri.macos.conf.json).
+    #[cfg(target_os = "macos")]
+    if let Ok(dir) = app.path().resource_dir() {
+        cmd.arg("--sounds").arg(dir.join("sounds"));
+    }
     // Debug builds: ROAMIES_TEST_AUDIO=<wav> stands in for the microphone, to test talking with no mic (CI, Docker).
     #[cfg(debug_assertions)]
     if let Some(wav) = std::env::var_os("ROAMIES_TEST_AUDIO") {

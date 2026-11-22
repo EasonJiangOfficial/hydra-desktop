@@ -652,7 +652,7 @@
       if (!at('keys')) return;
       const heard = $('heard');
       if (msg.type === 'state' && msg.state === 'listening') {
-        voice.listening = true; heard.textContent = 'Listening…'; poseFn = POSE.listen(); sfx('listen');
+        voice.listening = true; heard.textContent = 'Listening…'; poseFn = POSE.listen(); // the listen chime plays in the voice helper (cue.swift)
       } else if (msg.type === 'level') voice.target = clamp(msg.v, 0, 1);
       else if (msg.type === 'partial') heard.textContent = msg.text;
       else if (msg.type === 'state' && msg.state === 'processing') { voice.listening = false; }
@@ -1137,7 +1137,7 @@
       if (chat.status !== 'asking') return;
       if (msg.type === 'state' && msg.state === 'listening') {
         chat.heard = false; chat.before = input.value; input.value = ''; input.placeholder = 'Listening…';
-        talk.classList.add('on'); poseFn = POSE.listen(); sfx('listen'); Roamie.voiceOut?.stop();
+        talk.classList.add('on'); poseFn = POSE.listen(); Roamie.voiceOut?.stop(); // the listen chime: the voice helper
       } else if (msg.type === 'level') voice.target = clamp(msg.v, 0, 1);
       else if (msg.type === 'partial') input.value = msg.text;
       else if (msg.type === 'final') {

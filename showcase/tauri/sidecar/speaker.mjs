@@ -52,9 +52,10 @@ const RECENT = 8; // a beat isn't picked again until this many others have playe
 // of the answer (not stored, not shown), not when muted or once the answer is streaming.
 export const FILLERS = ['Let me check.', 'One sec.', 'Let me see.', 'Checking that now.', 'Give me a second.', 'Let me look.', 'Hang on.', 'Just a moment.', 'Let me pull that up.'];
 // Hydra's progress lines (owner: "it's still not saying phrases like "still checking" "almost there""): one each time
-// about 8 s pass in a working turn with nothing new (voiceturn.mjs startProgress), never the same twice in a row. The web
+// about 5.5 s pass in a working turn with nothing new (voiceturn.mjs startProgress), never the same twice in a row. The web
 // keeps the same list (src/components/agent/words.ts PROGRESS; docs/BRIDGE.md, Voice) so every surface says the same.
-export const PROGRESS = ['Still checking.', 'Still on it.', 'Almost there.', 'One more moment.', 'Still working on it.', 'Nearly there.', 'Bear with me.', 'Still going.'];
+// Build 4 E4 (owner: "those phrases like "checking it now" "almost there" "looking at it now" ect every few seconds").
+export const PROGRESS = ['Checking it now.', 'Looking at it now.', 'Almost there.', 'Still on it.', 'One more second.', 'Still checking.', 'Nearly there.', 'Still working on it.'];
 /** A filler, never the one said last. */
 export function pickFiller(last, list = FILLERS, random = Math.random) {
   const pool = list.filter((f) => f !== last);

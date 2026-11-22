@@ -81,6 +81,9 @@ static BUDDY_ON: AtomicBool = AtomicBool::new(false);
 static TYPING: AtomicBool = AtomicBool::new(false);
 /// A drawing is waiting for the user to click a marked control: the cursor loop watches the left button meanwhile.
 static INK_WAIT: AtomicBool = AtomicBool::new(false);
+/// The orb is being dragged out of the Hydra window (bridge detach with dragging, docs/BRIDGE.md): the cursor loop
+/// watches the left button and drops it where it is let go.
+static ORB_DRAG: AtomicBool = AtomicBool::new(false);
 /// The type-to-ask pair as tap.rs bits (0: none, as on Wayland): a quick tap of it opens the text field by the cursor.
 static WRITE_CHORD: AtomicU8 = AtomicU8::new(0);
 /// The cursor is over something clickable in an overlay (a card, its buttons): a click there is on Roamies, not the app below.
@@ -1578,6 +1581,21 @@ fn pump_cursor(app: AppHandle) {
         } else {
             was_down = false;
         }
+        // The orb dragged out of the Hydra window: let go, it drops there; let go over the Hydra window, it goes back in.
+        if ORB_DRAG.load(Ordering::Relaxed) && !left_button_down() {
+            ORB_DRAG.store(false, Ordering::Relaxed);
+            for (label, w) in app.webview_windows() {
+                if is_overlay(&label) {
+                    let _ = w.eval("window.__roamieOrbDrop&&__roamieOrbDrop()");
+                }
+            }
+            if let Ok(raw) = app.cursor_position() {
+                let cur = cursor_from_raw(raw.x, raw.y, primary_scale);
+                if over_main_window(&app, cur) {
+                    to_sidecar(&app, &json!({ "type": "orb_set", "detached": false, "from": "drop" }));
+                }
+            }
+        }
         // The voice helper draws the following sidekick itself: the page only needs the cursor for its own bookkeeping.
         // Except while typing: the field beside the cursor follows every sample.
         if BUDDY_ON.load(Ordering::Relaxed) && !TYPING.load(Ordering::Relaxed) && n % 4 != 1 {
@@ -1622,6 +1640,19 @@ fn pump_cursor(app: AppHandle) {
         }
     });
 }
+
+/// Whether a point (cursor_global's units) is on the Hydra window while it shows (an orb dropped there re-attaches).
+fn over_main_window(app: &AppHandle, (x, y): (f64, f64)) -> bool {
+    let Some(w) = app.get_webview_window(hydra::MAIN_LABEL) else { return false };
+    if !w.is_visible().unwrap_or(false) || w.is_minimized().unwrap_or(false) { return false; }
+    let (Ok(pos), Ok(size), Ok(scale)) = (w.outer_position(), w.outer_size(), w.scale_factor()) else { return false };
+    #[cfg(target_os = "macos")]
+    let (p, s) = { let (p, s) = (pos.to_logical::<f64>(scale), size.to_logical::<f64>(scale)); ((p.x, p.y), (s.width, s.height)) };
+    #[cfg(not(target_os = "macos"))]
+    let (p, s) = { let _ = scale; ((pos.x as f64, pos.y as f64), (size.width as f64, size.height as f64)) };
+    inside((x, y), p, s)
+}
+fn inside((x, y): (f64, f64), (px, py): (f64, f64), (w, h): (f64, f64)) -> bool { x >= px && y >= py && x <= px + w && y <= py + h }
 
 // ---------- tray menu, described by the sidecar as JSON ----------
 
@@ -1904,7 +1935,17 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         }
         // Listen right away, hands-free (after an area snap: snap, then just talk).
         // wait: seconds the mic waits for words (auto-listen's setting, #44).
-        Some("listen") => to_voice(app, &json!({ "cmd": "listen", "wait": msg.get("wait").cloned().unwrap_or(Value::Null) })),
+        // via: what opened it ('orb' chimes, 'wake' opens silently after the wake chime; voice/cue.swift).
+        Some("listen") => to_voice(app, &json!({ "cmd": "listen", "wait": msg.get("wait").cloned().unwrap_or(Value::Null), "via": msg.get("via").cloned().unwrap_or(Value::Null) })),
+        // Hydra's cues, played by the voice helper so mute-while-listening never silences them: the wake chime, and the
+        // soft loop while a spoken turn works.
+        Some("cue") => to_voice(app, &json!({ "cmd": "cue", "name": msg.get("name").and_then(Value::as_str).unwrap_or("") })),
+        Some("pending") => to_voice(app, &json!({ "cmd": "pending", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
+        // The orb dragged out of the Hydra window: it rides the cursor (on the cursor's screen) until the button is up.
+        Some("orb_drag") => {
+            follow_cursor(app);
+            ORB_DRAG.store(true, Ordering::Relaxed);
+        }
         // Linux: the sidecar's screenshot and copy go through the shell (GTK, X11 and the desktop portal).
         #[cfg(target_os = "linux")]
         Some("screenshot") => {
@@ -2141,6 +2182,13 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_orb_dropped_on_the_hydra_window_goes_back_in() {
+        let win = ((100.0, 50.0), (1440.0, 900.0));
+        assert!(inside((100.0, 50.0), win.0, win.1) && inside((900.0, 400.0), win.0, win.1) && inside((1540.0, 950.0), win.0, win.1));
+        assert!(!inside((99.0, 400.0), win.0, win.1) && !inside((900.0, 951.0), win.0, win.1), "outside the window it stays detached");
+    }
 
     #[test]
     fn a_second_launch_says_what_it_wants_with_one_flag() {

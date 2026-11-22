@@ -783,7 +783,7 @@ final class Voice {
     private func startTake(via: String) {
         hub.remove("barge")
         emit(["type": "trigger", "via": via])
-        listenNow()
+        listenNow(via: via)
     }
     var wakeHold = false {
         didSet { if wakeOn && wakeHold != oldValue { wakeLog(wakeHold ? "paused while Hydra answers" : "resumed") } }
@@ -1065,6 +1065,8 @@ final class Voice {
     private var takeBands = false {
         didSet { if oldValue && !takeBands { emit(["type": "bands", "b": [Double](repeating: 0, count: Spectrum.count)]) } }
     }
+    /// The take a wake opens (via 'wake'): if it hears nothing, Hydra just stays awake, with no "I didn't hear anything".
+    private var quietEmpty = false
     private func showListening(_ mode: String, _ now: Double, via: String) {
         listenAt = now; heardAt = now; voiceAt = now
         takeBands = true
@@ -1075,6 +1077,10 @@ final class Voice {
             }
         }
         if !dryRun { OutputMute.begin() }
+        quietEmpty = via == "wake"
+        // The listen chime (cue.swift) only for the owner's own triggers; never the pending loop while he talks.
+        Cue.pending(false)
+        if !dryRun { if Cue.audible(via: via) { Cue.play("listen") } else { Cue.keepAudible() } }
         // The pill beside the cursor only for the talk keys; otherwise the orb shows the listening.
         let cursor = Self.cursorShows(via: via) && !wave.off
         if cursor { wave.show() } else { wave.hide() }
@@ -1086,7 +1092,7 @@ final class Voice {
     private func finish() {
         guard phase == .armed || phase == .holding || phase == .handsFree else { return }
         let shown = phase != .armed
-        reportEmpty = shown && !failed
+        reportEmpty = shown && !failed && !quietEmpty
         phase = .finishing
         finishedAt = uptime(); endedVia = "recognizer"
         wave.think()
@@ -1158,14 +1164,15 @@ final class Voice {
 
     /// The shell saw ⌃⌥S: that ⌃⌥ was a shortcut, not a request to talk.
     /// Start listening hands-free without a key press (after an area snap). Ends on a pause or a tap.
-    func listenNow(wait: Double? = nil) {
+    /// via: what opened it (the cue plays for an orb tap, not for auto-listen or the take after a wake).
+    func listenNow(wait: Double? = nil, via: String = "listen") {
         if phase == .wake { stopWake() }
         guard phase == .idle else { return }
         arm(uptime())
         nothingWait = min(15, max(3, wait ?? 8))
         phase = .handsFree
         blocked = true // the snap shortcut's keys may still be held: don't read them as a tap
-        showListening("handsfree", uptime(), via: "listen")
+        showListening("handsfree", uptime(), via: via)
     }
 
     func externalCancel() {
@@ -1483,6 +1490,8 @@ if let i = args.firstIndex(of: "--bench-claps") {
 if args.contains("--test-bands") { exit(OutTest.bands()) }
 // --test-ducking: voice processing never turns other audio down, and mute-while-listening never mutes Hydra.
 if args.contains("--test-ducking") { exit(OutTest.ducking()) }
+// --test-cue [<sounds dir>]: which takes chime, the pending loop's ducking and the sound switch (cue.swift).
+if let i = args.firstIndex(of: "--test-cue") { exit(CueTest.run(dir: i + 1 < args.count ? args[i + 1] : nil)) }
 // --test-triggers checks what a clap, the key phrase and talking over Hydra do, awake and asleep, and the talk detector.
 if args.contains("--test-triggers") { exit(TriggerTest.run()) }
 // --test-wake checks the wake phrase matcher on transcripts the recogniser could write; exits 1 on a failure.
@@ -1807,6 +1816,9 @@ if let i = args.firstIndex(of: "--request"), i + 1 < args.count {
 var signalSources: [DispatchSourceSignal] = []
 let voice = Voice()
 OutputMute.hydraPlaying = { voice.out.busy }
+Cue.volume = { voice.out.volume }
+Cue.speaking = { voice.out.busy }
+if let i = args.firstIndex(of: "--sounds"), i + 1 < args.count { Cue.dir = URL(fileURLWithPath: args[i + 1], isDirectory: true) }
 voice.out.onBands = { emit(["type": "bands", "b": $0.map { ($0 * 1000).rounded() / 1000 }]) }
 voice.out.onFail = { emit(["type": "play_failed", "why": $0]) }
 if args.contains("--no-mute") { OutputMute.enabled = false }
@@ -1822,7 +1834,12 @@ Thread.detachNewThread {
         guard let data = line.data(using: .utf8), let msg = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
         switch msg["cmd"] as? String {
         case "cancel": DispatchQueue.main.async { voice.externalCancel() }
-        case "listen": let wait = msg["wait"] as? Double; DispatchQueue.main.async { voice.listenNow(wait: wait) }
+        case "listen":
+            let wait = msg["wait"] as? Double, via = (msg["via"] as? String).flatMap { ["orb", "wake"].contains($0) ? $0 : nil } ?? "listen"
+            DispatchQueue.main.async { voice.listenNow(wait: wait, via: via) }
+        // Hydra's cues (cue.swift): the wake chime, and the soft loop while it works.
+        case "cue": if let n = msg["name"] as? String, ["wake", "listen"].contains(n) { DispatchQueue.main.async { Cue.play(n) } }
+        case "pending": if let on = msg["on"] as? Bool { DispatchQueue.main.async { Cue.pending(on) } }
         // The sidekick is answering (it appears where the cursor is): the listening pill can go.
         case "handoff": DispatchQueue.main.async { voice.wave.handoff() }
         // The sidekick following the cursor in its cursor form, drawn here (buddy.swift) until the page takes it back.
@@ -1830,7 +1847,7 @@ Thread.detachNewThread {
         case "buddy_alpha": if let a = msg["a"] as? Double { DispatchQueue.main.async { voice.buddy.setHidden(a < 0.5) } }
         case "chord": if let mods = msg["mods"] as? [String] { DispatchQueue.main.async { voice.setChord(mods) } }
         case "watch_clicks": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.watchClicks = on }
-        case "sound": if let on = msg["on"] as? Bool { DispatchQueue.main.async { SnapCue.soundOn = on } }
+        case "sound": if let on = msg["on"] as? Bool { DispatchQueue.main.async { SnapCue.soundOn = on; Cue.soundOn = on; if !on { Cue.pending(false) } } }
         // The listening pill beside the cursor: off while the notch capsule shows it instead.
         case "pill": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.wave.off = !on; if !on { voice.wave.hide() } } }
         case "wake": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.setWake(on) } }

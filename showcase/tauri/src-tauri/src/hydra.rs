@@ -120,7 +120,16 @@ pub fn bridge_action(url: &Url, token: &str, on_hydra: bool) -> Option<BridgeAct
         "settings" => Some(BridgeAct::Sidecar(json!({ "type": "hydra_settings_changed" }))),
         "wake" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": true, "from": "web" }))),
         "sleep" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": false, "from": "web" }))),
-        "detach" => Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": true, "from": "web" }))),
+        // Build 4 E4: an awake orb tap opens a take (asleep it wakes Hydra, mid-take it ends the take).
+        "listen" => Some(BridgeAct::Sidecar(json!({ "type": "orb_listen", "from": "web" }))),
+        // Dragged out of the window (drag=1 with the pointer's screen point x, y in points): the desktop orb comes out under
+        // the cursor and rides it until the button is let go. Without a usable point it is a plain detach.
+        "detach" => {
+            let at = |k: &str| param(k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && v.abs() <= 100_000.0);
+            let mut m = json!({ "type": "orb_set", "detached": true, "from": "web" });
+            if let (Some("1"), Some(x), Some(y)) = (param("drag").as_deref(), at("x"), at("y")) { m["drag"] = json!({ "x": x, "y": y }); }
+            Some(BridgeAct::Sidecar(m))
+        }
         "attach" => Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": false, "from": "web" }))),
         // A link the owner clicked in Hydra that leaves Hydra: the default browser opens it (never in the window).
         "open" => {
@@ -176,7 +185,8 @@ const BRIDGE_JS: &str = r#"(() => {
     subscribe(fn) { subs.add(fn); try { fn({ ...snap }); } catch {} return () => subs.delete(fn); },
     wake: () => call('wake'),
     sleep: () => call('sleep'),
-    detach: () => call('detach'),
+    detach: (o) => call('detach', o && o.dragging && Number.isFinite(+o.x) && Number.isFinite(+o.y) ? '&drag=1&x=' + Math.round(+o.x) + '&y=' + Math.round(+o.y) : ''),
+    listen: () => call('listen'),
     attach: () => call('attach'),
     stop: () => call('stop'),
     pause: () => call('pause'),
@@ -318,6 +328,12 @@ pub fn clean_push(msg: &Value) -> Option<Value> {
         let v: Option<Vec<f64>> = b.iter().map(|x| x.as_f64().map(|f| (f.clamp(0.0, 1.0) * 1000.0).round() / 1000.0)).collect();
         if let Some(v) = v { out.insert("bands".into(), json!(v)); }
     }
+    // Build 4 E4: Hydra woke to a double clap or the key phrase (the web orb plays its wake burst once per `at`).
+    if let Some(w) = msg.get("woke") {
+        if let (Some(at), Some(from)) = (w.get("at").and_then(Value::as_u64), w.get("from").and_then(Value::as_str).filter(|f| ["clap", "phrase"].contains(f))) {
+            out.insert("woke".into(), json!({ "at": at, "from": from }));
+        }
+    }
     for k in ["detached", "muted", "paused"] {
         if let Some(d) = msg.get(k).and_then(Value::as_bool) { out.insert(k.into(), json!(d)); }
     }
@@ -436,7 +452,16 @@ mod tests {
         let js = bridge_js(t);
         assert!(js.contains(&format!("const T = '{t}'")) && !js.contains("__HYDRA_TOKEN__"));
         assert!(js.contains("!e.isTrusted"), "only real clicks open links");
-        assert!(js.contains("window.top !== window") && js.contains("version: 3") && js.contains("detach: () => call('detach')") && js.contains("get detached()"));
+        assert!(js.contains("window.top !== window") && js.contains("version: 3") && js.contains("detach: (o) => call('detach'") && js.contains("get detached()"));
+        // Build 4 E4: listen, and detach dragged out with the pointer's screen point.
+        assert!(js.contains("listen: () => call('listen')") && js.contains("'&drag=1&x='"));
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://listen?t={t}")), t, true), Some(BridgeAct::Sidecar(json!({ "type": "orb_listen", "from": "web" }))));
+        assert_eq!(bridge_action(&u("hydra-desktop://listen?t=guess"), t, true), None, "listen needs the secret");
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://detach?t={t}&drag=1&x=812&y=-40.5")), t, true),
+            Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": true, "from": "web", "drag": { "x": 812.0, "y": -40.5 } }))));
+        for q in ["drag=1&x=NaN&y=3", "drag=1&x=1", "drag=0&x=1&y=2", "x=1&y=2", "drag=1&x=1e9&y=2", "drag=1&x=inf&y=2"] {
+            assert_eq!(bridge_action(&u(&format!("hydra-desktop://detach?t={t}&{q}")), t, true), Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": true, "from": "web" }))), "{q}: a plain detach");
+        }
         assert_eq!(bridge_token().len(), 32);
         assert_eq!(bridge_token(), bridge_token(), "one secret per launch");
     }
@@ -529,6 +554,12 @@ mod tests {
         assert_eq!(p(json!({ "bands": vec![2.0; 24] })).unwrap()["bands"][0], json!(1.0), "clamped to 1");
         assert_eq!(p(json!({ "bands": vec![0.5; 23] })), None, "only 24 bands");
         assert_eq!(p(json!({ "bands": vec!["x"; 24] })), None);
+        // Build 4 E4: the wake burst, for a clap or the key phrase only.
+        assert_eq!(p(json!({ "woke": { "at": 1763830000000u64, "from": "clap", "x": 1 } })), Some(json!({ "woke": { "at": 1763830000000u64, "from": "clap" } })));
+        assert_eq!(p(json!({ "woke": { "at": 5, "from": "phrase" } })), Some(json!({ "woke": { "at": 5, "from": "phrase" } })));
+        assert_eq!(p(json!({ "woke": { "at": 5, "from": "web" } })), None, "only a clap or the phrase");
+        assert_eq!(p(json!({ "woke": { "at": 1.5, "from": "clap" } })), None, "at is whole ms");
+        assert_eq!(p(json!({ "woke": { "at": "5", "from": "clap" } })), None);
     }
 
     #[test]

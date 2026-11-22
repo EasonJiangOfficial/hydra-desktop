@@ -6,8 +6,8 @@ import { spokenText } from './sysvoice.mjs';
 import { PROGRESS, pickFiller } from './speaker.mjs';
 
 export const FILLER_MS = 1100;
-// A progress line after this long with nothing new (no model text, no audio still playing).
-export const PROGRESS_MS = 8000;
+// A progress line after this long with nothing new (no model text, no audio still playing): every 5 to 6 s (E4).
+export const PROGRESS_MS = 5500;
 // ponytail: a fixed speaking rate (characters a second) turns played time into heard text; per-sentence play reports
 // from the voice helper would be exact.
 export const CHARS_PER_SEC = 14;
@@ -91,6 +91,20 @@ export function startProgress({ voice, live, muted = () => false, waiting = () =
     stop,
   };
 }
+
+/** What a wake does (build 4 E4; owner: "when I wake hydra up from sleep it should go into listenting for my commands").
+ *  Every wake opens a take at once and says no greeting (it delayed the take, and the mic heard it): the wake chime
+ *  and a silent take (via 'wake') for a clap, the orb, the web, the panel or the tray. A phrase wake's take is already
+ *  open in the voice helper, with its own listen chime; a talk wake is a take. The orb's wake burst (overlay and web)
+ *  is for a double clap or the key phrase. */
+export function wakeActions(why) {
+  const own = why === 'phrase' || why === 'talk';
+  return { cue: !own, listen: !own, woke: why === 'clap' || why === 'phrase' };
+}
+
+/** The soft pending sound (the voice helper's loop) and the orb's pending look (E4): a spoken turn at work, from its
+ *  start until its answer is said (a tool after it starts again), never while the owner talks or a yes/no waits. */
+export const pendingWanted = ({ voice, busy, answerSaid, listening, asking }) => !!voice && !!busy && !answerSaid && !listening && !asking;
 
 /** Whether a take that starts while Hydra works adds on (owner: "speech added while Hydra thinks is added onto the
  *  prompt, never cancelled"): every take, whatever opened it (the phrase, a clap, the talk keys, barge-in). */

@@ -24,6 +24,10 @@ interface HydraDesktopState {
   ui: (UiAction & { at: number }) | null;                       // version 3: the Mac agent moves the window (check isSafePath)
   bands?: number[];    // version 3, added (W5): 24 values 0..1, Hydra's voice while it speaks, the mic while a take
                        // listens, at most 30 a second; all 0 when it stops. Absent from an older app.
+  woke?: { at: number; from: 'clap' | 'phrase' }; // build 4, added: Hydra just woke to a double clap or the key phrase
+                       // (at: Date.now() on the Mac). The snapshot keeps the last one, so play the wake burst once per
+                       // new `at` (and skip one older than ~10 s on the first snapshot). Never sent for a web, orb or
+                       // panel wake. Absent from an older app.
 }
 interface HydraDesktop {
   version: 3;
@@ -33,7 +37,12 @@ interface HydraDesktop {
   readonly detached: boolean;
   snapshot(): HydraDesktopState;
   subscribe(fn: (s: HydraDesktopState) => void): () => void; // called at once, then on every change
-  wake(): void; sleep(): void; detach(): void; attach(): void;
+  wake(): void; sleep(): void; attach(): void;
+  detach(drag?: { x: number; y: number; dragging: true }): void; // build 4, added: drag (the pointer's screen point, in
+                       // points, from a press-and-drag on the web orb past ~6 px) brings the desktop orb out under the
+                       // cursor; it rides the cursor until the button is let go. An older app ignores drag (plain detach).
+  listen?(): void;     // build 4, added: an orb tap. Asleep it wakes Hydra (which listens at once); during a take it ends
+                       // the take; otherwise it opens one, with the listen chime. Absent from an older app (keep sleep()).
   stop(): void; pause(): void; resume(): void; setMuted(muted: boolean): void; // version 3: the card's buttons
   setup(): Promise<{ paired: boolean; claude: 'signed_in' | 'signed_out'; permissions: { mic: Perm; accessibility: Perm; screen: Perm }; version: string }>;
   pair(code: string): Promise<{ ok: true } | { ok: false; error: string }>; // the one-time code from POST /api/agent/devices/pair
@@ -59,6 +68,11 @@ The same updates also fire as a `hydradesktop` event on `window` (`event.detail`
 - **Detached**: the desktop orb, docked bottom right (48 px by default), draggable, never following the cursor.
 - Switch with `detach()` / `attach()`, the menu bar icon's menu (Detach Orb / Attach Orb), the panel's Agent page
   (Detached orb), or a right-click on the floating orb (Attach to Hydra). `detached` follows every switch.
+- Drag to detach (build 4): `detach({ x, y, dragging: true })` sends `hydra-desktop://detach?drag=1&x=<x>&y=<y>`
+  (whole points; a missing or non-finite point is a plain detach). The desktop orb appears under the cursor on the
+  cursor's screen and follows it; the shell watches the left button and, when it is let go, the orb settles there and
+  that spot is its new dock. Let go over the Hydra window (anywhere on it while it shows), it re-attaches. A click on
+  the floating orb (moved less than 6 px) still acts: asleep it wakes Hydra, awake it is `listen()`.
 
 ## How it works
 
@@ -83,14 +97,25 @@ digits and dashes (6 to 20); the device key it is traded for goes to the Keychai
   turns relayed from the web, the phone and routines (effort_routine for a routine, effort_live otherwise).
 - Wake: the phrase wakes it from sleep too, and its take goes on at once; after every spoken answer a follow-up window
   (about 8 s) listens without the phrase. The pill beside the cursor shows only for a take from the talk keys.
+- Build 4: every wake listens at once, with no spoken greeting: a double clap, an orb tap, `wake()`, the panel or the
+  menu bar plays the wake chime and opens a take within about 300 ms (it hears nothing for 8 s: Hydra stays awake and
+  idle, no error). The phrase's own take opens with the listen chime. Chimes play in the Mac's voice helper, so
+  mute-while-listening never silences them: the listen chime only for a take the owner started (clap, phrase, talk
+  keys, an orb tap), never for an auto-listen follow-up, an area snap or barge-in. Nothing else makes a sound unless
+  the owner caused it (heard, the sleep word, the end of his own tool turn, the sound switch, the pen snap).
+- Build 4: while a spoken turn works (thinking or running tools) a soft pending sound loops (2.4 s, quiet), fading in
+  after 0.6 s, ducking under the progress lines and fading out in 150 ms when the answer starts, an ask is said, the
+  owner talks or the turn ends. The desktop orb then shows its pending look (a calm band orbiting on that pulse);
+  listening it leans in and ripples with the owner's voice; talking it pushes out on Hydra's syllables. The web orb
+  gets the same `state` values as before (Listening, Thinking, Speaking, Asleep).
 - While Hydra works on a turn, every take (the phrase, a double clap, the talk keys, talking over it) adds its words to
   the running turn; its voice holds while the owner talks and goes on after, and a take that hears nothing leaves the
   turn as it was. Only Stop and sleep end a turn; while one runs, the sleep word needs its exact words. Talking over
   Hydra after the turn, while it still speaks, stops the voice at once; the next turn knows what was heard.
-- A spoken turn says an opener at about 1.1 s, then a progress line each time about 8 s pass with nothing new (never
-  the same twice in a row, never over the owner or an ask). The lines, which the web's `words.ts` keeps too:
-  `Still checking.`, `Still on it.`, `Almost there.`, `One more moment.`, `Still working on it.`, `Nearly there.`,
-  `Bear with me.`, `Still going.` (sidecar `speaker.mjs` PROGRESS).
+- A spoken turn says an opener at about 1.1 s, then a progress line each time about 5.5 s pass with nothing new (never
+  the same twice in a row, never over the owner, an ask or the answer). The lines, which the web's `words.ts` keeps
+  too: `Checking it now.`, `Looking at it now.`, `Almost there.`, `Still on it.`, `One more second.`,
+  `Still checking.`, `Nearly there.`, `Still working on it.` (sidecar `speaker.mjs` PROGRESS).
 - An Allow ask in a spoken turn is said aloud ("Can I open ui.elevenlabs.io? Say yes or no."); a clear spoken yes or no
   answers it. After 60 s with no answer Hydra says "I didn't hear a yes, so I skipped opening it." and the tool gets a
   no. A turn that ends without an answer says why in one short line, on screen always and aloud in a spoken turn.

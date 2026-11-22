@@ -1,5 +1,9 @@
 {
   "bundle": {
+    "resources": {
+      "../sidecar/dist/": "sidecar/",
+      "../../roamies/sounds/": "sounds/"
+    },
     "externalBin": [
       "binaries/roamies-voice",
       "binaries/roamies-hands",

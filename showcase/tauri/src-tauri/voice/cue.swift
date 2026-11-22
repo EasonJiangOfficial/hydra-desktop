@@ -1,0 +1,119 @@
+// Hydra's cues, played here in the voice helper (build 4 E4, recon-sounds fix). The helper is the one process that
+// sees every trigger with its source and owns OutputMute, so a cue is never silenced by mute-while-listening: listen
+// and wake are the overlay's own rendered chimes (showcase/roamies/sounds, bundled as resources, --sounds <dir>), and
+// pending is the soft loop while Hydra works. All follow the sound switch ('sound') and Hydra's volume (play_volume).
+import AVFoundation
+import Foundation
+
+enum Cue {
+    static var soundOn = true
+    static var dir: URL?
+    static var volume: () -> Float = { 1 }
+    /// Hydra's own voice is playing (the progress lines): the pending loop ducks under it.
+    static var speaking: () -> Bool = { false }
+    private static var players: [String: AVAudioPlayer] = [:]
+    private static var missing = Set<String>()
+    /// When the last one-shot cue ends (uptime): a take that opens meanwhile keeps it audible (keepAudible).
+    private(set) static var until = 0.0
+
+    /// Which takes chime as they open: the owner's own triggers (a double clap, the key phrase, the talk keys, an orb
+    /// tap). Not an auto-listen follow-up or an area snap ('listen'), barge-in, or the take a wake opens ('wake': the
+    /// wake chime already played).
+    static func audible(via: String) -> Bool { ["clap", "phrase", "keys", "orb"].contains(via) }
+
+    static func player(_ name: String) -> AVAudioPlayer? {
+        if let p = players[name] { return p }
+        guard let dir, !missing.contains(name) else { return nil }
+        guard let p = try? AVAudioPlayer(contentsOf: dir.appendingPathComponent("\(name).wav")) else {
+            missing.insert(name); log("cue: no \(name).wav in \(dir.path)"); return nil
+        }
+        p.prepareToPlay()
+        players[name] = p
+        return p
+    }
+
+    /// A one-shot chime (listen, wake). It lifts the mute for its own length, as SnapCue does.
+    static func play(_ name: String) {
+        guard soundOn, volume() > 0, let p = player(name) else { return }
+        p.numberOfLoops = 0; p.volume = volume(); p.currentTime = 0; p.play()
+        until = uptime() + p.duration
+        OutputMute.lift(for: p.duration + 0.05)
+    }
+    /// A take just muted the output (OutputMute.begin) while a cue still plays (the wake chime, then its take): lift it
+    /// for the rest of the cue.
+    static func keepAudible() {
+        let left = until - uptime()
+        if left > 0 { OutputMute.lift(for: left + 0.05) }
+    }
+
+    // ---- pending: while Hydra thinks or runs tools in a spoken turn (the sidecar's 'pending') ----
+    static let pendingDelay = 0.6, pendingFadeIn = 0.4, pendingFadeOut = 0.15
+    /// The loop's level: Hydra's volume, ducked to a quarter under its own voice (the progress lines).
+    static func pendingLevel(volume: Float, speaking: Bool) -> Float { volume * (speaking ? 0.25 : 1) }
+    private static var pendingGen = 0
+    private static var duck: Timer?
+    private(set) static var pendingOn = false
+    /// On: fades in after 0.6 s of work. Off (the answer starts, an ask is said, the owner talks, the turn ends): a
+    /// 150 ms fade out.
+    static func pending(_ on: Bool) {
+        guard on != pendingOn else { return }
+        pendingOn = on
+        pendingGen += 1
+        let gen = pendingGen
+        duck?.invalidate(); duck = nil
+        guard let p = player("pending") else { return }
+        if !on {
+            guard p.isPlaying else { return }
+            p.setVolume(0, fadeDuration: pendingFadeOut)
+            DispatchQueue.main.asyncAfter(deadline: .now() + pendingFadeOut + 0.02) { if pendingGen == gen { p.stop() } }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + pendingDelay) {
+            guard pendingGen == gen, soundOn else { return }
+            var ducked = speaking()
+            p.numberOfLoops = -1; p.volume = 0
+            if !p.isPlaying { p.currentTime = 0; p.play() }
+            p.setVolume(pendingLevel(volume: volume(), speaking: ducked), fadeDuration: pendingFadeIn)
+            let t = Timer(timeInterval: 0.1, repeats: true) { _ in
+                guard pendingGen == gen else { return }
+                let s = speaking()
+                if s == ducked { return }
+                ducked = s
+                p.setVolume(pendingLevel(volume: volume(), speaking: s), fadeDuration: pendingFadeOut)
+            }
+            RunLoop.main.add(t, forMode: .common)
+            duck = t
+        }
+    }
+}
+
+// --test-cue [<sounds dir>]: which takes chime, the pending loop's ducking, the sound switch, and (with a folder) that
+// the chimes load. Nothing is played. Exits 1 on a failure.
+enum CueTest {
+    static func run(dir: String?) -> Int32 {
+        var bad = 0
+        func check(_ name: String, _ ok: Bool) { if !ok { bad += 1; print("FAIL: \(name)") } }
+        for via in ["clap", "phrase", "keys", "orb"] { check("a take from \(via) chimes", Cue.audible(via: via)) }
+        for via in ["listen", "barge", "wake", ""] { check("a take from '\(via)' opens silently", !Cue.audible(via: via)) }
+        check("pending at full volume", Cue.pendingLevel(volume: 1, speaking: false) == 1)
+        check("pending ducks under Hydra's voice", Cue.pendingLevel(volume: 1, speaking: true) == 0.25)
+        check("pending follows the volume", Cue.pendingLevel(volume: 0.5, speaking: true) == 0.125 && Cue.pendingLevel(volume: 0, speaking: false) == 0)
+        check("pending fades out in 150 ms", Cue.pendingFadeOut == 0.15 && Cue.pendingDelay == 0.6)
+        if let dir {
+            Cue.dir = URL(fileURLWithPath: dir, isDirectory: true)
+            for (n, len) in [("listen", 0.5), ("wake", 0.9), ("pending", 2.4)] {
+                let p = Cue.player(n)
+                check("\(n).wav loads", p != nil)
+                check("\(n).wav is \(len) s", abs((p?.duration ?? 0) - len) < 0.02)
+            }
+            check("a missing file is no cue", Cue.player("nope") == nil)
+            // Sound off: nothing plays (and nothing is started here either way).
+            Cue.soundOn = false
+            let before = Cue.until
+            Cue.play("listen")
+            check("sound off: no chime", Cue.until == before)
+        }
+        print(bad == 0 ? "cue: all passed" : "cue: \(bad) failed")
+        return bad == 0 ? 0 : 1
+    }
+}

@@ -2,7 +2,8 @@
 // sometimes it cancels and doesnt warn me or do anything, when it's thinking and getting the result"), by behavior
 // with fake clocks and fake voices, plus source checks for the wiring in sidekick.mjs:
 // - C1: every take while Hydra works adds on; nothing but Stop and sleep ends a turn;
-// - C2: an opener at 1.1 s, then a progress line each 8 s of quiet, never twice the same, never over the owner or an ask;
+// - C2: an opener at 1.1 s, then a progress line each 5.5 s of quiet (E4 tuned it from 8 s), never twice the same,
+//   never over the owner or an ask;
 // - C3: an ask is logged, said aloud in a voice turn, answered by a spoken yes or no, and given up after 60 s, aloud;
 // - C4: idle sleep never comes while a turn or an ask is open; C5: the sleep word is exact while a turn runs;
 // - every turn that ends without an answer says why.
@@ -60,11 +61,11 @@ function fakeClock() {
   let live = true, muted = false, waiting = false;
   const voice = { beat: () => { said.push('beat'); return true; }, progress: (l) => { said.push(l); return true; } };
   const p = startProgress({ voice, live: () => live, muted: () => muted, waiting: () => waiting, onLine: (l) => shown.push(l), random: () => 0, ...c });
-  assert.equal(PROGRESS_MS, 8000);
+  assert.equal(PROGRESS_MS, 5500, 'one every 5 to 6 s (E4)');
   c.advance(FILLER_MS - 1); assert.deepEqual(said, [], 'nothing before 1.1 s');
   c.advance(1); assert.deepEqual(said, ['beat'], 'the opener at 1.1 s');
-  c.advance(PROGRESS_MS - 1); assert.equal(said.length, 1, 'not before 8 s of quiet');
-  c.advance(1); assert.equal(said.length, 2, 'a progress line after 8 s more');
+  c.advance(PROGRESS_MS - 1); assert.equal(said.length, 1, 'not before 5.5 s of quiet');
+  c.advance(1); assert.equal(said.length, 2, 'a progress line after 5.5 s more');
   assert.ok(PROGRESS.includes(said[1]), 'from the PROGRESS list');
   assert.deepEqual(shown, [said[1]], 'shown as the working line too');
   c.advance(PROGRESS_MS); assert.equal(said.length, 3);

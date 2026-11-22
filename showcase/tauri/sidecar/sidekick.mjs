@@ -48,7 +48,7 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { ASK_DEADLINE_MS, addOnTo, createSpokenTrack, endNote, pcmSecs, spokenAnswer, startProgress, trackAsk, unansweredNote, whileBusy } from './voiceturn.mjs';
+import { ASK_DEADLINE_MS, addOnTo, createSpokenTrack, endNote, pcmSecs, pendingWanted, spokenAnswer, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -90,10 +90,12 @@ let intro = null; // the get-to-know-you chat, while it's on
 const guideVoices = new Set();
 // 0 to 100: my voice and sounds (#136). A missing or broken value is full volume, never silence.
 const volumeNow = () => (Number.isFinite(Number(config.volume)) ? Math.max(0, Math.min(100, Math.round(Number(config.volume)))) : 100);
+let pendingVoice = null, answerSaid = false, pendingSent = false; // pendingNow() below
 const ui = (msg) => {
   // Muted from the Hydra window (bridge setMuted): the voice plays silently until unmuted, whatever the volume says.
   if (msg.kind === 'volume' && voiceMuted) msg = { ...msg, v: 0 };
   trackReply(msg);
+  if (msg.kind === 'agent' && msg.e?.type === 'tool' && answerSaid) { answerSaid = false; pendingNow(); } // words before a tool were narration
   if (msg.kind === 'volume') nativeSpeech({ volume: msg.v });
   if (msg.kind === 'speech') {
     if (msg.stop) { send({ type: 'onboard', msg }); nativeSpeech(msg); return send({ type: 'ui', msg }); }
@@ -151,6 +153,16 @@ function nativeNow() {
 const heardTrack = createSpokenTrack();
 // The turn's opener and progress lines (voiceturn.mjs startProgress), touched by its audio as it comes (ui above).
 let turnProgress = null;
+// The soft pending sound (the voice helper's loop, cue.swift) and the orb's pending look while a spoken turn works (E4):
+// from its start until its answer is said; off while the owner talks or a yes/no waits. Sent on change only (the
+// flags are declared above ui(), which reads them).
+function pendingNow() {
+  const on = pendingWanted({ voice: pendingVoice && turnVoice === pendingVoice, busy, answerSaid, listening: voiceBusy, asking: yesNoOpen.size > 0 });
+  if (on === pendingSent) return;
+  pendingSent = on;
+  send({ type: 'pending', on });
+  ui({ kind: 'pending', on });
+}
 let interruptedAfter = '';
 function noteInterrupted() {
   const heard = heardTrack.interrupted();
@@ -276,11 +288,15 @@ const bargeOn = () => MAC && config.barge !== false && !bargeUnavailable;
 // shows the state while that window is hidden. Detached: the docked desktop orb. The web app (bridge), the tray menu,
 // the panel and a right-click on the orb switch it.
 const orbDetached = () => !!config.orbDetached;
-function setOrbMode(detached, from = 'panel') {
+function setOrbMode(detached, from = 'panel', drag = null) {
+  // drag ({ x, y }: the pointer's screen point, bridge detach with dragging): the orb comes out under the cursor and
+  // rides it until the shell sees the button let go (main.rs ORB_DRAG), then settles there.
   config.orbDetached = !!detached; saveConfig();
   logLine('orb_mode', { detached: !!detached, from });
   ui({ kind: 'orb_mode', detached: !!detached });
   send({ type: 'orb_mode', detached: !!detached });
+  const x = Number(drag?.x), y = Number(drag?.y);
+  if (detached && drag && Number.isFinite(x) && Number.isFinite(y)) { ui({ kind: 'orb_drag', x, y }); send({ type: 'orb_drag' }); }
   menu(); if (panelOpen) panel();
 }
 // Paired, Hydra's own settings decide (W6: one source, every surface); an older server that doesn't send a field, or
@@ -310,11 +326,13 @@ const power = createPower({
     voiceConfig();
     ui({ kind: 'power', asleep, sound: asleep && why === 'sleep_word' });
     menu();
-    // Woken by a double clap, the orb or the app: it says so in its voice, then listens. Woken by the key phrase, the
-    // phrase's own take is already listening (the owner is mid-sentence): no greeting over him.
-    if (!asleep && why !== 'talk' && why !== 'phrase') {
-      const v = speakLine('Hydra at your service, sir.');
-      ui({ kind: 'listen_after', speech: v?.id ?? null });
+    // Every wake listens at once (E4, wakeActions): the wake chime and a take, no greeting. Woken by the key phrase, the
+    // phrase's own take is already listening (the owner is mid-sentence). A clap or the phrase: the orb's wake burst.
+    if (!asleep) {
+      const w = wakeActions(why);
+      if (w.woke) { pushWeb({ woke: { at: Date.now(), from: why } }); ui({ kind: 'woke', from: why }); }
+      if (w.cue) send({ type: 'cue', name: 'wake' });
+      if (w.listen) send({ type: 'listen', via: 'wake', wait: 8 });
     }
   },
 });
@@ -1638,11 +1656,12 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   turnVoice = voice;
   if (voice && intro) guideVoices.add(voice.id);
   if (voice) heardTrack.start(voice.id);
-  const spoken = voice && new SpeechText((t) => { heardTrack.line(t); voice.say(t); }, speech.localOpts?.());
-  // A filler ("Let me check.") when no answer has started within 1.1 s (W5 contract 3), then a progress line ("Still
-  // checking.") each 8 s with nothing new (C2); never while muted, while the owner talks or while a yes/no waits.
+  const spoken = voice && new SpeechText((t) => { heardTrack.line(t); voice.say(t); if (!answerSaid) { answerSaid = true; pendingNow(); } }, speech.localOpts?.());
+  // A filler ("Let me check.") when no answer has started within 1.1 s (W5 contract 3), then a progress line ("Checking
+  // it now.") each 5.5 s with nothing new (C2, E4); never while muted, while the owner talks or while a yes/no waits.
   const progress = turnProgress = startProgress({ voice: !intro && voice, live: () => busy && turnVoice === voice, muted: () => voiceMuted || voiceBusy,
     waiting: () => yesNoOpen.size > 0, onLine: (line) => ui({ kind: 'agent', e: { type: 'thinking', text: `${line} ` } }) });
+  pendingVoice = !intro ? voice : null; answerSaid = false; pendingNow();
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null, hitMax = false, endLine = '';
   let lastSeen = 0; // the newest call's whole prompt (cache log): tools, system prompt and chat
   try {
@@ -1850,6 +1869,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     if (turnProgress === progress) turnProgress = null;
     busy = false; turnVoice = null; turnImage = null; addOnTake = false;
     power.busy(); // the 5 minutes to idle sleep count from the end of the turn (C4)
+    pendingVoice = null; pendingNow(); // the pending sound fades out with the turn
     stir(); saidCap = setTimeout(() => { saidPending = false; stir(); }, 90_000);
     // A tool cut off by Stop never reports back: end its tag too, or the Sidekick kept showing it ("looking at
     // CapCut") on every later request, with their own tags queued behind it.
@@ -1929,9 +1949,9 @@ function showAsk(opts, signal) {
     // The setup guide waits as long as it takes (the owner reads each step there).
     const a = trackAsk({ id, route, question: opts.prompt || opts.placeholder, choices: !!opts.choices, voice, log: logLine, deadlineMs: onboarding ? 0 : ASK_DEADLINE_MS,
       close: () => to({ kind: 'cancel_ask', id }),
-      resolve: (v) => { pending.delete(id); yesNoOpen.delete(id); power.busy(); resolve(v); } });
+      resolve: (v) => { pending.delete(id); yesNoOpen.delete(id); pendingNow(); power.busy(); resolve(v); } });
     pending.set(id, (text) => a.answer(text));
-    if (opts.choices) yesNoOpen.set(id, { a, to });
+    if (opts.choices) { yesNoOpen.set(id, { a, to }); pendingNow(); }
     // Another route finished first (e.g. the OAuth callback server): close the input bubble.
     signal?.addEventListener('abort', () => { to({ kind: 'cancel_ask', id }); a.cancel(); }, { once: true });
   });
@@ -2604,7 +2624,7 @@ const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecog
 let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
 function onVoice(m) {
-  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; stir(); }
+  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; stir(); pendingNow(); }
   // Any take while Hydra works (the phrase, a clap, the talk keys, barge-in; C1): its words join the turn under way, never
   // a cancel. Hydra's voice holds while the owner talks and goes on after; a take that hears nothing leaves the turn as
   // it was. With nothing running, a take talks over the last reply: that stops its voice, and the next turn knows.
@@ -3405,9 +3425,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     if (config.onboarded) ui({ kind: 'greet' });
     agents.sync();
   } else if (m.type?.startsWith('ob_') || m.type?.startsWith('chat_') || m.type === 'set_keys' || m.type === 'set_actions' || m.type === 'set_login' || m.type === 'keybind_error') onGuide(m).catch((e) => console.error('guide', e));
+  // A clap or barge-in take (the helper's trigger): counts as talking. Before the voice* catch-all, which swallowed it.
+  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); if (m.via === 'barge') noteInterrupted(); power.talked(); }
   else if (m.type?.startsWith('voice')) onVoice(m);
   else if (m.type === 'snap') areaSnap();
   else if (m.type === 'write_tap') onWriteTap();
+  // The take after a wake (an older overlay still asks for it): listen, silently, unless something runs.
+  else if (m.type === 'auto_listen' && m.turn === 'wake') { if (!power.asleep && !busy) send({ type: 'listen', via: 'wake', wait: 8 }); }
   else if (m.type === 'auto_listen') {
     // Still the latest reply, nothing running since, and still switched on: listen once, hands-free.
     if (m.turn !== autoTurn || busy || !(autoListenOn() || snoozeListenOn())) return;
@@ -3417,9 +3441,15 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   else if (m.type === 'feedback') { if (m.good === true) onFeedback('good', '', 'button'); else wrongButton().catch((e) => console.error('feedback', e)); }
   else if (m.type === 'agent_power') { if (m.on) power.wake(String(m.from || 'asked')); else power.sleep(String(m.from || 'asked')); }
-  else if (m.type === 'auto_listen' && m.turn === 'wake') { if (!power.asleep && !busy) send({ type: 'listen', wait: 8 }); }
+  // An orb tap (the web orb's bridge listen, or the desktop orb): asleep it wakes Hydra (and listens); during a take it
+  // ends the take; otherwise it opens one, with the listen chime.
+  else if (m.type === 'orb_listen') {
+    const from = m.from === 'orb' ? 'orb' : 'web';
+    logLine('orb_listen', { from, asleep: power.asleep, taking: voiceBusy });
+    if (power.asleep) power.wake(from); else if (voiceBusy) send({ type: 'listen_cancel' }); else send({ type: 'listen', via: 'orb' });
+  }
   // The web app's bridge (window.hydraDesktop.attach / detach), passed on by the shell from Hydra's own page only.
-  else if (m.type === 'orb_set') setOrbMode(!!m.detached, m.from ?? 'web');
+  else if (m.type === 'orb_set') setOrbMode(!!m.detached, m.from ?? 'web', m.drag);
   // Bridge v3: the web card's mute and pause, and the promise calls (setup, pair, Claude sign-in, unpair).
   else if (m.type === 'bridge_voice') {
     if (typeof m.muted === 'boolean') { voiceMuted = m.muted; ui({ kind: 'volume', v: volumeNow() / 100 }); pushWeb({ muted: voiceMuted }); }
@@ -3429,7 +3459,6 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'voice_barge_available') { bargeUnavailable = false; if (panelOpen) panel(); }
   else if (m.type === 'voice_barge_unavailable') { bargeUnavailable = true; logLine('barge', { unavailable: true }); if (panelOpen) panel(); }
   // Talking over Hydra (barge-in): the helper already cut its voice off; the next turn knows what was heard.
-  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); if (m.via === 'barge') noteInterrupted(); power.talked(); }
   else if (m.type === 'hydra_settings_changed') agentSettings.refresh();
   else if (m.type === 'reply_said') { heardTrack.finished(); power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on

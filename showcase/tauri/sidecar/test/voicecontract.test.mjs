@@ -331,7 +331,9 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.match(side, /m\.type === 'hydra_settings_changed'\) agentSettings\.refresh\(\);/, 'and on a change push from the window');
   assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: wakePhraseNow\(\),/, 'the wake phrase reaches the helper; it listens asleep too');
   assert.match(side, /const wakePhraseNow = \(\) => \(servedNow\('wakePhrase'\) && wakePhraseFor\(agentSettings\)\) \|\| config\.wakePhrase \|\| `Hey \$\{wakeName\(config\)\}`;/, 'Hydra\'s phrase only when a read sent one (R10-14), else the Mac\'s own');
-  assert.match(side, /if \(!asleep && why !== 'talk' && why !== 'phrase'\)/, 'a phrase wake keeps its own take (no greeting over the owner)');
+  // Build 4 E4: no wake greets any more; a phrase wake still keeps its own take (wakeActions: behavior in build4e4.test.mjs).
+  assert.match(side, /const w = wakeActions\(why\);[\s\S]{0,200}if \(w\.listen\) send\(\{ type: 'listen', via: 'wake', wait: 8 \}\);/, 'a phrase wake keeps its own take (no greeting over the owner)');
+  assert.doesNotMatch(side, /at your service, sir\.'\);\n/, 'no wake greeting');
   // Build 4 E1 (C1): every take while Hydra works adds on (whileBusy: behavior in build4e1.test.mjs); no take or request
   // cancels a turn quietly any more, only sleep does.
   assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{ addOnTake = true; hush\(true\);/, 'any take while thinking adds on');

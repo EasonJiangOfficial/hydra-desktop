@@ -28,7 +28,7 @@
       const t = st.age - d.aimAt;
       if (t > SHOT.aim * 0.78 && !d.locked) { d.locked = 1; c.S('focus'); }
       if (t > SHOT.aim && !d.scanning) { d.scanning = 1; c.S('scan'); }
-      if (t >= SHOT.aim + SHOT.scan && !d.snapped) { d.snapped = st.age; c.S('shutter'); c.sq.kick(8); }
+      if (t >= SHOT.aim + SHOT.scan && !d.snapped) { d.snapped = st.age; c.sq.kick(8); } // silent (E4: no sound the owner didn't cause)
       if (d.snapped && st.age - d.snapped > SHOT.after) { c.S('gulp'); st.finish(true); }
     },
     pose(st, c) {

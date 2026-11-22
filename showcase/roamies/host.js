@@ -463,12 +463,21 @@
     invoke('orb_state', { msg: o }).catch(() => {});
   }
   setInterval(pushOrb, 66);
-  // Asleep: a click on the orb wakes Hydra (it greets, then listens).
+  // A click on the floating orb (E4): asleep it wakes Hydra, which listens at once; awake it opens a take (or ends the
+  // one open). A press that moves 6 px or more is a drag (core.js), not a click.
+  let orbPress = null;
   document.addEventListener('pointerdown', (e) => {
     const a = getAgent();
-    if (!Roamie.asleep || Roamie.orbAttached || !a?.visible || !a.pos) return;
-    if (Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) < a.pos.r * 1.2) send({ type: 'agent_power', on: true, from: 'orb' });
+    orbPress = e.button === 0 && !Roamie.orbAttached && a?.visible && a.pos && Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) < a.pos.r * 1.2 ? [e.clientX, e.clientY] : null;
   }, true);
+  document.addEventListener('pointerup', (e) => {
+    const p = orbPress; orbPress = null;
+    if (!p || Math.hypot(e.clientX - p[0], e.clientY - p[1]) >= 6) return;
+    send(Roamie.asleep ? { type: 'agent_power', on: true, from: 'orb' } : { type: 'orb_listen', from: 'orb' });
+  }, true);
+  // Dragged out of the Hydra window (docs/BRIDGE.md detach { x, y, dragging }): the orb comes out under the cursor and
+  // rides it; the shell calls this when the button is let go (main.rs ORB_DRAG), and it settles there.
+  window.__roamieOrbDrop = () => { if (Roamie.orbDrag) { Roamie.orbDrag = false; getAgent()?.carry?.(false); } };
   // Right-click on the floating orb: offer to attach it to the Hydra window.
   document.addEventListener('contextmenu', (e) => {
     const a = getAgent();
@@ -497,8 +506,7 @@
         waveTurn = false;
         thought?.end(); thought = null;
         if (a.visible) a.hide();
-        N().listen();
-        Roamie.sfx?.play('listen');
+        N().listen(); // the listen chime plays in the voice helper (cue.swift), never muted by mute-while-listening
         return;
       }
       // macOS: the listening shows as voice bars beside the cursor, so the sidekick steps away until it answers.
@@ -506,7 +514,6 @@
         waveTurn = true;
         thought?.end(); thought = null;
         if (a.visible) a.hide();
-        Roamie.sfx?.play('listen');
         return;
       }
       listen = a.listen({ placeholder: m.mode === 'handsfree' ? 'Listening… tap again to send' : 'Listening…' });
@@ -567,8 +574,19 @@
     if (m.kind === 'wake_phrase') { wakePhrase = !!m.on; pushOrb(true); return; }
     // Its chimes play once: only in the overlay that holds Hydra (every overlay gets these messages).
     if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound && getAgent()) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
-    // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
-    if (m.kind === 'listen_after') { if (getAgent()) Roamie.sfx?.play('hydra_wake'); waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
+    // Woken by a double clap or the key phrase (E4): the orb's 900 ms wake burst (hydra.js). The wake chime plays in the
+    // voice helper (cue.swift), so it is never muted.
+    if (m.kind === 'woke') { Roamie.wokeAt = performance.now(); return; }
+    // A spoken turn at work (E4): the orb's pending pulse keeps time with the helper's pending loop (it fades in at 0.6 s).
+    if (m.kind === 'pending') { Roamie.pendingAt = m.on ? performance.now() + 600 : null; return; }
+    if (m.kind === 'orb_drag') {
+      const a = getAgent(), o = Roamie.origin ?? { x: 0, y: 0 };
+      if (!a) return;
+      Roamie.orbDrag = true;
+      const [x, y] = cursor ?? [m.x - o.x, m.y - o.y];
+      a.carry?.(true, x, y);
+      return;
+    }
     // The orb's size (outer edge, px). It never changes form: the size is the setting.
     if (m.kind === 'size') { Roamie.orbPx = ORB_PX[m.size] ?? 48; for (const t of Roamie.tiles ?? []) t.creature.refit?.(); return; }
     if (m.kind === 'look') {

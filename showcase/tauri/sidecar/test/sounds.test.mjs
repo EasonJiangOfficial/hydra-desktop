@@ -37,11 +37,14 @@ assert.equal(play('done'), 'done');
 
 // Host chimes: every overlay window gets the sidecar's messages; only the one holding Hydra plays them.
 assert.match(host, /m\.kind === 'power'\) \{ Roamie\.asleep = !!m\.asleep; if \(m\.asleep && m\.sound && getAgent\(\)\) Roamie\.sfx\?\.play\('sleep'\);/);
-assert.match(host, /m\.kind === 'listen_after'\) \{ if \(getAgent\(\)\) Roamie\.sfx\?\.play\('hydra_wake'\);/);
+// Build 4 E4: the wake and listen chimes moved to the voice helper (cue.swift), where mute-while-listening can't silence
+// them; the overlay plays neither, and the wake greeting and its listen_after are gone (every wake listens at once).
+assert.doesNotMatch(host, /listen_after|play\('hydra_wake'\)|play\('listen'\)/);
+assert.match(host, /m\.kind === 'woke'\) \{ Roamie\.wokeAt = performance\.now\(\); return; \}/);
 // Every other host play sits after the overlay's agent check (agentEvent and onVoice return without one).
 const before = host.slice(0, host.indexOf('if (!getAgent()) return;\n    if (m.kind === \'agents\')'));
 const loose = [...before.matchAll(/Roamie\.sfx\?\.play\('(\w+)'\)/g)].map((m) => m[1]);
-assert.deepEqual(loose.sort(), ['done', 'heard', 'hydra_wake', 'listen', 'listen', 'sleep'], 'no other host sound outside a check');
+assert.deepEqual(loose.sort(), ['done', 'heard', 'sleep'], 'no other host sound outside a check');
 assert.match(host, /function agentEvent\(e\) \{\n    const a = getAgent\(\);\n    if \(!a\) return;/, "done: Hydra's overlay only");
 assert.match(host, /function onVoice\(m\) \{[\s\S]{0,300}const a = getAgent\(\);\n    if \(!a\) return;/, 'listen and heard: Hydra\'s overlay only');
 
@@ -61,9 +64,9 @@ for (const [e, listen, notch, want] of [
   vm.runInNewContext(`switch ('tool') { case 'tool':\n${toolCase} }`, c);
   assert.equal(c.toolsRan, want, JSON.stringify({ e, listen, notch }));
 }
-// The 'working' chime plays where the task tag starts, and the tag draws on the desktop even with the orb attached
-// (only bubbles and the orb itself hide then), so that chime always has something on screen.
-assert.match(agent, /def\.start\?\.\(st, C\);\n        k\.S\('toolstart'\);/);
+// Build 4 E4: no 'working' chime per tool any more (16 tools made 16 chimes); the tag still draws on the desktop even
+// with the orb attached (only bubbles and the orb itself hide then).
+assert.doesNotMatch(agent, /k\.S\('toolstart'\)|k\.S\('listen'\)/);
 const over = agent.match(/\n      over: \(ctx, env\) => \{([\s\S]*?)\n      \},/)[1];
 assert.match(over, /\n        if \(tool\) drawTag\(ctx, tool\);/);
 assert.doesNotMatch(over, /orbAttached/);
