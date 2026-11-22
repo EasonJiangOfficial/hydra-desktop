@@ -331,7 +331,7 @@ const isAbortLike = (err) => /abort/i.test(err instanceof Error ? err.message : 
 // prompt, tools, session to resume) starts cold as before. At most one, let go after SPARE_IDLE_MS unused.
 let spare = null;
 const sha = (x) => crypto.createHash('sha256').update(typeof x === 'string' ? x : JSON.stringify(x)).digest('hex').slice(0, 16);
-const spareKey = (o, resume) => sha([o.executable, o.cwd, o.model, sha(o.system ?? ''), (o.tools ?? []).map((t) => t.name), o.maxTurns ?? 0, o.thinking ?? null, resume ?? null, sha(o.env ?? {})]);
+const spareKey = (o, resume) => sha([o.executable, o.cwd, o.model, sha(o.system ?? ''), (o.tools ?? []).map((t) => t.name), o.maxTurns ?? 0, o.thinking ?? null, resume ?? null, sha(o.env ?? {}), !!o.connectors]);
 export function closeSpare() {
   const s = spare; spare = null;
   if (!s) return;
@@ -341,7 +341,17 @@ export function closeSpare() {
 // Claude Code cuts each tool's description at 4,096 characters unless told otherwise, and draw's is about twice that:
 // Claude never saw maps, tables, maths or deep explanations. Ours fit in this.
 export const MAX_TOOL_DESCRIPTION = 16_384;
+// The owner's claude.ai connectors (Gmail, Google Calendar...) load only when Claude Code runs on his claude.ai
+// login (W3 contract): nothing in its environment may pick another account or provider, or switch them off.
+export const NOT_CLAUDE_AI = /^(ANTHROPIC_|CLAUDE_CODE_OAUTH|CLAUDE_CODE_USE_|AWS_BEARER_TOKEN_BEDROCK$|ENABLE_CLAUDEAI_MCP_SERVERS$|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC$)/;
+export function claudeAiEnv(env) {
+  return Object.fromEntries(Object.entries(env ?? {}).filter(([k, v]) => v !== undefined && !NOT_CLAUDE_AI.test(k)));
+}
+// A connector's tool (mcp__claude_ai_Gmail__search_threads): its server and tool names.
+export const connectorTool = (name) => { const m = /^mcp__(.+?)__(.+)$/.exec(name); return m ? { server: m[1], tool: m[2] } : null; };
 // Everything a query is started with; `link` carries what's only known once a request takes it.
+// o.connectors: the owner's claude.ai connectors load too, and every call to one goes through o.gate(name, input,
+// signal) → true to run it (the desktop risk gate: reads run, anything else asks the owner).
 function sdkOptions(o, resume, link) {
   const bridge = createToolBridge({ tools: o.tools ?? [], signal: () => link.signal, onEvent: (event) => link.onEvent?.(event) });
   const abortController = new AbortController();
@@ -352,14 +362,30 @@ function sdkOptions(o, resume, link) {
     systemPrompt: { type: 'custom', prompt: o.system ?? '' },
     tools: [], // none of Claude Code's own tools: only ours, through the bridge (and its safety checks)
     settingSources: [],
-    strictMcpConfig: true,
+    // Without connectors only our tools exist. With them, no strict MCP config: claude.ai's servers load beside ours.
+    ...(o.connectors ? {} : { strictMcpConfig: true }),
     mcpServers: { [MCP_SERVER]: bridge.config },
+    // Ours are allowed here (each runs its own safety checks); a connector's tool is never listed, so every call to
+    // one comes to canUseTool and the gate.
     allowedTools: bridge.allowedTools(),
-    canUseTool: async (name, toolInput) => (name.startsWith(TOOL_PREFIX) ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `${name} is not available in Hydra.` }),
+    // o.disallowedTools: names Claude Code must never run, on top of tools: [] (the server brain lists every built-in).
+    ...(o.disallowedTools?.length ? { disallowedTools: [...o.disallowedTools] } : {}),
+    canUseTool: async (name, toolInput, opts) => {
+      if (name.startsWith(TOOL_PREFIX)) return { behavior: 'allow', updatedInput: toolInput };
+      if (o.connectors && connectorTool(name) && o.gate) {
+        const ok = await Promise.resolve(o.gate(name, toolInput, opts?.signal)).catch(() => false);
+        return ok ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `The owner did not allow ${name}, so it was not run.` };
+      }
+      return { behavior: 'deny', message: `${name} is not available in Hydra.` };
+    },
     includePartialMessages: true,
     pathToClaudeCodeExecutable: o.executable,
-    // No telemetry or other non-essential calls from Claude Code: only the model requests leave this Mac.
-    env: { ...(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1' },
+    ...(o.spawn ? { spawnClaudeCodeProcess: o.spawn } : {}), // test seam: sees the exact command line
+    // No telemetry from Claude Code. With connectors the environment is the claude.ai login's alone (claudeAiEnv);
+    // without them, no non-essential traffic either: only the model requests leave this Mac.
+    env: o.connectors
+      ? { ...claudeAiEnv(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' }
+      : { ...(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1' },
     abortController,
     stderr: (d) => link.stderr?.(d),
     ...(resume ? { resume } : {}),
