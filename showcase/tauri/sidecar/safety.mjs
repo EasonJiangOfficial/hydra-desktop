@@ -296,6 +296,8 @@ const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) 
   return [name, first, dir, ...(dir && name ? [`${dir}/${name}`, `${dir}/${first}`] : [])].filter(Boolean);
 });
 const PASSWORD_APPS = /^(1password( \d+)?|bitwarden|lastpass|dashlane|keeper( password manager)?|keepassxc|keepassium|strongbox|enpass|proton pass|nordpass|roboform|passwords|keychain access|secrets)$/i;
+/** A password manager (its window shows sign-ins): bringing it forward asks under Approve all too (tools.mjs). */
+export const isPasswordApp = (app) => PASSWORD_APPS.test(String(app ?? '').trim().replace(/\.app$/i, ''));
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -440,7 +442,8 @@ export function checkOpen(target, home, { executable = false, app = null } = {})
     if (!inApps && all.some((a) => !mine(a) && SYSTEM_ROOTS.some((d) => a === d || a.startsWith(d + '/')))) return verdict(BLOCK, `${t} is a system file, so I won't open it.`);
     // A startup or settings file, or a hidden or app-data one, opens only with a yes: in an editor the hands tools
     // could change it (seventh review F1), and on screen it can be read.
-    if (r.level === ASK || (!appBundle && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true };
+    // secret: a hidden or app-data one can hold sign-ins (readCheck), and on screen they're read: Approve all never answers.
+    if (r.level === ASK || (!appBundle && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true, ...(r.secret ? { secret: true } : {}) };
     if (inApp && !VIEWERS.test(inApp)) return { ...verdict(ASK, `Open ${r.path} in ${inApp}?`), always: true };
     if (all.some((a) => ACTIVE.test(bare(a.split('/').at(-1) ?? '')))) return { ...verdict(ASK, `Open ${r.path}? A page like that can run script when it opens.`), always: true, page: true };
     return verdict(SAFE);
@@ -693,9 +696,10 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
     const v2 = u && u.host ? read(decodeURIComponent(u.pathname), home, { recursive }) : null;
     if (v2?.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v2.reason}`);
     if (v.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v.reason}`);
-    if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}${named && v.reason.includes('outside') ? ', outside your Documents, Desktop and Downloads folders' : ', a hidden or app-data file that can hold sign-ins'}.`), always: true };
+    // secret: a hidden or app-data file can hold sign-ins, so Approve all never answers it (as read_file's).
+    if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}${named && v.reason.includes('outside') ? ', outside your Documents, Desktop and Downloads folders' : ', a hidden or app-data file that can hold sign-ins'}.`), always: true, ...(v.secret || pathAsk?.secret ? { secret: true } : {}) };
   }
-  if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true };
+  if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true, ...(pathAsk?.secret ? { secret: true } : {}) };
   // An allowlist: readOnlyHint (the server's own claim) makes a call SAFE only when its name reads (a read verb in it)
   // and nothing in it writes. Everything else asks.
   const words = snake(name).split('_').filter(Boolean);
@@ -707,5 +711,5 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
     return pathAsk ?? { ...verdict(ASK, 'It only reads, but what it reads goes to the model.'), always: true };
   }
   // Owner: anything that might change, send or delete asks every time.
-  return { ...verdict(ASK, "The server doesn't say it only reads."), always: true };
+  return { ...verdict(ASK, "The server doesn't say it only reads."), always: true, ...(pathAsk?.secret ? { secret: true } : {}) };
 }

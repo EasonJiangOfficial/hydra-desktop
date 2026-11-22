@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, deletesKey, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, deletesKey, isPasswordApp, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -402,7 +402,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const r = await hands('resolve', `app:${name}`).catch(() => null);
     const real = r && !r.window && r.running ? String(r.running) : null;
     if (!real) return null;
-    if (!(await confirm(`Bring ${real} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx))) throw new Error(`${userName} said no, so I didn't bring ${real} forward.`);
+    // A password manager unhidden puts its vault on screen: Approve all never answers that (as its window's look).
+    if (!(await confirm(`Bring ${real} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx, { deletion: isPasswordApp(real) || isPasswordApp(name) }))) throw new Error(`${userName} said no, so I didn't bring ${real} forward.`);
     forward.apps.set(name, { real, call: toolCall.getStore() });
     return look ? real.trim().toLowerCase() : null;
   }
@@ -1206,7 +1207,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               // another one came forward). Asked again with that app's real name.
               if (r.whole === 'plan') {
                 const left = plan.steps.slice(r.step);
-                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}`, ctx))) {
+                // Tagged as the first ask was: the deletion's target changed with the app, so its yes doesn't carry.
+                const deletes = notes.length > 0 || left.some((s) => s.do === 'key' && deletesKey(s.key));
+                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`, ctx, { deletion: deletes }))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []).filter((x) => x !== 'plan'), 'plan'];
@@ -1425,7 +1428,8 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const isLink = /^[a-z][a-z0-9+.-]*:/i.test(t) && !/^[a-z]:\\/i.test(t);
         const shown = isLink ? t : /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t) ? checkRead(expand(t), HOME).path : `the app ${t}`;
         const question = ov.level === ASK ? ov.reason : `Open ${shown}${app ? ` in ${app}` : ''}?`;
-        if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+        // A hidden or app-data file (secret: it can hold sign-ins) asks under Approve all too.
+        if (!(await confirm(question, ctx, { deletion: !!ov.secret }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
         agentChangesScreen();
         // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
         const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);

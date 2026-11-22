@@ -112,7 +112,12 @@ export function renderTranscript(messages, maxChars) {
 class SdkMessageMapper {
   turn = 0; totalUsage = { inputTokens: 0, outputTokens: 0 }; lastAssistant; syntheticError;
   #current; #startedAt; #stopReason = 'end_turn'; #usage = { inputTokens: 0, outputTokens: 0 };
+  #adds = [];
   constructor(o) { this.o = o; }
+  /** Words the owner added mid-run: they go into the history as a user message just before the next assistant message
+   *  (where Claude Code reads them in), so the saved history, a fold's transcript and a re-seed keep them.
+   *  ponytail: placed at the next message start, one round early if Claude Code holds it for a later boundary. */
+  added(text) { this.#adds.push({ role: 'user', content: String(text) }); }
   unpairedToolCalls() {
     const last = this.o.messages.at(-1);
     if (last?.role !== 'assistant' || typeof last.content === 'string') return [];
@@ -170,6 +175,7 @@ class SdkMessageMapper {
     }
     const id = String(message.id ?? '');
     if (!this.#current || this.#current.id !== id) {
+      this.o.messages.push(...this.#adds.splice(0));
       const fresh = { role: 'assistant', content: [] };
       this.#current = { id, message: fresh };
       this.o.messages.push(fresh);
@@ -518,6 +524,7 @@ async function* claudeCodeLoop(messages, o) {
     input.push(m);
     addedAt = ++step;
     added.push({ at: addedAt, text: String(text), uuid: m.uuid, m });
+    mapper.added(text);
     return true;
   });
 

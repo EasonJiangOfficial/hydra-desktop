@@ -64,8 +64,12 @@ function fakeClock() {
   const open = new Map([['a1', { a }]]);
   assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 500 }), null, 'a take from before the ask never answers it');
   assert.equal(askForTake(open, { text: 'yes', takeAt: null }), null, 'nor one whose start is unknown');
-  assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 1200 })?.said, 'yes', 'a take after it does');
-  assert.equal(askForTake(open, { text: 'open Chrome instead', takeAt: 1200 }), null, 'other words are for the turn');
+  // Lane E round 2: shown is not heard. Only a take that started once its question had played answers it.
+  assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 1200 }), null, 'a take before its question played never does');
+  a.audio(3, 4000);
+  assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 3999 }), null, 'nor one that started while it played');
+  assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 4000 })?.said, 'yes', 'a take after it played does');
+  assert.equal(askForTake(open, { text: 'open Chrome instead', takeAt: 4200 }), null, 'other words are for the turn');
 }
 
 // ---- 3. A clear yes that names the action, or with fillers, is a yes; mixed or other words are not.
@@ -111,9 +115,11 @@ function fakeClock() {
   assert.match(side, /for \(const \[, w\] of yesNoOpen\) if \(w\.voice && w\.voice === voice\) w\.a\.unvoice\(\);/, 'the turn ending unvoices its asks');
 }
 
-// ---- 6. After the question is said a take opens (once Hydra's voice is done), so a bare "yes" is heard.
+// ---- 6. After the question is said a take opens (once its audio has played: askArm, build4efix2), so a bare "yes" is
+// heard. The helper's afterVoice path stays for older sidecars.
 {
-  assert.match(side, /if \(a\.voiced\) send\(\{ type: 'listen', via: 'ask', wait: 8, afterVoice: true \}\);/);
+  assert.match(side, /w\.took = true; askTake = \{ id \}; send\(\{ type: 'listen', via: 'ask', wait: 8 \}\);/);
+  assert.doesNotMatch(side, /afterVoice: true/, 'not on any quiet gap: on its own audio');
   assert.match(mainRs, /"afterVoice": msg\.get\("afterVoice"\)\.and_then\(Value::as_bool\) == Some\(true\)/, 'the shell passes it on');
   assert.match(voiceSwift, /if after \{ voice\.listenAfterVoice\(wait: wait, via: via\) \}/, 'the helper waits for the voice');
 }
@@ -218,10 +224,10 @@ function fakeClock() {
 // ---- 17. Stop or the sleep word during the fold wait end it; the wait plays the pending sound.
 {
   assert.match(side, /const wait = foldWait = new AbortController\(\);/);
-  assert.match(side, /else if \(foldWait\) \{ quiet = true; logLine\('stopped', \{ by, waiting: 'fold' \}\); foldWait\.abort\(\); \}/, 'sleep ends it');
+  assert.match(side, /else if \(foldWait\) \{ logLine\('stopped', \{ by, waiting: 'fold' \}\); foldWait\.abort\('sleep'\); \}/, 'sleep ends it');
   assert.match(side, /controller\?\.abort\(\); foldWait\?\.abort\(\);/, 'Stop ends it');
   assert.match(side, /if \(wait\.signal\.aborted\) \{[\s\S]{0,300}return;\n    \}/, 'and the request never runs');
-  assert.match(side, /const on = \(!!foldWait && !voiceBusy && VOICE_ON\(\)\) \|\| pendingWanted/, 'never a silent wait');
+  assert.match(side, /const on = \(!!foldWait && foldWaitOwn && !voiceBusy && VOICE_ON\(\) && yesNoOpen\.size === 0 && !power\.asleep\) \|\| pendingWanted/, 'never a silent wait (for his own request)');
 }
 
 // ---- 18. A fold keeps the newest 3 screenshots for the re-seeded session.

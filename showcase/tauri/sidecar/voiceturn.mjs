@@ -138,8 +138,12 @@ const wordsOf = (t) => String(t ?? '').toLowerCase().replace(/[’]/g, "'").spli
 /** A take's words as the answer to a waiting yes/no: 'yes', 'no', or null when they aren't a clear one (then they're
  *  words for the turn): "yeah, do it", "go ahead", "yes open it", "yes you can", "go for it", "no thanks", "don't allow
  *  it". question: the ask itself, whose words ("open", "ui.elevenlabs.io") may follow the yes or no. */
+// Consent said with a negative word: "I don't mind" is a yes; "never mind" alone says nothing either way.
+const CONSENT = [[/\b(?:don'?t|do not) mind\b/g, 'okay'], [/\bnever ?mind\b/g, '']];
 export function spokenAnswer(text, question = '') {
-  const w = wordsOf(text);
+  let t = String(text ?? '').toLowerCase().replace(/[’]/g, "'");
+  for (const [re, to] of CONSENT) t = t.replace(re, to);
+  const w = wordsOf(t);
   if (!w.length || w.length > 8) return null;
   const obj = new Set(wordsOf(question).filter((x) => !YES_STRONG.has(x) && !NO_STRONG.has(x)));
   const fits = (set) => w.every((x) => set.has(x) || VERB_WORDS.has(x) || obj.has(x));
@@ -180,15 +184,21 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
   const t0 = now();
   // Said aloud only when the voice took the question (it refuses once the turn's voice ended): an ask never said is
   // never answered by a spoken word, nor expires aloud.
-  let voiced = !!(choices && voice) && voice.progress?.(spokenQuestion(question), 'ask') === true;
+  const line = spokenQuestion(question);
+  let voiced = !!(choices && voice) && voice.progress?.(line, 'ask') === true;
   let open = true, timer = null;
+  // Its question's audio (audio()): how much came after it was said, and when all the voice had queued ends playing.
+  // ponytail: chunks carry no sentence marks, so "the question has played" is at least half its length in audio heard
+  // after it, and the queue's estimated end (chunk lengths from their arrival); a play report per line would be exact.
+  let got = 0, endsAt = null;
+  const needs = (line.length / CHARS_PER_SEC) * 0.5;
   log('ask', { id, route, ...(choices ? { yesno: true } : {}), ...(voiced ? { spoken: true } : {}) });
   const done = (answer, how, by) => {
     if (!open) return false;
     open = false;
     if (timer) clearTimer(timer);
     log('ask_done', { id, route, answer: how, ms: now() - t0, ...(by ? { by } : {}) });
-    resolve(answer);
+    resolve(answer, by);
     return true;
   };
   if (choices && deadlineMs > 0) {
@@ -198,9 +208,16 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
   return {
     get open() { return open; },
     get voiced() { return voiced; },
-    /** When it was shown: only a take that started after it can answer it by voice (askForTake). */
+    /** When it was shown. */
     at: t0,
     question,
+    /** A chunk of the turn's voice came after the question was said: secs long, the queue now ending at queueEnd. */
+    audio(secs, queueEnd) { if (!open || !voiced) return; got += Math.max(0, Number(secs) || 0); endsAt = queueEnd; },
+    /** The voice was held (the owner talking) from `from` to `to`: what was still to play ends that much later. */
+    held(from, to) { if (Number.isFinite(endsAt) && endsAt > from) endsAt += Math.max(0, to - from); },
+    /** When its question finished playing (null while it hasn't): only a take that started after it answers it by
+     *  voice (askForTake), and the ask's own take opens then. */
+    get heardAt() { return voiced && got >= needs && Number.isFinite(endsAt) ? endsAt : null; },
     /** The turn's voice ended: no spoken answer, nothing said at its expiry. */
     unvoice() { voiced = false; },
     /** text: what the screen sent ('yes' for the first choice, null for the rest or a cancel); by: 'voice' when said. */
@@ -209,13 +226,15 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
   };
 }
 
-/** The open yes/no a take's words answer, or null: one Hydra said aloud, still open, shown before the take started
- *  (a take already under way when it showed never heard it: "okay thanks" then meant something else), and the words a
- *  clear yes or no to it. asks: [[id, { a }]] as sidekick's yesNoOpen. Returns { id, w, said }. */
+/** The open yes/no a take's words answer, or null: one Hydra said aloud, still open, whose question had finished
+ *  playing when the take started (a take that began before that, or while it was held, never heard it: "okay thanks"
+ *  then meant something else), and the words a clear yes or no to it. asks: [[id, { a }]] as sidekick's yesNoOpen.
+ *  Returns { id, w, said }. */
 export function askForTake(asks, { text, takeAt }) {
   if (!Number.isFinite(takeAt)) return null;
   for (const [id, w] of asks) {
-    if (!w?.a?.voiced || !w.a.open || !(takeAt >= w.a.at)) continue;
+    const from = w?.a?.heardAt;
+    if (!w?.a?.voiced || !w.a.open || !Number.isFinite(from) || !(takeAt >= from)) continue;
     const said = spokenAnswer(text, w.a.question);
     return said ? { id, w, said } : null;
   }

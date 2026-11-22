@@ -637,10 +637,17 @@ enum SleepWord {
         defer { words = next }
         return next != words
     }
-    /// strict (while Hydra works on a turn): its exact words only, never a letter off, so a near miss can't end the work.
+    /// The words that may stand around it in a strict take (the sidecar's power.mjs AROUND, kept the same).
+    static let around: Set<String> = ["ok", "okay", "hey", "now", "please", "thanks", "thank", "you", "so", "um", "uh", "alright", "right", "then", "go", "to"]
+    /// strict (while Hydra works on a turn): its exact words only, never a letter off, and alone in the take but for a few
+    /// fillers (as power.mjs heardSleepWord), so a near miss or a sentence that mentions it ("I told Hydra sleep is
+    /// important") can't end the work.
     static func heard(in text: String, strict: Bool = false) -> Bool {
         let got = Spoken.words(text).map(\.word)
-        return got.indices.contains { Spoken.follows(words, in: got, at: $0, loose: !strict, exact: strict) != nil }
+        return got.indices.contains { i in
+            guard let j = Spoken.follows(words, in: got, at: i, loose: !strict, exact: strict) else { return false }
+            return !strict || (got[..<i] + got[j...]).allSatisfy { around.contains($0) }
+        }
     }
 }
 
@@ -1612,6 +1619,9 @@ if args.contains("--test-wake") {
     strictly("Hydra, sleep.", true)
     strictly("Hydro sleep", false)
     strictly("Okay Hidra sleep now", false)
+    strictly("okay Hydra sleep now", true)
+    strictly("I told Hydra sleep is important", false)
+    strictly("so Hydra sleep mode is broken right", false)
     SleepWord.set("Sleep beast")
     strictly("Sleep beast", true)
     strictly("sleep least", false)

@@ -2,6 +2,7 @@
 // Writes are atomic (temp file, fsync, rename) and serialised per file, files are private (0600),
 // and a file that fails to parse is kept aside as *.corrupt-<time> instead of being overwritten.
 import { dataPaths, roamiesDir } from './datadir.mjs';
+import { endsWithQuestion } from './speech.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -220,9 +221,22 @@ export function foldPrint(messages) {
 }
 
 // An assistant message that ends on a question: the request after it is its answer, so no fold cuts between them.
-// A question anywhere in its last paragraph counts ("Which one?\n1. Safari\n2. Chrome", "Open it? (Say yes or no.)",
-// "Want me to open it? 🙂"): a wrong guess only moves the cut one request.
-const asks = (m) => m?.role === 'assistant' && /\?/.test((typeof m.content === 'string' ? m.content : (m.content ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join('')).trim().split(/\n\s*\n/).at(-1) ?? '');
+// Only a real trailing question: its last sentence (speech.mjs endsWithQuestion: emoji, markdown, cues ignored), with a
+// closing aside ("Open it? (Say yes or no.)") or a list of choices after it ("Which one?\n1. Safari\n2. Chrome") left
+// off. A '?' in a URL, a rhetorical "Why? Because you asked." or "Anything else? Just say." is no question.
+const textOf = (m) => (typeof m.content === 'string' ? m.content : (m.content ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join(''));
+const asks = (m) => m?.role === 'assistant' && endsWithQuestion(textOf(m).trim().replace(/(?:\n[ \t]*(?:\d+[.)]|[-*•])[ \t]+[^\n]*)+$/u, '').replace(/[ \t]*\([^()\n]*\)[\s.]*$/u, ''));
+// A system request (a reminder, the agents' news, a focus nudge: "(System, ..." after its time stamp): not the owner's.
+const systemMsg = (m) => /^\s*(?:\[[^\]\n]*\]\s*)?\(/.test(textOf(m));
+// Whether a cut at request r parts a question from its answer: a reply asking it since the owner's last request, system
+// turns between them skipped ("Want me to open it?", then the agents' news, then his "yes").
+const partsAsk = (messages, r, start) => {
+  for (let i = r - 1; i >= start; i--) {
+    if (asks(messages[i])) return true;
+    if (isRequestMsg(messages[i]) && !systemMsg(messages[i])) return false;
+  }
+  return false;
+};
 /**
  * Which turns to fold: all but the newest ~20K tokens and at least the last two requests, cut at a request so
  * tool calls stay paired, never right after a question. Keep and minimum shrink with a low trigger (tests). An
@@ -238,9 +252,12 @@ export function planFold(messages, { trigger, scale = 1, foldCap = Infinity }) {
   const start = isSummary(messages[0]) ? 1 : 0;
   const requests = messages.map((m, i) => (i >= start && isRequestMsg(m) ? i : -1)).filter((i) => i >= 0);
   if (requests.length < 3) return { ok: false, reason: 'fewer than three requests' };
-  const cuts = requests.slice(1, -1).filter((r) => !asks(messages[r - 1]));
-  let cut = -1;
-  for (const r of cuts) if (est(messages.slice(r)) >= keep) cut = r;
+  const all = requests.slice(1, -1), open = all.filter((r) => !partsAsk(messages, r, start));
+  // The question guard moves the cut back a request or two; when it blocks every cut (replies that keep ending on a
+  // question) it gives way, so the chat still folds.
+  const newest = (list) => { let c = -1; for (const r of list) if (est(messages.slice(r)) >= keep) c = r; return c; };
+  const cuts = newest(open) >= 0 ? open : all;
+  let cut = newest(cuts);
   if (cut < 0) return { ok: false, reason: 'too little to fold yet' };
   // Over the cap: the newest cut whose slice fits under it and is still worth a fold. None both: the smallest slice
   // over the cap folds (a fold too big beats a chat that never folds again: one tiny first request kept every later
