@@ -312,6 +312,8 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         // Hydra's sleep and wake: a double clap while it sleeps, or the sleep word while it listens.
         Some("clap") => to_sidecar(app, &json!({ "type": "agent_power", "on": true, "from": "clap" })),
         // A take a clap, the key phrase or talking over Hydra started: it counts as talking (the 5-minute timer).
+        // No echo cancellation on this Mac: barge-in is off for this session (the panel says why).
+        Some("barge_unavailable") => to_sidecar(app, &json!({ "type": "voice_barge_unavailable" })),
         Some("trigger") => to_sidecar(app, &json!({ "type": "voice_trigger", "via": msg.get("via").cloned().unwrap_or(Value::Null) })),
         Some("sleep_word") => to_sidecar(app, &json!({ "type": "agent_power", "on": false, "from": "sleep_word" })),
         // The mic list, for the panel's picker.

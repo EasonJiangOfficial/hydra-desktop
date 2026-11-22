@@ -19,6 +19,9 @@ enum Trigger {
         case .voice: return speaking && barge ? .take : .none
         }
     }
+    /// Whether the clap detector needs its own mic: nothing else holds the mic, and wake listening (which hears claps
+    /// itself) can't run right now, whatever its setting.
+    static func clapDetectorRuns(clapOn: Bool, idle: Bool, barging: Bool, wakeCanRun: Bool) -> Bool { clapOn && idle && !barging && !wakeCanRun }
 }
 
 /// Someone starting to talk, from the mic's energy alone (no words), in 10 ms frames. The "bed" follows the loudest
@@ -72,16 +75,20 @@ final class BargeListener {
     private let onTalk: () -> Void, onClap: () -> Void
     init(onTalk: @escaping () -> Void, onClap: @escaping () -> Void) { self.onTalk = onTalk; self.onClap = onClap }
 
-    func start(device: AudioDeviceID?) -> Bool {
+    enum Start { case started, failed, noEchoCancel }
+    func start(device: AudioDeviceID?) -> Start {
         stop()
+        // Before macOS 14 voice processing can't be kept from turning Hydra's own voice down: not used.
+        guard #available(macOS 14, *) else { return .noEchoCancel }
         let eng = AVAudioEngine()
         let input = eng.inputNode
-        if let device, !InputDevice.use(device, on: input) { return false }
-        do { try input.setVoiceProcessingEnabled(true) } catch { log("barge-in: no echo cancellation (\(error)), so not listening over Hydra"); return false }
+        if let device, !InputDevice.use(device, on: input) { return .failed }
+        do { try input.setVoiceProcessingEnabled(true) } catch { log("barge-in: no echo cancellation (\(error))"); return .noEchoCancel }
+        guard input.isVoiceProcessingEnabled else { return .noEchoCancel }
         // Voice processing turns other sound down by default: that would duck Hydra's own voice.
-        if #available(macOS 14, *) { input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min) }
+        input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { return false }
+        guard format.sampleRate > 0, format.channelCount > 0 else { return .failed }
         let talk = SpeechOnset(rate: format.sampleRate), clap = ClapDetector(rate: format.sampleRate, sensitivity: clapSensitivity)
         let onTalk = onTalk, onClap = onClap
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
@@ -90,10 +97,10 @@ final class BargeListener {
             if talk.feed(ch, count: n) { DispatchQueue.main.async { onTalk() } }
             if clap.feed(ch, count: n) { DispatchQueue.main.async { onClap() } }
         }
-        do { eng.prepare(); try eng.start() } catch { input.removeTap(onBus: 0); log("barge-in listening couldn't start: \(error)"); return false }
+        do { eng.prepare(); try eng.start() } catch { input.removeTap(onBus: 0); log("barge-in listening couldn't start: \(error)"); return .failed }
         engine = eng
         log("barge-in listening on (echo cancellation)")
-        return true
+        return .started
     }
 
     func stop() {
@@ -123,6 +130,9 @@ enum TriggerTest {
         check("clap-to-talk off: a clap while awake and quiet does nothing", Trigger.decide(.clap, asleep: false, speaking: false, clapTalk: false, phrase: true, barge: true) == .none)
         check("key phrase off: the phrase does nothing", Trigger.decide(.phrase, asleep: false, speaking: false, clapTalk: true, phrase: false, barge: true) == .none)
         check("interrupt off: talking over Hydra does nothing", Trigger.decide(.voice, asleep: false, speaking: true, clapTalk: true, phrase: true, barge: false) == .none)
+        check("key phrase on but its mic not open (no permission, backing off, held): the clap detector listens", Trigger.clapDetectorRuns(clapOn: true, idle: true, barging: false, wakeCanRun: false))
+        check("wake listening running hears claps itself: no second mic", !Trigger.clapDetectorRuns(clapOn: true, idle: true, barging: false, wakeCanRun: true))
+        check("barge-in holds the mic: no second mic", !Trigger.clapDetectorRuns(clapOn: true, idle: true, barging: true, wakeCanRun: false))
         check("clap-to-talk off still wakes from sleep", Trigger.decide(.clap, asleep: true, speaking: false, clapTalk: false, phrase: false, barge: false) == .wake)
 
         // The talk detector. "Playback" is Hydra's voice as it reaches the mic after echo cancellation (about 25 dB

@@ -201,7 +201,8 @@ const saveConfig = () => writeJson(CONFIG_PATH, routed && defaultPick ? { ...con
 // when it's reading out stuff by just talking"). All on by default; each has a switch on the Listening page.
 const phraseOn = () => WAKE_OK && config.wakeWord !== false;
 const clapTalkOn = () => MAC && config.clapTalk !== false;
-const bargeOn = () => MAC && config.barge !== false;
+let bargeUnavailable = false; // the voice helper found no echo cancellation: barge-in is off this session
+const bargeOn = () => MAC && config.barge !== false && !bargeUnavailable;
 // Where the orb lives (owner: "the voice agent is completely separate from the app, which shouldn't be the case unless I
 // detatch it"). Attached, the default: in the Hydra window (the web app draws it from the bridge) and the menu bar icon
 // shows the state while that window is hidden. Detached: the docked desktop orb. The web app (bridge), the tray menu,
@@ -2291,7 +2292,7 @@ function panelState() {
     geminiModel: config.geminiModel, geminiModels: GEMINI_CHOICES,
     studio: tts().local ? studioState() : null,
     voice: VOICE_OK ? {
-      on: !!config.voice, lang: speechLangId(), langOnline: langInfo && langInfo.id === speechLangId() ? langInfo.online : null, studioSpeak: config.studioSpeak === 'full' || config.studioSpeak === 'medium' ? config.studioSpeak : 'short', keys: HOTKEYS_OK ? talkSymbols() : null, ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false, autoListen: !!config.autoListen, listenEvery: !!config.listenEvery, listenSecs: listenSecs(), listenChoices: LISTEN_SECS, snoozeListen: !!config.snoozeListen, wake: WAKE_OK, wakeWord: phraseOn(), wakeName: wakeName(config), clapTalk: clapTalkOn(), barge: bargeOn(), sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD,
+      on: !!config.voice, lang: speechLangId(), langOnline: langInfo && langInfo.id === speechLangId() ? langInfo.online : null, studioSpeak: config.studioSpeak === 'full' || config.studioSpeak === 'medium' ? config.studioSpeak : 'short', keys: HOTKEYS_OK ? talkSymbols() : null, ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false, autoListen: !!config.autoListen, listenEvery: !!config.listenEvery, listenSecs: listenSecs(), listenChoices: LISTEN_SECS, snoozeListen: !!config.snoozeListen, wake: WAKE_OK, wakeWord: phraseOn(), wakeName: wakeName(config), clapTalk: clapTalkOn(), barge: bargeOn(), bargeNA: bargeUnavailable, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD,
       // The mic picker: what the voice helper lists, the pick ('' is automatic) and the mic automatic uses now.
       mics: mics.list, mic: config.mic ?? '', micAuto: mics.list.find((x) => x.id === mics.auto)?.name ?? '',
       download: NEEDS_MODEL && config.voice && !voiceReady() ? { status: voiceModel.status, pct: voiceModel.total ? Math.floor((voiceModel.done / voiceModel.total) * 100) : 0, size: sizeLabel() } : null,
@@ -2957,6 +2958,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'auto_listen' && m.turn === 'wake') { if (!power.asleep && !busy) send({ type: 'listen', wait: 8 }); }
   // The web app's bridge (window.hydraDesktop.attach / detach), passed on by the shell from Hydra's own page only.
   else if (m.type === 'orb_set') setOrbMode(!!m.detached, m.from ?? 'web');
+  else if (m.type === 'voice_barge_unavailable') { bargeUnavailable = true; logLine('barge', { unavailable: true }); if (panelOpen) panel(); }
   else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); power.talked(); }
   else if (m.type === 'reply_said') { power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on

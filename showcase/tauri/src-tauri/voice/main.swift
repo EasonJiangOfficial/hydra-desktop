@@ -653,7 +653,8 @@ final class Voice {
     private(set) var bargeOn = true, speaking = false
     private var bargeRetryAt = 0.0
     lazy var barger = BargeListener(onTalk: { [weak self] in self?.talkedOver() }, onClap: { [weak self] in self?.clapHeard() })
-    func setBarge(_ on: Bool) { bargeOn = on; if !on { barger.stop() } }
+    private var bargeBroken = false
+    func setBarge(_ on: Bool) { bargeOn = on && !bargeBroken; if !bargeOn { barger.stop() } }
     func setSpeaking(_ on: Bool) { speaking = on; if !on { barger.stop() } }
     private func talkedOver() {
         guard Trigger.decide(.voice, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take, phase == .idle || phase == .wake else { return }
@@ -852,11 +853,19 @@ final class Voice {
             if engine != nil { stopAudio(close: true) }
             if clapper.running { clapper.stop() }
             barger.clapSensitivity = clapper.sensitivity
-            if !barger.start(device: InputDevice.forListening()) { bargeRetryAt = now + 30 }
+            switch barger.start(device: InputDevice.forListening()) {
+            case .started: break
+            case .failed: bargeRetryAt = now + 30
+            // No echo cancellation on this Mac: listening over Hydra could hear Hydra and interrupt itself, so
+            // barge-in stays off for this session (the panel says so).
+            case .noEchoCancel: bargeBroken = true; bargeOn = false; emit(["type": "barge_unavailable"]); log("barge-in off for this session: no echo cancellation")
+            }
         }
         // The clap detector has the mic only while nothing else does: a take, wake listening (which hears claps itself)
         // or barge-in stops it.
-        let clapAlone = clapOn && phase == .idle && !wakeOn && !barger.running
+        // Based on whether wake listening really runs now, not on its setting: with the key phrase on but its mic not
+        // open (no permission yet, backing off after errors, held while Hydra answers), the clap detector listens.
+        let clapAlone = Trigger.clapDetectorRuns(clapOn: clapOn, idle: phase == .idle, barging: barger.running, wakeCanRun: wakeAllowed(now))
         if clapper.running && !clapAlone { clapper.stop() }
         else if clapAlone && !clapper.running && now >= clapRetryAt && !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
             if engine != nil { stopAudio(close: true) }
