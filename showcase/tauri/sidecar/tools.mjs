@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
+import { ASK, BLOCK, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, riskyKey, isYes, riskyKind } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -324,9 +324,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
   // Only the yes/no is skipped (skipAllow: the user turned "Skip Allow prompts" on). BLOCK verdicts never reach here.
-  async function confirm(question, ctx) {
-    if (skipAllow()) return true;
-    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"] }, ctx?.signal);
+  // always: delete, kill, quit, send, pay, overwrite, move to the Trash and risky clicks. Owner's rule: these always ask,
+  // so "Skip Allow prompts" never answers them.
+  async function confirm(question, ctx, always = false) {
+    if (!always && skipAllow()) return true;
+    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], ...(always ? { always: true } : {}) }, ctx?.signal);
     return isYes(answer);
   }
 
@@ -842,7 +844,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               if (!inThisPlan.has(kind) && !(key && allowedClicks.keys.has(key))) {
                 const where = appName === 'front' ? '' : ` in ${appName}`;
                 const covers = key ? ` Allow covers every "${kind}" click there for the rest of this request.` : '';
-                if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send or sign out.${covers}`, ctx))) {
+                if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send or sign out.${covers}`, ctx, true))) {
                   throw new Error(`${userName} said no, so I didn't click "${label}" (nothing after it ran either).`);
                 }
                 inThisPlan.add(kind);
@@ -850,10 +852,29 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               }
               s.confirmed = true;
             }
+            const keyDoes = s.do === 'key' ? riskyKey(s.key) : null;
+            if (keyDoes) {
+              if (!(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It ${keyDoes}.`, ctx, true))) throw new Error(`${userName} said no, so I didn't press ${s.key} (nothing after it ran either).`);
+              s.confirmed = true;
+            }
             delete s.label;
           }
           const plan = { steps: mapped, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
-          const act = () => hands('act', JSON.stringify(plan));
+          // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
+          // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
+          const act = async () => {
+            let r = await hands('act', JSON.stringify(plan)), before = [];
+            while (r.needsConfirm && Number.isInteger(r.step) && r.step >= 0 && r.step < plan.steps.length) {
+              before = [...before, ...(r.done ?? [])];
+              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx, true))) {
+                throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+              }
+              plan.steps = [{ ...plan.steps[r.step], confirmed: true }, ...plan.steps.slice(r.step + 1)];
+              r = await hands('act', JSON.stringify(plan));
+            }
+            if (r.needsConfirm) throw new Error(r.why || 'That step needs a yes first.');
+            return before.length && Array.isArray(r.done) ? { ...r, done: [...before, ...r.done] } : r;
+          };
           let res;
           try {
             try { res = await act(); }
@@ -972,7 +993,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const exists = await fs.stat(expand(p)).then(() => true, () => false);
         const v = checkWrite(p, HOME, { exists, own });
         const f = allowed(v);
-        if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't write ${p}.`);
+        if (v.level === ASK && !(await confirm(v.reason, ctx, !!v.always))) throw new Error(`${userName} said no, so I didn't write ${p}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
         await fs.writeFile(f, content);
         return `Wrote ${content.length} characters to ${f}.`;
@@ -985,7 +1006,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (!allowActions()) throw new Error(actionsOff);
         const v = classifyCommand(command, HOME, { exists: existsSync, cwd: workdir, own });
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason} Don't try to get around this; tell ${userName} what you wanted to do instead.`);
-        if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''}`, ctx))) {
+        if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''}`, ctx, !!v.always))) {
           throw new Error(`${userName} said no, so the command didn't run.`);
         }
         const [sh, shArgs, shOpts] = shellFor(command);

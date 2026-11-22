@@ -1,5 +1,5 @@
-// "Skip Allow prompts": with it on, an ASK step runs without the Allow / Don't allow question; BLOCK steps still refuse
-// and never ask. Off, the question is asked and a no keeps the step from running. Run: npm test
+// "Skip Allow prompts": with it on, an ordinary ASK step runs without the Allow / Don't allow question; deletes, kills,
+// quits, sends, pays and overwrites still ask; BLOCK steps still refuse and never ask. Off, the question is asked and a no keeps the step from running. Run: npm test
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -21,13 +21,22 @@ function runCommandWith({ skipAllow, answer }) {
   return { run, file, asked, workdir };
 }
 
-// 1. Skip on: the command runs and ask is never called.
+// 1. Skip on: an ordinary ASK command (a copy to a new file) runs and ask is never called.
 {
   const { run, file, asked, workdir } = runCommandWith({ skipAllow: true, answer: null });
-  const out = await run.execute({ command: 'rm -f x.txt' }, undefined);
+  const out = await run.execute({ command: process.platform === 'win32' ? 'copy x.txt y.txt' : 'cp x.txt y.txt' }, undefined);
   assert.deepEqual(asked, [], 'skipAllow on: no Allow question');
-  assert.equal(fs.existsSync(file), false, 'skipAllow on: the command ran');
+  assert.equal(fs.existsSync(path.join(path.dirname(file), 'y.txt')), true, 'skipAllow on: the command ran');
   assert.equal(typeof out, 'string');
+  fs.rmSync(workdir, { recursive: true, force: true });
+}
+
+// 1b. Skip on never answers a delete (owner: every deletion of anything is confirmed, no exceptions).
+{
+  const { run, file, asked, workdir } = runCommandWith({ skipAllow: true, answer: null });
+  await assert.rejects(run.execute({ command: 'rm -f x.txt' }, undefined), /said no/, 'skipAllow on: rm still asks');
+  assert.equal(asked.length, 1, 'skipAllow on: rm asks once');
+  assert.equal(fs.existsSync(file), true, 'skipAllow on: rm did not run on a no');
   fs.rmSync(workdir, { recursive: true, force: true });
 }
 

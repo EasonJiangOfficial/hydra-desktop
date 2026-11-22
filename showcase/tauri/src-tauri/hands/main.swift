@@ -369,8 +369,44 @@ func pressText(_ e: AXUIElement) -> Bool {
 // Clicks that delete, pay, send or sign out (in English and other common languages) run only when the sidecar
 // has asked the user ("confirmed").
 // Kept in sync with RISKY_CLICK in sidecar/safety.mjs.
-let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃"#, options: .caseInsensitive)
+let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃"#, options: .caseInsensitive)
 func risky(_ s: String) -> Bool { RISKY.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+
+/// Key chords that quit or delete (cmd+q, cmd+delete, cmd+opt+delete, cmd+shift+delete): what it does, or nil.
+/// Kept in sync with riskyKey in sidecar/safety.mjs. Return/Enter is checked against the window's default button.
+func riskyKey(_ combo: String) -> String? {
+    let alias = ["command": "cmd", "⌘": "cmd", "option": "opt", "alt": "opt", "⌥": "opt", "control": "ctrl", "⌃": "ctrl", "⇧": "shift", "backspace": "delete", "⌫": "delete"]
+    var parts = combo.lowercased().replacingOccurrences(of: " ", with: "").split(separator: "+").map { alias[String($0)] ?? String($0) }
+    guard let key = parts.popLast() else { return nil }
+    let mods = Set(parts)
+    guard mods.contains("cmd"), !mods.contains("ctrl") else { return nil }
+    if key == "q" && mods.count == 1 { return "quits the app" }
+    if key == "delete" && mods.isSubset(of: ["cmd", "opt", "shift"]) { return mods.contains("shift") ? "empties the Trash" : mods.contains("opt") ? "deletes at once" : "moves to the Trash" }
+    return nil
+}
+/// The words on what sits under a screen point: its title, description or value, and its parent's when it is only the
+/// text or picture inside a button.
+func wordsAt(_ p: CGPoint) -> String {
+    var hit: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &hit) == .success, var e = hit else { return "" }
+    var out: [String] = []
+    for _ in 0 ..< 2 {
+        for a in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] { if let t = attr(e, a) as? String, !t.isEmpty, t.count <= 60 { out.append(t) } }
+        guard ["AXStaticText", "AXImage", "AXUnknown"].contains(str(e, kAXRoleAttribute) ?? ""), let up = attr(e, kAXParentAttribute) else { break }
+        e = up as! AXUIElement
+    }
+    return out.joined(separator: " | ")
+}
+/// The default button's title (the one Return presses) on an app's focused window or a sheet on it.
+func defaultButtonTitle(_ app: AXUIElement) -> String? {
+    guard let f = attr(app, kAXFocusedWindowAttribute) else { return nil }
+    let win = f as! AXUIElement
+    let sheets = (attr(win, kAXChildrenAttribute) as? [AXUIElement] ?? []).filter { str($0, kAXRoleAttribute) == "AXSheet" }
+    for w in sheets + [win] {
+        if let b = attr(w, kAXDefaultButtonAttribute) { let el = b as! AXUIElement; return str(el, kAXTitleAttribute) ?? str(el, kAXDescriptionAttribute) }
+    }
+    return nil
+}
 
 /// Text fields inside web pages (browsers, Electron apps) ignore a value set through accessibility:
 /// the page never hears about it and submits an empty field. Those need real keystrokes.
@@ -1497,6 +1533,28 @@ func setFrame(_ win: AXUIElement, _ r: CGRect) -> Bool {
     return a == .success || b == .success
 }
 
+/// Why a quit can't be proved safe, or nil when every window was checked and none is edited. Browsers and Electron apps
+/// never mark unsaved work (a half-written form, a draft), and windows on other Spaces or in full screen aren't in the
+/// accessibility list, so those ask.
+func quitUnproved(name: String, bundle: URL?, listed: Int, unlisted: Int, editedCount: Int) -> String? {
+    if editedCount > 0 { return "\(name) has \(editedCount) window\(editedCount == 1 ? "" : "s") with unsaved changes." }
+    if BROWSERS.contains(name) || bundle.map({ FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path) }) == true {
+        return "\(name) doesn't tell other apps about unsaved work, so I can't check it."
+    }
+    if listed == 0 { return "I can't see any \(name) windows to check for unsaved work." }
+    if unlisted > 0 { return "\(name) has windows I can't check (on another Space or in full screen)." }
+    return nil
+}
+/// An app's ordinary windows the window server knows about, on every Space.
+func allWindowCount(_ pid: pid_t) -> Int {
+    let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    return list.filter { w in
+        guard (w[kCGWindowOwnerPID as String] as? pid_t) == pid, (w[kCGWindowLayer as String] as? Int) == 0, (w[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+              let b = w[kCGWindowBounds as String] as? [String: Any], (b["Width"] as? Double ?? 0) >= 100, (b["Height"] as? Double ?? 0) >= 100 else { return false }
+        return !((w[kCGWindowName as String] as? String) ?? "").isEmpty
+    }.count
+}
+
 func manage(_ spec: [String: Any]) -> Never {
     let what = spec["do"] as? String ?? ""
     let confirmed = spec["confirmed"] as? Bool == true
@@ -1527,7 +1585,7 @@ func manage(_ spec: [String: Any]) -> Never {
     switch what {
     case "quit":
         let unsaved = axWins.filter(edited).count
-        if unsaved > 0 && !confirmed { needYes("\(name) has \(unsaved) window\(unsaved == 1 ? "" : "s") with unsaved changes.") }
+        if !confirmed, let why = quitUnproved(name: name, bundle: app.bundleURL, listed: axWins.count, unlisted: max(0, allWindowCount(app.processIdentifier) - axWins.count), editedCount: unsaved) { needYes(why) }
         // A polite quit: the app still asks about anything unsaved itself.
         out(["ok": app.terminate(), "done": "asked \(name) to quit", "unsaved": unsaved])
     case "force_quit":
@@ -1647,6 +1705,16 @@ case "--self-test":
     check("the plan's window gone: that app's front window", currentWindow([pw(9, 7), pw(5, 1), pw(4, 1)], pinned: pw(2, 1))?.id == 5)
     check("the plan's window gone and none left: nothing", currentWindow([], pinned: pw(2, 1)) == nil)
     check("another app's windows are never taken", currentWindow([pw(9, 7), pw(8, 7)], pinned: pw(2, 1)) == nil)
+    // Security review F2/F5: more risky labels, risky chords, and quits that can't be proved safe.
+    for l in ["Don't Save", "Don’t Save", "Move to Trash", "Force Quit", "Close Without Saving", "Submit", "Confirm", "Overwrite"] { check("\"\(l)\" needs a yes", risky(l)) }
+    for l in ["Save", "Cancel", "OK", "Keep Both", "Open"] { check("\"\(l)\" is a normal click", !risky(l)) }
+    for k in ["cmd+q", "Command+Q", "cmd+delete", "cmd+backspace", "cmd+opt+delete", "cmd+shift+delete", "cmd+option+shift+delete"] { check("\(k) needs a yes", riskyKey(k) != nil) }
+    for k in ["cmd+s", "cmd+w", "delete", "return", "cmd+a", "ctrl+cmd+q", "cmd+z"] { check("\(k) is a normal key", riskyKey(k) == nil) }
+    check("quit asks when no windows are listed", quitUnproved(name: "Notes", bundle: nil, listed: 0, unlisted: 0, editedCount: 0) != nil)
+    check("quit asks when windows sit on another Space", quitUnproved(name: "Notes", bundle: nil, listed: 1, unlisted: 1, editedCount: 0) != nil)
+    check("quit asks for a browser", quitUnproved(name: "Google Chrome", bundle: nil, listed: 2, unlisted: 0, editedCount: 0) != nil)
+    check("quit asks for an edited window", quitUnproved(name: "TextEdit", bundle: nil, listed: 1, unlisted: 0, editedCount: 1) != nil)
+    check("quit goes ahead when every window was checked and is clean", quitUnproved(name: "TextEdit", bundle: nil, listed: 1, unlisted: 0, editedCount: 0) == nil)
     exit(bad == 0 ? 0 : 1)
 
 case "trusted":
@@ -2167,8 +2235,14 @@ case "act":
             done.append("scrolled \(dir)")
             controls = walk(app, w)
         case "key":
-            emitStep(i, "key", nil, label: s["key"] as? String ?? "")
             let combo = (s["key"] as? String ?? "").lowercased().replacingOccurrences(of: " ", with: "")
+            if (s["confirmed"] as? Bool) != true {
+                if let does = riskyKey(combo) { out(["ok": false, "needsConfirm": true, "step": i, "why": "Pressing \(s["key"] ?? "") \(does).", "done": done]) }
+                if ["return", "enter"].contains(combo), let b = defaultButtonTitle(app), risky(b) {
+                    out(["ok": false, "needsConfirm": true, "step": i, "why": "Return would press \"\(b)\" in \(w.app).", "done": done])
+                }
+            }
+            emitStep(i, "key", nil, label: s["key"] as? String ?? "")
             // Cmd+S in the background: its menu item is greyed out while the app is behind, so ask the app to save
             // its front document directly (no dialog for one that already has a file; a new one still needs the cursor).
             if inBackground, ["cmd+s", "command+s"].contains(combo), saveInBackground(w) { done.append("pressed \(s["key"]!) (saved)"); break }
@@ -2191,6 +2265,12 @@ case "act":
             // Points relative to the window's top-left, or global screen points when "global" is set.
             guard let x = s["x"] as? Double, let y = s["y"] as? Double else { out(["ok": false, "error": "Step \(i + 1): click_at needs x and y", "done": done]) }
             let global = s["global"] as? Bool ?? false
+            let spot = global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)
+            // Clicking by position skips the label check, so look at what is under the spot.
+            let under = wordsAt(spot)
+            if (s["confirmed"] as? Bool) != true, risky(under) {
+                out(["ok": false, "needsConfirm": true, "step": i, "why": "That spot is \"\(under.split(separator: "|").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? under)\" in \(w.app): it could delete, pay, send or sign out.", "done": done])
+            }
             emitStep(i, "click_at", nil, at: global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y))
             click(global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)); done.append("clicked at \(Int(x)),\(Int(y))")
             clickedSpot = true

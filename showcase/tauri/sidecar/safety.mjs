@@ -77,12 +77,25 @@ const bothOf = (abs) => { const r = realOf(abs); return samePath(r, abs) ? [abs]
 
 // Buttons that delete, pay, send or sign out: Sidekick needs the user's yes before clicking one,
 // even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift.
-export const RISKY_CLICK = /(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃/iu;
+export const RISKY_CLICK = /(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃/iu;
 export const isRiskyClick = (label) => RISKY_CLICK.test(String(label ?? ''));
 // Which kind of risky click a label is ("Delete post" → "delete"), so one yes can cover the same kind and no other.
 export function riskyKind(label) {
   const m = RISKY_CLICK.exec(String(label ?? ''));
   return m ? (m[1] ?? m[0]).toLowerCase().replace(/\s+/g, ' ') : null;
+}
+
+// Key chords that quit or delete: cmd+q, cmd+delete (Move to Trash in Finder), cmd+opt+delete (delete at once),
+// cmd+shift+delete (Empty Trash). Return/Enter is checked by the helper against the window's default button.
+// Kept in sync with riskyKey in hands/main.swift. Says what it does, or null.
+export function riskyKey(combo) {
+  const alias = { command: 'cmd', '⌘': 'cmd', option: 'opt', alt: 'opt', '⌥': 'opt', control: 'ctrl', '⌃': 'ctrl', '⇧': 'shift', backspace: 'delete', '⌫': 'delete' };
+  const parts = String(combo ?? '').toLowerCase().replace(/\s+/g, '').split('+').filter(Boolean).map((p) => alias[p] ?? p);
+  const key = parts.pop(), mods = new Set(parts);
+  if (!mods.has('cmd') || mods.has('ctrl')) return null;
+  if (key === 'q' && mods.size === 1) return 'quits the app';
+  if (key === 'delete' && [...mods].every((m) => ['cmd', 'opt', 'shift'].includes(m))) return mods.has('shift') ? 'empties the Trash' : mods.has('opt') ? 'deletes at once' : 'moves to the Trash';
+  return null;
 }
 
 /** Tool arguments as they go in the activity log: anything typed into fields or files becomes its length. */
@@ -127,7 +140,7 @@ export function checkWrite(p, home, { exists = false, own = null } = {}) {
     const o = norm(own, home), ro = realOf(o), within = (a) => [o, ro].some((d) => a === d || a.startsWith(d + '/'));
     if (all.every(within)) return { ...verdict(SAFE), path: abs };
   }
-  if (exists) return { ...verdict(ASK, `Overwrite ${r || abs}?`), path: abs };
+  if (exists) return { ...verdict(ASK, `Overwrite ${r || abs}?`), path: abs, always: true };
   return { ...verdict(SAFE), path: abs };
 }
 
@@ -360,6 +373,49 @@ function unrollLoop(s) {
   return pre + vals.map((x) => body.replace(new RegExp(`\\$\\{?${v}\\}?(?!\\w)`, 'g'), x)).join(' && ') + post;
 }
 
+// Owner's rule: every deletion of anything is confirmed, no exceptions; kill, quit, force quit, send, pay, overwrite and
+// move to the Trash always ask too. These verdicts carry `always`, so "Skip Allow prompts" never answers them.
+// Says why, or null.
+const ALWAYS_PROGRAMS = {
+  rm: 'This deletes files.', rmdir: 'This deletes folders.', unlink: 'This deletes files.', trash: 'This moves files to the Trash.',
+  del: 'This deletes files.', erase: 'This deletes files.', rd: 'This deletes folders.', truncate: 'This empties files.',
+  kill: 'This stops a running program.', pkill: 'This stops running apps.', killall: 'This stops running apps.',
+  osascript: 'AppleScript can quit apps, send messages or delete things.', mail: 'This sends email.', mailx: 'This sends email.', sendmail: 'This sends email.',
+};
+function alwaysAsk(text, home, cwd) {
+  const prog = program(words(text)), args = prog.args, joined = args.join(' ');
+  const name = prog.name.toLowerCase();
+  if (ALWAYS_PROGRAMS[name]) return ALWAYS_PROGRAMS[name];
+  // A shell running a command line: what that line does.
+  if (SHELLS.has(name) && /(^|\s)-(c|e)\b/.test(joined)) {
+    for (const p of splitCommand(joined.replace(/^.*?-(c|e)\s+/, '')) ?? []) { const why = alwaysAsk(p.text, home, cwd); if (why) return why; }
+  }
+  const plain = args.filter((a) => !a.startsWith('-')), abs = (t) => norm(/^~/.test(t) || isAbs(slash(t)) ? t : path.join(cwd, slash(t)), home);
+  if (['mv', 'cp', 'ditto', 'rsync', 'install', 'ln'].includes(name)) {
+    if (plain.some((t) => /(^|\/)\.Trash(\/|$)/.test(slash(t)))) return 'This moves files to the Trash.';
+    if (name === 'rsync' && /--(delete|remove-source-files)/.test(joined)) return 'This deletes files.';
+    if (name === 'mv' && plain.length >= 2) {
+      // mv takes its sources away; onto a file that's there, it replaces it.
+      const dest = abs(plain[plain.length - 1]);
+      const there = (f) => { try { return fs.statSync(f); } catch { return null; } };
+      const d = there(dest);
+      if (d && !d.isDirectory()) return 'This replaces a file that is already there.';
+      if (d && plain.slice(0, -1).some((src) => there(path.join(dest, path.basename(slash(src)))))) return 'This replaces a file that is already there.';
+    }
+    if (name !== 'mv' && plain.length >= 2) {
+      const dest = abs(plain[plain.length - 1]);
+      try { if (!fs.statSync(dest).isDirectory()) return 'This overwrites a file that is already there.'; } catch {}
+    }
+  }
+  if (name === 'find' && /(^|\s)-(delete|exec|execdir|ok|okdir)\b/.test(joined) && /-delete|\brm\b|\bmv\b|\bunlink\b/.test(joined)) return 'This deletes files.';
+  if (name === 'git' && (/\bpush\b.*(\s--force\b|\s-f\b|\s\+)/.test(' ' + joined) || /^(reset\s+.*--hard|clean\b|checkout\s+(--\s|\.)|restore\b|branch\s+.*-D\b|stash\s+(drop|clear)\b)/.test(joined))) return 'This can erase work.';
+  if ((name === 'sed' || name === 'perl') && /(^|\s)-[a-zA-Z]*i/.test(joined)) return 'This overwrites files in place.';
+  if (['curl', 'wget'].includes(name) && /(^|\s)(-X\s*(POST|PUT|PATCH|DELETE)|-d|--data\S*|-F|--form\S*|-T|--upload-file|--json|--post-(data|file))\b/i.test(' ' + joined)) return 'This sends data.';
+  if (['npm', 'pnpm', 'yarn'].includes(name) && /^(publish|unpublish)\b/.test(joined)) return 'This publishes a package.';
+  if (['brew', 'npm', 'pnpm', 'yarn', 'pip', 'pip3'].includes(name) && /^(uninstall|remove|rm|un)\b/.test(joined)) return 'This deletes installed software.';
+  return null;
+}
+
 /** `cwd`: the folder the command starts in (default home); `own`: the runner's own folder (see checkWrite). */
 export function classifyCommand(cmd, home, { exists, cwd: start = null, own = null } = {}) {
   home = slash(home);
@@ -370,16 +426,18 @@ export function classifyCommand(cmd, home, { exists, cwd: start = null, own = nu
   if (/\b(curl|wget|fetch)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da|k|fi)?sh\b/.test(s) || /\bbase64\s+(-d|--decode|-D)\b[^|]*\|\s*(ba|z)?sh\b/.test(s)) return verdict(BLOCK, 'Downloading a script and running it straight away skips every check.');
   const parts = splitCommand(s);
   if (!parts) return verdict(ASK, "I couldn't read that command clearly.");
-  let level = SAFE, reason = '';
+  let level = SAFE, reason = '', always = false;
   // The folder each part runs in, so relative paths after a cd are checked where they really point. null: unknown.
   let cwd = start ? norm(start, home) : home;
   for (const p of parts) {
     let v = checkSimple(p.text, p.pipeIn, home, cwd ?? home, { own });
     if (cwd == null && v.level === SAFE) v = verdict(ASK, "I can't tell which folder that runs in.");
+    if (v.level !== BLOCK) { const why = alwaysAsk(p.text, home, cwd ?? home); if (why) { always = true; if (v.level === SAFE) v = verdict(ASK, why); } }
     for (const r of redirectTargets(p.text)) {
       const t = /^~/.test(r) || isAbs(slash(r)) ? r : path.join(cwd ?? home, slash(r));
       const w = checkWrite(t, home, { exists: !exists || !!exists(norm(t, home)), own });
       if (w.level === BLOCK) return verdict(BLOCK, w.reason);
+      if (w.always) always = true; // into a file that's already there (>> too: it changes the file)
       if ((w.level === ASK || cwd == null || /[$`*?{]/.test(r)) && v.level === SAFE) v = verdict(ASK, w.reason);
     }
     const ws = words(p.text);
@@ -394,7 +452,7 @@ export function classifyCommand(cmd, home, { exists, cwd: start = null, own = nu
   }
   // Command substitution and background jobs change things in ways the parts don't show.
   if (level === SAFE && (/\$\(|`/.test(s) || /(^|\s)&\s*$/.test(s))) level = ASK;
-  return verdict(level, reason);
+  return always && level === ASK ? { ...verdict(level, reason), always } : verdict(level, reason);
 }
 
 // ---------- opening things and fetching pages ----------
