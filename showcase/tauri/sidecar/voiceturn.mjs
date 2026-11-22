@@ -60,3 +60,10 @@ export function addOnTo(text, { busy, addInput, enqueue }) {
   enqueue(text, { byVoice: true });
   return 'next';
 }
+
+/** Words added into the session that its run ended before answering (agent.unanswered(): max turns, an error, Stop),
+ *  named aloud and on screen, never dropped (R11e-6). '' when there are none. */
+export function unansweredNote(list) {
+  const said = (Array.isArray(list) ? list : []).map((t) => String(t)).map((t) => (t.startsWith(INPUT_PREFIX) ? t.slice(INPUT_PREFIX.length) : t).trim()).filter(Boolean);
+  return said.length ? `\n(I didn't get to what you added: ${said.map((t) => `"${t}"`).join(', ')}. Say it again.)` : '';
+}

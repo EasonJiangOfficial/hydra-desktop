@@ -433,6 +433,8 @@ async function* claudeCodeLoop(messages, o) {
     Object.assign(run.link, link);
     input = new Channel();
     input.push(toSdkUserMessage(first));
+    // A spare that died while parked: what was added into its input goes into the fresh one too (R11e-8).
+    for (const a of added) if (!a.done) input.push(a.m);
     const w = s ? await s.warm : null;
     warmUsed = !!w;
     q = w ? w.query(input) : (o.query ?? sdkQuery)({ prompt: input, options: run.options });
@@ -459,7 +461,7 @@ async function* claudeCodeLoop(messages, o) {
     const m = toSdkUserMessage([{ type: 'text', text: String(text) }]);
     input.push(m);
     addedAt = ++step;
-    added.push({ at: addedAt, text: String(text), uuid: m.uuid });
+    added.push({ at: addedAt, text: String(text), uuid: m.uuid, m });
     return true;
   });
 
@@ -512,9 +514,10 @@ async function* claudeCodeLoop(messages, o) {
     }
   } catch (e) { cut = true; throw e; } finally {
     o.takeInput?.(null);
-    // Claude Code named what it took: on a cut, every addition it didn't take is unanswered, whenever it was sent (one
-    // sent during the final answer's first token is before finalAt, R11c-B1 follow-up). Else by step, as before.
-    o.onLeft?.(added.filter((a) => !a.done && ((cut && byUuid) || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
+    // Claude Code named what it took: unless Stop ended it, every addition it didn't take is unanswered, whenever it was
+    // sent (one sent during the final answer's first token is before finalAt, R11c-B1 follow-up), on a cut or a stream
+    // that simply ended (R11e-7). Else by step, as before.
+    o.onLeft?.(added.filter((a) => !a.done && ((byUuid && !aborted) || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);

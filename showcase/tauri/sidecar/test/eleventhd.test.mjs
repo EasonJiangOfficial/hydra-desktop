@@ -66,7 +66,7 @@ console.log(JSON.stringify(o));
   reset({ actFails: true });
   answer = 'Allow';
   const e4 = await T('act_in_app').execute({ target: 'Messages', steps: [{ do: 'fill', field: 'To', text: 'x' }] }, {}).then(() => null, (e) => e.message);
-  assert.ok(e4 && !e4.includes('9921') && /still shows/.test(e4), e4);
+  assert.ok(e4 && !e4.includes('9921') && /didn't work in Messages/.test(e4), e4);
 }
 
 // ---- F2: ask_mac stopped while it sleeps between polls (the real delay rejects) or while its POST is out: the

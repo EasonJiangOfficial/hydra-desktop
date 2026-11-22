@@ -62,7 +62,7 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(a) + '\\n');
 const n = JSON.parse(fs.readFileSync(${JSON.stringify(next)}, 'utf8'));
 const win = n.window ?? { id: 3, app: 'Terminal', title: 'zsh', bounds: [0, 0, 800, 600] };
 let o = { ok: true, window: win, controls: [], texts: [], note: '' };
-if (a[0] === 'find-text') o = { ok: true, matches: n.find ?? [] };
+if (a[0] === 'find-text') o = { ok: true, matches: (n.find ?? []).map((m) => ({ window: win, ...m })) }; // the real helpers name each match's window
 if (a[0] === 'ocr-find') o = { ok: true, matches: n.ocr ?? [] };
 if (a[0] === 'windows') o = { ok: true, windows: n.windows ?? [] };
 if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = a[2] === 'screen' ? { ok: true, file: a[1], what: 'screen', bounds: [0, 0, 1440, 900], shown: n.shown ?? [], pixels: [1440, 900] } : { ok: true, file: a[1], window: win, pixels: [800, 600] }; }

@@ -100,7 +100,7 @@ export function askMacTool({ api, turn, alive = async () => true, signal: turnSi
         throw new Error(r.status === 409 ? 'This turn is over, so your Mac was not asked.' : `Hydra did not pass this to your Mac (${made?.error ?? r.status}).`);
       }
       const id = made.subTurnId;
-      let beat = now(), sofar = '';
+      let beat = now(), sofar = '', claimed = false;
       const tooLong = () => {
         unsure = true;
         log('ask_mac', { subTurn: id, status: 'too_long', unsure: true });
@@ -112,9 +112,16 @@ export function askMacTool({ api, turn, alive = async () => true, signal: turnSi
         const g = await api.req(`/api/agent/relay/subturn?id=${encodeURIComponent(id)}`, { signal, timeout: within() }).catch(() => null);
         const res = g?.ok ? subturnResultSchema.safeParse(await g.json().catch(() => null)) : null;
         if (res?.success && SUBTURN_ENDED.has(res.data.status)) {
-          log('ask_mac', { subTurn: id, status: res.data.status, chars: res.data.text.length });
-          return res.data.text.trim() || (res.data.status === 'done' ? 'Your Mac finished and said nothing.' : 'Your Mac could not finish this.');
+          const { status } = res.data, text = res.data.text.trim();
+          // Expired, or failed once the Mac had it (a Mac that lost the network answers its re-claim with mac_failed):
+          // it may have acted already, so it is never sent again in this turn. Only "offline" surely never ran (R11e-5).
+          const ran = status === 'expired' || (status === 'error' && (claimed || text !== MAC_OFFLINE_TEXT));
+          if (ran) unsure = true;
+          log('ask_mac', { subTurn: id, status, chars: text.length, ...(ran ? { unsure: true } : {}) });
+          if (ran) return `${text || 'Your Mac could not finish this.'}\nIt may have done some of it already. Do not call ask_mac again in this turn: tell the owner what his Mac said and to check there.`;
+          return text || (status === 'done' ? 'Your Mac finished and said nothing.' : 'Your Mac could not finish this.');
         }
+        if (res?.success && res.data.status === 'claimed') claimed = true;
         if (res?.success && res.data.text.trim()) sofar = res.data.text.trim();
         // Stopped after the sub-turn was made: it may still be running on the Mac.
         if (signal?.aborted) { unsure = true; throw new Error('Stopped.'); }

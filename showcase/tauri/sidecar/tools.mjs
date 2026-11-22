@@ -287,10 +287,11 @@ export function webQuestion(name, a = {}) {
  *  searches every window it matches, so the windows checked first are found the same way (R11c review, F1). Both
  *  helpers' browser lists and the program's file name: matching more only asks about more. */
 const HELPER_BROWSERS = new Set(['brave browser', 'google chrome', 'safari', 'arc', 'firefox', 'microsoft edge', 'opera', 'vivaldi', 'chromium', 'orion', 'zen', 'chrome', 'msedge', 'brave', 'librewolf', 'waterfox', 'floorp', 'thorium']);
+// NFC: Swift's String compare treats a decomposed "ü" as the precomposed one (R11e-3).
 export function appMatches(w, want) {
-  const x = String(want ?? '').trim().toLowerCase().replace(/\.exe$/, '');
+  const x = String(want ?? '').trim().toLowerCase().normalize('NFC').replace(/\.exe$/, '');
   if (!x) return false;
-  const names = [w?.app, w?.exe].map((n) => String(n ?? '').toLowerCase()).filter(Boolean);
+  const names = [w?.app, w?.exe].map((n) => String(n ?? '').toLowerCase().normalize('NFC')).filter(Boolean);
   if (['browser', 'web browser', 'my browser'].includes(x)) return names.some((n) => HELPER_BROWSERS.has(n));
   return names.some((a) => a === x || a.includes(x) || x.includes(a));
 }
@@ -444,9 +445,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // ponytail: an app's small windows the helper doesn't list (a popover beside a listed editor window) are not asked
   // about on their own; ask for the whole app every time if that matters.
   // 'window:<id>' (the window of a screenshot): only that window is read.
+  // Returns { front, ids }: the windows checked. The helper's own search can reach others (past its 30-window list, a
+  // front app that changed since, R11e-2..4), so draw keeps only what these show.
   async function searchedShows(spec, ctx, ok = null) {
     const all = (await hands('windows').catch(() => null))?.windows ?? [];
-    if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN });
+    if (spec === 'screen') return windowShows(all, ctx, { whole: WHOLE_SCREEN }).then(() => ({}));
     const front = (await hands('locate', spec).catch(() => null))?.window ?? null;
     const name = spec.startsWith('app:') ? spec.slice(4) : null;
     const app = String(front?.app ?? name ?? '').trim();
@@ -455,7 +458,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     // front app's windows.
     const same = (w) => (name != null ? appMatches(w, name) : !!app && String(w.app ?? '').toLowerCase() === app.toLowerCase());
     const wins = [...(front ? [front] : []), ...(one ? [] : all.filter((w) => same(w) && w.id !== front?.id))];
-    return windowShows(wins, ctx, { ok, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
+    await windowShows(wins, ctx, { ok, whole: wins.length ? null : `Look at ${one ? 'that window' : app ? `the ${app} windows` : 'the app in front'}? I can't check what they show.` });
+    return { front, ids: new Set(wins.map((w) => w.id)) };
   }
   // The helper's screenshot: one window or app (even behind others), or the screen; shrunk by the helper itself.
   async function handsShot(file, t, ctx) {
@@ -650,12 +654,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         // The window the latest screenshot showed, when there's one from this request: the front app can change
         // between looking and drawing. That window is the one checked (R11c-1).
         const where = lastShot?.turn === turn && lastShot.win != null ? `window:${lastShot.win}` : spec;
-        await gate(where);
-        return (await hands('ocr-find', where, String(find), 'all').catch(() => null))?.matches ?? [];
+        const checked = await gate(where);
+        // A relay turn: the very window checked, not the front app as it is a moment later (R11e-4).
+        return (await hands('ocr-find', checked?.front ? `window:${checked.front.id}` : where, String(find), 'all').catch(() => null))?.matches ?? [];
       },
       async findText(find) {
         if (!HANDS) throw new Error('Finding words on screen needs the Hydra app; take a screenshot and give x, y instead.');
-        await gate();
+        const checked = await gate();
         // Text read off the screen: one match, or where each of several is, so the right one can be picked with within.
         const readOne = async () => {
           const all = await this.textAll(find);
@@ -667,6 +672,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         for (let k = 0; ; k++) {
           // "front" searches every window of the front app; text is often in a window behind the frontmost one.
           const res = await hands('find-text', spec, find, 'scroll').catch((e) => (k < (retry ? 4 : 0) ? { matches: [] } : Promise.reject(e)));
+          // A relay turn: only words from the windows checked (R11e-2..4).
+          if (checked?.ids) res.matches = (res.matches ?? []).filter((x) => checked.ids.has(x?.window?.id));
           const m = pickTextMatch(res.matches, find);
           if (m) return m;
           // Not a whole label: the exact words inside longer text, or in an image or canvas, read off the screen.
@@ -1055,11 +1062,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
           // A relay turn, before the window is said yes to (R11c review, F4): the helper's words quote the window (what a
           // hover showed, a click's whole text, what a field shows), in what it did and in its errors. The model gets
-          // only the approved steps' own words, and errors with quoted text taken out.
+          // only the approved steps' own words, and errors as their step number alone: a quote inside a field's own text
+          // defeats any scrub of the helper's words (R11e-1).
           const plain = (list) => stepsText(list.map(({ shown, ...st }) => st), { clipboard: false }).replace(/^\d+\. /gm, '').replace(/\n/g, ', ');
           const ran = [];
           const told = (before) => (remote() ? plain(ran) : before.join(', '));
-          const unq = (t) => (remote() ? String(t ?? '').replace(/"[^"]*"|“[^”]*”/g, '(words not shown)') : t);
+          const unq = (t) => (remote() ? `${/^Step \d+/.exec(String(t ?? ''))?.[0] ?? 'A step'} didn't work in ${inWhat}. What its window shows isn't passed on until ${userName} says yes to reading it.` : t);
           const actOnce = () => hands('act', JSON.stringify(plan)).catch((e) => { throw remote() ? new Error(unq(e?.message ?? e)) : e; });
           const act = async () => {
             let r = await actOnce(), before = [];

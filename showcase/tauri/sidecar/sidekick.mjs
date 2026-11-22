@@ -48,7 +48,7 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { addOnTo, createSpokenTrack, startFiller } from './voiceturn.mjs';
+import { addOnTo, createSpokenTrack, startFiller, unansweredNote } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -1747,6 +1747,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     doneWriting();
     if (hold != null) { hold += echo.flush(); release(); }
     { const t = echo.flush(); if (!launched) { reply.push(t); lastReply += t; } }
+    // Speech added while it worked that the run ended before answering (max turns, Stop): named, never dropped (R11e-6).
+    { const n = unansweredNote(agent?.unanswered?.()); if (n) { reply.push(n); lastReply += n; } }
     reply.finish();
     const held = cues?.flush(); if (held) showText(held);
     releaseBeat(false);
@@ -1780,14 +1782,16 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       if (retryCount < 2 && firstFree(chainOrder(), limits).pick) {
         // The backup says how to give Roamies more of ChatGPT, since the error that would have isn't shown.
         const fix = explain('reply', err).where === 'chatgpt' ? chatGPTUsageHelp() : '';
-        retryNext = { text, image, note, byVoice, listenAfter, news, info: { text, from: modelName(config.model), untilText: untilWords(lim.until), kind: lim.kind, count: retryCount + 1, fix } };
+        // What they added while it worked goes along with the retry (R11e-6).
+        const again = [text, ...(agent?.unanswered?.() ?? [])].join('\n\n');
+        retryNext = { text: again, image, note, byVoice, listenAfter, news, info: { text: again, from: modelName(config.model), untilText: untilWords(lim.until), kind: lim.kind, count: retryCount + 1, fix } };
       }
     }
     // stopped: this ending isn't a finished task (a retry follows, or it was stopped quietly), so no 'done' chime.
     if (retryNext) ui({ kind: 'agent', e: { type: 'done', stopped: true } });
     else if (controller.signal.aborted && quiet) ui({ kind: 'agent', e: { type: 'done', stopped: true } });
     else {
-      const msg = stalled ? stallMessage() : controller.signal.aborted ? 'Okay, stopping.' : aloud(problem('reply', err, { who: PROVIDER_LABELS[config.provider] }));
+      const msg = `${stalled ? stallMessage() : controller.signal.aborted ? 'Okay, stopping.' : aloud(problem('reply', err, { who: PROVIDER_LABELS[config.provider] }))}${unansweredNote(agent?.unanswered?.())}`;
       console.error('prompt failed', err);
       ui({ kind: 'agent', e: { type: 'error', message: msg, speech: voice?.id ?? null } });
     }
