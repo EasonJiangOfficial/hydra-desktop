@@ -332,20 +332,23 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.match(side, /wake: phraseOn\(\), wakeName: config\.wakeName \|\| '', wakePhrase: wakePhraseNow\(\),/, 'the wake phrase reaches the helper; it listens asleep too');
   assert.match(side, /const wakePhraseNow = \(\) => \(servedNow\('wakePhrase'\) && wakePhraseFor\(agentSettings\)\) \|\| config\.wakePhrase \|\| `Hey \$\{wakeName\(config\)\}`;/, 'Hydra\'s phrase only when a read sent one (R10-14), else the Mac\'s own');
   assert.match(side, /if \(!asleep && why !== 'talk' && why !== 'phrase'\)/, 'a phrase wake keeps its own take (no greeting over the owner)');
-  assert.match(side, /state === 'listening' && busy && m\.mode === 'wake'\) \{ addOnTake = true;/, 'the phrase while thinking adds on');
+  // Build 4 E1 (C1): every take while Hydra works adds on (whileBusy: behavior in build4e1.test.mjs); no take or request
+  // cancels a turn quietly any more, only sleep does.
+  assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{ addOnTake = true; hush\(true\);/, 'any take while thinking adds on');
+  assert.doesNotMatch(side, /interruptQuietly\('listening'\)|interruptQuietly\('new request'\)/, 'never a quiet cancel by a take or a request');
   assert.match(side, /if \(addOnTake\) \{ addOnTake = false; if \(addOn\(text\)\) return; \}/);
   assert.match(side, /const into = addOnTo\(text, \{ busy, addInput: \(t\) => agent\?\.addInput\?\.\(t\), enqueue \}\);/, 'addOnTo (behavior in voiceturn.test.mjs)');
   assert.match(side, /await relaySession\(\{\n\s+agent: agentRun, text: said\.text, h,/, 'relay additions into the session (relaySession: behavior in relayup.test.mjs)');
   assert.match(side, /if \(m\.via === 'barge'\) noteInterrupted\(\);/, 'barge-in notes what was heard');
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');
-  assert.match(side, /const noFiller = startFiller\(\{ voice: !intro && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \}\);/, 'a filler after 1.1 s, never muted (startFiller: behavior in voiceturn.test.mjs)');
+  assert.match(side, /const progress = turnProgress = startProgress\(\{ voice: !intro && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \|\| voiceBusy,/, 'a filler after 1.1 s and progress lines, never muted (startProgress: behavior in voiceturn.test.mjs, build4e1.test.mjs)');
   assert.match(side, /if \(!voiceMuted\) voice\?\.beat\(\); \/\/ a tool starts/, 'or when a tool starts');
   assert.match(side, /listensAfter\(lastReply, true\)/, 'a follow-up window after every answer');
   assert.match(side, /const tts = \(\) => \(MAC && hydraKey && !hydraRevoked \? TTS\.voicestudio :/, 'paired: every sentence from /api/voice/tts');
   assert.match(side, /function nativeSpeech\(m\) \{ if \(nativeVoice\(\)\) send\(\{ type: 'voice_play', msg: m \}\); \}/, 'played by the voice helper');
   assert.match(side, /pushWeb\(\{ reply: \{ id: replyNow\.id, text: stripEmotes\(replyNow\.text\), final \} \}\);/, 'no emote tags in the window');
   assert.match(side, /e\.type === 'tool' && replyNow\) \{\n    replyNow\.text = '';/, 'narration before a tool is not reply text');
-  assert.match(side, /assistant: stripEmotes\(/, 'nor in the shared thread');
+  assert.match(side, /const shown = stripEmotes\(/, 'nor in the shared thread');
   assert.match(brain, /settings: \(\) => agentSettings\.refresh\(\)/, 'the server brain reads the settings per turn');
   const host = fs.readFileSync(new URL('../../../roamies/host.js', import.meta.url), 'utf8');
   assert.match(host, /m\.kind === 'voice_native'\) \{ Roamie\.voiceOut\?\.setNative\?\.\(m\.on\);/);

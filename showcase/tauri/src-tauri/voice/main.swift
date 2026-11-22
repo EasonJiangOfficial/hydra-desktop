@@ -637,9 +637,10 @@ enum SleepWord {
         defer { words = next }
         return next != words
     }
-    static func heard(in text: String) -> Bool {
+    /// strict (while Hydra works on a turn): its exact words only, never a letter off, so a near miss can't end the work.
+    static func heard(in text: String, strict: Bool = false) -> Bool {
         let got = Spoken.words(text).map(\.word)
-        return got.indices.contains { Spoken.follows(words, in: got, at: $0, loose: true) != nil }
+        return got.indices.contains { Spoken.follows(words, in: got, at: $0, loose: !strict, exact: strict) != nil }
     }
 }
 
@@ -1015,6 +1016,9 @@ final class Voice {
         if let until = calibrateUntil, now > until { finishCalibration(nil) }
         let clapWanted = clapOn || bargeOn && speaking || calibrateUntil != nil || clapMeter
         if clapWanted != hub.has("clap") { if clapWanted { hub.add("clap", claps.feed) } else { hub.remove("clap") } }
+        // Hydra's voice on the output-only engine (no echo reference): the room hears it as it is, so a clap must clear
+        // the calibrated or Medium level, whatever the slider says (C6).
+        claps.setGuarded(speaking && !hub.echoCancel)
         let take = phase == .armed || phase == .holding || phase == .handsFree || phase == .finishing
         if speaking { spokeAt = now }
         let wanted = Self.micWanted(allowed: micAllowed, take: take, wake: phase == .wake, clap: clapWanted, barging: bargeCan && speaking, playingInMic: out.busy && hub.echoCancel)
@@ -1246,9 +1250,9 @@ final class Voice {
         if !confirmed { wakeText = text; heardAt = now }
         tentative = nil
         let open = !confirmed && WakeWord.endsOpen(text)
-        if SleepWord.heard(in: text) {
+        if SleepWord.heard(in: text, strict: wakeHold) {
             if open { tentative = (text, now); return }
-            wakeLog("heard the sleep word"); emit(["type": "sleep_word"]); wakeMiss = nil; wakeText = ""; wakeLoud = 0; recycleWake(now, preroll: false); return
+            wakeLog("heard the sleep word\(wakeHold ? " (exact, while Hydra answers)" : ""): \"\(text.prefix(120))\""); emit(["type": "sleep_word"]); wakeMiss = nil; wakeText = ""; wakeLoud = 0; recycleWake(now, preroll: false); return
         }
         let (rest, d, miss) = WakeWord.scan(text)
         guard let rest else { if let miss { wakeMiss = miss }; return }
@@ -1272,7 +1276,7 @@ final class Voice {
     /// The recogniser's other readings while wake listening: one that has the sleep word or the phrase, ended (not a word
     /// still being written), counts as hearing it.
     private func heardAlternatives(_ alts: [String]) {
-        for t in alts where !WakeWord.endsOpen(t) && (SleepWord.heard(in: t) || WakeWord.match(t) != nil) {
+        for t in alts where !WakeWord.endsOpen(t) && (SleepWord.heard(in: t, strict: wakeHold) || WakeWord.match(t) != nil) {
             wakeLog("heard it in another reading")
             heardWhileWaiting(t, confirmed: true)
             return
@@ -1561,6 +1565,16 @@ if args.contains("--test-wake") {
     sleeps("three keel", true)
     SleepWord.set("")
     sleeps("Hydra, sleep", true)
+    // Build 4 E1 (C5): while a turn runs only the exact words count.
+    func strictly(_ text: String, _ want: Bool) { let got = SleepWord.heard(in: text, strict: true); print("\(got == want ? "ok" : "FAIL") strict sleep \"\(text)\" -> \(got)"); if got != want { bad += 1 } }
+    strictly("Hydra, sleep.", true)
+    strictly("Hydro sleep", false)
+    strictly("Okay Hidra sleep now", false)
+    SleepWord.set("Sleep beast")
+    strictly("Sleep beast", true)
+    strictly("sleep least", false)
+    sleeps("sleep least", true)
+    SleepWord.set("")
     // A later reading of the take that no longer matches the phrase: its words still come off.
     func dropped(_ n: Int, _ text: String, _ want: String) { let got = WakeWord.dropping(n, from: text); print("\(got == want ? "ok" : "FAIL") drop \(n) \"\(text)\" -> \"\(got)\""); if got != want { bad += 1 } }
     dropped(2, "Hey Hyde, what time is it?", "what time is it?")

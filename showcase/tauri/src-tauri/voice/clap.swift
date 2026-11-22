@@ -24,6 +24,8 @@ final class ClapDetector {
     var calibration: Calibration?
     /// Calibrating: every transient is reported (onTransient) whatever its level, and nothing wakes.
     var calibrating = false
+    /// Hydra's voice plays with no echo reference (C6): level and rise never go below the calibrated or Medium ones.
+    var guarded = false
     let rate: Double
     private let hop: Int
     private var frame: [Float] = []
@@ -73,14 +75,16 @@ final class ClapDetector {
 
     /// The quietest clap peak that counts, in dBFS: -27 / -38 / -49 at Low / Medium / High; from the owner's own claps
     /// when calibrated (12 dB under them at Medium, so a softer clap still counts).
-    var levelDb: Double {
-        if let c = calibration { return c.peakDb - 6 - 12 * sensitivity }
-        return -20 - 36 * sensitivity
-    }
+    var levelDb: Double { guarded ? max(level(sensitivity), level(0.5)) : level(sensitivity) }
     /// How far a clap's onset must rise over the room and the moment before it: 18 / 15 / 12 dB.
-    var riseDb: Double {
-        if let c = calibration { return max(10, min(20, c.riseDb - 4 - 6 * (sensitivity - 0.5))) }
-        return 20 - 10 * sensitivity
+    var riseDb: Double { guarded ? max(rise(sensitivity), rise(0.5)) : rise(sensitivity) }
+    private func level(_ s: Double) -> Double {
+        if let c = calibration { return c.peakDb - 6 - 12 * s }
+        return -20 - 36 * s
+    }
+    private func rise(_ s: Double) -> Double {
+        if let c = calibration { return max(10, min(20, c.riseDb - 4 - 6 * (s - 0.5))) }
+        return 20 - 10 * s
     }
 
     /// The loudest frame since the last read, then starts over.
@@ -225,6 +229,12 @@ final class ClapTap {
         lock.lock(); self.sensitivity = sensitivity; self.calibration = calibration; det?.sensitivity = sensitivity; det?.calibration = calibration; lock.unlock()
     }
     func setCalibrating(_ on: Bool) { lock.lock(); calibrating = on; det?.calibrating = on; lock.unlock() }
+    private var guarded = false
+    /// Hydra's voice plays with no echo reference (main queue, each mic tick); a change is logged once.
+    func setGuarded(_ on: Bool) {
+        lock.lock(); let changed = guarded != on; guarded = on; det?.guarded = on; lock.unlock()
+        if changed && Self.lines { log(on ? "clap level held at Medium or calibrated: Hydra speaks with no echo reference" : "clap level back to the setting") }
+    }
     /// The live clap level for the panel: the loudest frame since the last read, the room's floor, what a clap needs.
     func meter() -> (db: Double, floor: Double, needs: Double)? {
         lock.lock(); defer { lock.unlock() }
@@ -240,6 +250,7 @@ final class ClapTap {
         if det == nil || det!.rate != rate {
             let d = ClapDetector(rate: rate, sensitivity: sensitivity, calibration: calibration)
             d.calibrating = calibrating
+            d.guarded = guarded
             if Self.lines { d.onCandidate = { log($0) } }
             let tell = onTransient
             d.onTransient = { p, r in DispatchQueue.main.async { tell(p, r) } }
@@ -335,8 +346,9 @@ enum ClapTest {
         }
     }
 
-    static func wakes(_ buf: [Float], rate: Double, chunk: Int = 1024, sensitivity: Double = 0.5, calibration: ClapDetector.Calibration? = nil) -> Int {
+    static func wakes(_ buf: [Float], rate: Double, chunk: Int = 1024, sensitivity: Double = 0.5, calibration: ClapDetector.Calibration? = nil, guarded: Bool = false) -> Int {
         let det = ClapDetector(rate: rate, sensitivity: sensitivity, calibration: calibration)
+        det.guarded = guarded
         if ProcessInfo.processInfo.environment["CLAP_LINES"] != nil { det.onCandidate = { print(String(format: "    %.2f ", det.now) + $0) } }
         var n = 0, i = 0
         while i < buf.count { let j = min(buf.count, i + chunk); if det.feed(Array(buf[i ..< j])) { n += 1 }; i = j }
@@ -410,6 +422,12 @@ enum ClapTest {
             // Calibrated to claps this faint, Medium hears them; calibrated to loud ones, it doesn't.
             check("\(r) Hz: the same, calibrated to the owner's faint claps", wakes(b, rate: rate, calibration: .init(peakDb: -36, riseDb: 26)), 1)
             check("\(r) Hz: the same, calibrated to loud claps", wakes(b, rate: rate, calibration: .init(peakDb: -6, riseDb: 50)), 0)
+            // Build 4 E1 (C6): Hydra's voice with no echo reference: High holds at Medium (or calibrated) for that faint pair;
+            // a normal clap still counts, and so does one at the owner's calibrated level.
+            check("\(r) Hz: the faint pair at High while Hydra speaks with no echo reference", wakes(b, rate: rate, sensitivity: 0.8, guarded: true), 0)
+            check("\(r) Hz: the same at the owner's faint calibration while Hydra speaks", wakes(b, rate: rate, calibration: .init(peakDb: -36, riseDb: 26), guarded: true), 1)
+            var g = base(); clap(&g, at: 1.0, rate: rate, rng: &rng); clap(&g, at: 1.45, rate: rate, rng: &rng)
+            check("\(r) Hz: a real double clap at High while Hydra speaks with no echo reference", wakes(g, rate: rate, sensitivity: 0.8, guarded: true), 1)
             // R11-6: "Clap twice" calibrates to a double clap, never to typing (two quick key pairs, 50 ms apart each).
             b = base(); clap(&b, at: 1.0, rate: rate, rng: &rng); clap(&b, at: 1.45, rate: rate, rng: &rng)
             check("\(r) Hz: calibrating to a double clap (calibrations)", calibrates(b, rate: rate), 1)

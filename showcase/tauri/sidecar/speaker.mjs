@@ -51,6 +51,10 @@ const RECENT = 8; // a beat isn't picked again until this many others have playe
 // own voice when no answer has started within about 1.1 s or a tool starts; never the same twice in a row, never part
 // of the answer (not stored, not shown), not when muted or once the answer is streaming.
 export const FILLERS = ['Let me check.', 'One sec.', 'Let me see.', 'Checking that now.', 'Give me a second.', 'Let me look.', 'Hang on.', 'Just a moment.', 'Let me pull that up.'];
+// Hydra's progress lines (owner: "it's still not saying phrases like "still checking" "almost there""): one each time
+// about 8 s pass in a working turn with nothing new (voiceturn.mjs startProgress), never the same twice in a row. The web
+// keeps the same list (src/components/agent/words.ts PROGRESS; docs/BRIDGE.md, Voice) so every surface says the same.
+export const PROGRESS = ['Still checking.', 'Still on it.', 'Almost there.', 'One more moment.', 'Still working on it.', 'Nearly there.', 'Bear with me.', 'Still going.'];
 /** A filler, never the one said last. */
 export function pickFiller(last, list = FILLERS, random = Math.random) {
   const pool = list.filter((f) => f !== last);
@@ -242,6 +246,14 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         v.say(lastFiller);
         return true;
       },
+      // A progress line or an ask said in the turn (voiceturn.mjs): allowed after the answer began, never once it ended.
+      progress(line, kind = 'progress') {
+        if (done || !String(line ?? '').trim()) return false;
+        kinds.push(true);
+        log('speech_beat', { id, ms: Date.now() - t0, [kind]: true });
+        v.say(line);
+        return true;
+      },
       end() { if (!done) v.end(); },
       abort() { if (done) return; done = true; v?.abort(); if (current === me) current = null; },
     };
@@ -330,6 +342,14 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         spoken += phrase.length + 1; // played ahead of the reply, so the feelings after it start later
         if (shippedBeat) emit({ kind: 'speech', id, rate: shippedBeat.rate, pcm: shippedBeat.pcm });
         else for (const pcm of chunks) emit({ kind: 'speech', id, rate: P.play ?? P.rate, pcm });
+        return true;
+      },
+      // A progress line or an ask said in the turn (voiceturn.mjs): allowed after the answer began, never once it ended.
+      // ponytail: its audio counts as answer audio in the heard track; a filler flag per chunk would make that exact.
+      progress(line, kind = 'progress') {
+        if (done || ended || !String(line ?? '').trim()) return false;
+        log('speech_beat', { id, ms: Date.now() - t0, [kind]: true });
+        mark(line); v.say(line);
         return true;
       },
       end() { if (done || ended) return; ended = true; v.end(); },

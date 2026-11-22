@@ -83,8 +83,17 @@ digits and dashes (6 to 20); the device key it is traded for goes to the Keychai
   turns relayed from the web, the phone and routines (effort_routine for a routine, effort_live otherwise).
 - Wake: the phrase wakes it from sleep too, and its take goes on at once; after every spoken answer a follow-up window
   (about 8 s) listens without the phrase. The pill beside the cursor shows only for a take from the talk keys.
-- While Hydra thinks, the phrase opens a short take whose words join the running turn; the sleep word cancels it and
-  sleeps. Talking over Hydra while it speaks stops the voice at once; the next turn knows what was heard.
+- While Hydra works on a turn, every take (the phrase, a double clap, the talk keys, talking over it) adds its words to
+  the running turn; its voice holds while the owner talks and goes on after, and a take that hears nothing leaves the
+  turn as it was. Only Stop and sleep end a turn; while one runs, the sleep word needs its exact words. Talking over
+  Hydra after the turn, while it still speaks, stops the voice at once; the next turn knows what was heard.
+- A spoken turn says an opener at about 1.1 s, then a progress line each time about 8 s pass with nothing new (never
+  the same twice in a row, never over the owner or an ask). The lines, which the web's `words.ts` keeps too:
+  `Still checking.`, `Still on it.`, `Almost there.`, `One more moment.`, `Still working on it.`, `Nearly there.`,
+  `Bear with me.`, `Still going.` (sidecar `speaker.mjs` PROGRESS).
+- An Allow ask in a spoken turn is said aloud ("Can I open ui.elevenlabs.io? Say yes or no."); a clear spoken yes or no
+  answers it. After 60 s with no answer Hydra says "I didn't hear a yes, so I skipped opening it." and the tool gets a
+  no. A turn that ends without an answer says why in one short line, on screen always and aloud in a spoken turn.
 - Hydra's voice on the Mac is Fish through `/api/voice/tts` (device key), played by the voice helper in the same
   voice-processing engine as the mic (the echo canceller's reference), with other audio never ducked and never muted
   by mute-while-listening.
