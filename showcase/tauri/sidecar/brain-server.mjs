@@ -29,7 +29,7 @@ import { z } from 'zod';
 import { HYDRA_ORIGIN, createHydraTools, delay, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
 import { askSummary, authStale, connectorGroup, connectorLevel, createRelay, relaySession, toolFilter, turnPrompt } from './relay.mjs';
 import { LIMITS, subturnResultSchema } from './relayschema.mjs';
-import { SAFE } from './safety.mjs';
+import { SAFE, deletesCall } from './safety.mjs';
 import { SETTINGS_DEFAULTS, brainFor, createSettingsWatch } from './agentsettings.mjs';
 import { FinalText } from './reply.mjs';
 
@@ -202,7 +202,7 @@ export function brainGate({ approve, alive = async () => true, may = null, log =
     if (v.level === SAFE) return true;
     if (v.level === 'block') return false;
     const app = c.server.replace(/^claude_ai_/, '').replace(/_/g, ' ');
-    if ((await approve({ summary: askSummary(app, c.tool, input), danger: true })) !== 'approved') return false;
+    if ((await approve({ summary: askSummary(app, c.tool, input), danger: true, deletion: deletesCall({ name: c.tool }) })) !== 'approved') return false;
     return alive();
   };
 }

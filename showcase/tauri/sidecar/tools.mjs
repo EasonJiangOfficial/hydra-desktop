@@ -465,10 +465,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
   // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ask asks the
-  // owner, every time; nothing skips it (the old "Skip Allow prompts" setting is gone). BLOCK verdicts never reach here.
+  // owner, every time; the one exception is his own Approve all (owner: "there should be a mode that approves all
+  // actions"), which skips an ask only when it is tagged deletion: false. Every deletion-class ask below says
+  // deletion: true, so it asks whatever the setting (E2). BLOCK verdicts never reach here.
   // `always` tells an agent job's parent that only the owner may answer (answer_agent can't say yes for them).
-  async function confirm(question, ctx) {
-    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal);
+  async function confirm(question, ctx, { deletion = false } = {}) {
+    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true, deletion }, ctx?.signal);
     return isYes(answer);
   }
   /** A tool that asks before it runs: question(args) is the whole question, or throws when it can't say what runs. */
@@ -1162,7 +1164,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const where = await hands('locate', spec).then((r) => r?.window?.app ?? null, () => null);
           const inWhat = where ?? (appName === 'front' ? 'the app in front' : appName);
           const question = `In ${inWhat}, every step I'd take:\n${stepsText(mapped, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`;
-          if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+          if (!(await confirm(question, ctx, { deletion: notes.length > 0 }))) throw new Error(`${userName} said no, so nothing ran.`);
           const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
@@ -1187,7 +1189,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 const v = checkWrite(String(r.document), HOME, { exists: true });
                 const where = r.app ?? (appName === 'front' ? 'the app in front' : appName);
                 if (v.level === BLOCK) throw new Error(`Blocked for safety: ${where} has ${r.document} open, and acting there could change it. ${v.reason}${before.length ? ` (done first: ${told(before)})` : ''}`);
-                if (!(await confirm(`Change ${v.path} in ${where}? What I type or save there goes into that file.`, ctx))) {
+                if (!(await confirm(`Change ${v.path} in ${where}? What I type or save there goes into that file.`, ctx, { deletion: true }))) {
                   throw new Error(`${userName} said no, so I stopped before acting in ${v.path}${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.docOk = [...(plan.docOk ?? []), String(r.document)];
@@ -1216,7 +1218,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 // in a file panel it could pick any file (V9-6).
                 const blind = left.find((s) => s.do === 'click_at' || (s.do === 'hover' && !s.text) || (['click', 'focus'].includes(s.do) && !s.shown));
                 if (blind) throw new Error(`Blocked for safety: ${unq(r.why)} There I only click things by their name (click_text), so ${userName} can see what; "${stepsText([blind]).slice(3)}" doesn't say${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
-                if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left, { clipboard })}`, ctx))) {
+                if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left, { clipboard })}`, ctx, { deletion: true }))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []), String(r.whole)];
@@ -1224,7 +1226,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 r = await actOnce();
                 continue;
               }
-              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx))) {
+              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx, { deletion: true }))) {
                 throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
               }
               plan.steps = [{ ...plan.steps[r.step], confirmed: true, confirmedLabel: r.label ?? '' }, ...plan.steps.slice(r.step + 1)];
@@ -1300,12 +1302,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         const spec = { do: what === 'switch' ? 'activate' : what, ...(real ? { app: String(real), exact: true, ...(Number.isInteger(pid) ? { pid } : {}) } : app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
         const name = owner ?? real;
         const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
-        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
+        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx, { deletion: what === 'force_quit' }))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
         agentChangesScreen();
         let res = await hands('manage', JSON.stringify(spec));
         if (res.needsConfirm) {
-          // Always asked, whatever the Allow settings: this can lose work.
-          const answer = await ask({ placeholder: `${res.why} ${what === 'force_quit' ? 'Force quit' : what === 'close' ? 'Close it' : 'Quit'} anyway?`, choices: ['Allow', "Don't allow"] }, ctx?.signal);
+          // Always asked, Approve all too: this can lose work (a deletion).
+          const answer = await ask({ placeholder: `${res.why} ${what === 'force_quit' ? 'Force quit' : what === 'close' ? 'Close it' : 'Quit'} anyway?`, choices: ['Allow', "Don't allow"], deletion: true }, ctx?.signal);
           if (!isYes(answer)) throw new Error(`${userName} said no, so ${res.app ?? 'the app'} stays open.`);
           res = await hands('manage', JSON.stringify({ ...spec, confirmed: true }));
         }
@@ -1385,7 +1387,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const v = checkWrite(p, HOME, { exists, own });
         const f = allowed(v);
         // Owner's rule (DESIGN.md "Mac actions"): every write asks, new file or overwrite, with the real path.
-        if (!(await confirm(v.level === ASK ? v.reason : `${exists ? 'Overwrite' : 'Create'} ${f}?`, ctx))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
+        if (!(await confirm(v.level === ASK ? v.reason : `${exists ? 'Overwrite' : 'Create'} ${f}?`, ctx, { deletion: exists }))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
         // A file that's there is kept in Recently deleted as it was, so the change can be undone (restore_deleted).
         if (exists) await keepOldFile(f).catch(() => null);
@@ -1464,7 +1466,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
           const old = getCommitment(id);
           if (!old) throw new Error(`No commitment with id ${id}. Call list_commitments to see the ids.`);
           if (!reason?.trim()) throw new Error('Dropping deletes it: say why in reason, so the question shows it.');
-          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
+          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
         }
         const ms = due === undefined ? undefined : due === 'none' ? null : parseDue(due);
         if (ms === undefined && due !== undefined) throw new Error(`Couldn't read the time "${due}".`);
@@ -1492,7 +1494,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const had = listFacts().find((x) => x.id === id);
         if (!had) throw new Error(`No fact with id ${id}.`);
         if (!reason?.trim()) throw new Error('Say why in reason, so the question shows it.');
-        if (!(await confirm(`Forget "${had.text}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so I still remember it.`);
+        if (!(await confirm(`Forget "${had.text}"?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so I still remember it.`);
         const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text} (it can be put back from Recently deleted)`;
       },
     },
@@ -1511,13 +1513,14 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (!x) throw new Error(`Nothing in Recently deleted has the id ${id}. Call list_deleted to see the ids.`);
         // Each was deleted with the owner's yes (or by them), so putting one back asks too, every time, saying in full
         // what comes back (ninth review V9-2, V9-3, V9-11). The rules it was made under are checked again first.
-        let question = `Put back the ${binKind(x.kind).toLowerCase()} "${x.title}"?`;
+        let question = `Put back the ${binKind(x.kind).toLowerCase()} "${x.title}"?`, deletion = false;
         if (x.kind === 'file') {
           // Putting a file back writes it: the same rules as write_file (a file that's gone is a new file there).
           if (!allowActions()) throw new Error(actionsOff);
           const there = await fs.lstat(x.data.path).then(() => true, () => false);
           const v = checkWrite(x.data.path, HOME, { exists: there });
           allowed(v);
+          deletion = there; // what is in it now is replaced
           question = there ? `Put back ${v.path} as it was before it was changed? What's in it now goes to Recently deleted.` : `Put back ${v.path} as it was before it was changed? It isn't there now, so this makes it again.`;
         }
         if (x.kind === 'connection') {
@@ -1529,7 +1532,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
           question = `Put back the ${x.data.name} connection and connect it? ${v.reason}`;
         }
         if (x.kind === 'job') question = `Put back the scheduled job "${x.data?.title}" (paused)? Its brief: ${x.data?.brief ?? ''}`;
-        if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so it stays in Recently deleted.`);
+        if (!(await confirm(question, ctx, { deletion }))) throw new Error(`${userName} said no, so it stays in Recently deleted.`);
         const said = await restoreFromBin(id);
         if (x.kind === 'commitment') onCommitments(null);
         if (x.kind === 'job') jobs?.changed(null);
@@ -1599,7 +1602,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async ({ id, action, due, repeat, reason }, ctx) => {
         if (!getJob(id)) throw new Error(`No scheduled job with id ${id}. Call list_jobs to see the ids.`);
         if (action === 'remove' && !reason?.trim()) throw new Error('Removing deletes it: say why in reason, so the question shows it.');
-        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so the job stays.`);
+        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so the job stays.`);
         if (action === 'remove') { const j = await removeJob(id); jobs.changed(null); return `Removed the job "${j.title}".`; }
         // Every other change asks too, saying what changes; running it now shows the brief it runs (R10-7).
         const job = getJob(id);
@@ -1649,7 +1652,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
           ? `Install the skill "${list[0].name}" from ${list[0].from}? ${whole(list[0])}${replacing.length ? '\n\nIt replaces the one you have.' : ''}`
           : `Install ${list.length} skills from ${list[0].from.split('/').slice(0, 3).join('/')}: ${list.map((k) => k.name).join(', ')}?${replacing.length ? ` It replaces ${replacing.join(', ')}.` : ''}\n\n${list.map((k) => `${k.name}: ${whole(k)}`).join('\n\n')}`;
         // Always asked: a skill is instructions the agent will follow later.
-        if (!isYes(await ask({ placeholder: question, choices: ['Install', "Don't install"] }, ctx?.signal))) throw new Error(`${userName} said no, so nothing was installed.`);
+        if (!isYes(await ask({ placeholder: question, choices: ['Install', "Don't install"], deletion: replacing.length > 0 }, ctx?.signal))) throw new Error(`${userName} said no, so nothing was installed.`);
         const done = [];
         for (const k of list) {
           const r = await installSkill(k);
@@ -1665,7 +1668,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async (args, ctx) => {
         // Owner's rule (DESIGN.md "Mac actions"): a skill change asks, every time, showing the whole skill.
         const replacing = skillExists(args.name);
-        if (!(await confirm(`${replacing ? 'Replace' : 'Save'} the skill "${args.name}"${replacing ? ' with new steps' : ''}? ${args.description}\n\nIts steps:\n${args.steps}`, ctx))) throw new Error(`${userName} said no, so ${replacing ? 'the skill stays as it was' : 'nothing was saved'}.`);
+        if (!(await confirm(`${replacing ? 'Replace' : 'Save'} the skill "${args.name}"${replacing ? ' with new steps' : ''}? ${args.description}\n\nIts steps:\n${args.steps}`, ctx, { deletion: replacing }))) throw new Error(`${userName} said no, so ${replacing ? 'the skill stays as it was' : 'nothing was saved'}.`);
         const s = await saveSkill(args);
         skills.changed?.(s);
         return `${s.created ? 'Learned' : 'Updated'} the skill ${s.slug}. It shows on the Abilities page's Skills tab.`;
@@ -1676,7 +1679,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async ({ name, reason }, ctx) => {
         if (!readSkill(name)) throw new Error(`No skill called "${name}".`);
         if (!reason?.trim()) throw new Error('Say why in reason, so the question shows it.');
-        if (!(await confirm(`Delete the skill "${name}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so the skill stays.`);
+        if (!(await confirm(`Delete the skill "${name}"?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so the skill stays.`);
         const s = await deleteSkill(name); if (!s) throw new Error(`No skill called "${name}".`); skills.changed?.(null); return `Removed the skill ${s.slug}.`;
       },
     }] : []),

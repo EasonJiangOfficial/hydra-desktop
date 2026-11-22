@@ -19,7 +19,8 @@ export function hydraApi({ base = HYDRA_ORIGIN, getKey, fetchImpl = (...a) => fe
   async function req(path, { method = 'GET', body, signal, timeout = 30_000, accept } = {}) {
     const key = await getKey();
     if (!key) throw Object.assign(new Error('This Mac is not paired with Hydra.'), { code: 'unpaired' });
-    const headers = { Authorization: `Bearer ${key}` };
+    // E2: every request (relay ones too) declares that this build tags deletions (approveAllDeletionTags: 1).
+    const headers = { Authorization: `Bearer ${key}`, 'X-Hydra-Caps': 'approveAllDeletionTags=1' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (accept) headers.Accept = accept;
     const t = AbortSignal.timeout(timeout);
@@ -70,8 +71,9 @@ export function needsApproval(res) {
   try { const j = JSON.parse(textOf(res)); if (j?.needsApproval && typeof j.approvalId === 'string') return { approvalId: j.approvalId, summary: String(j.summary ?? ''), danger: j.danger }; } catch { /* plain text */ }
   return null;
 }
-// Hydra's gate doesn't say how dangerous a call is yet: deleting, removing, paying, sending and cancelling are.
-export const DANGER = /delete|remove|trash|cancel|pay|send|transfer|archive|unpair|revoke/i;
+// Hydra's gate doesn't say how dangerous a call is yet: deleting, removing, paying, sending and cancelling are, and
+// the Mac's Drop, Forget and Overwrite asks (E2). Only the danger level: what deletes is the ask's own tag.
+export const DANGER = /delete|remove|trash|cancel|pay|send|transfer|archive|unpair|revoke|drop|forget|overwrite/i;
 
 /** Polls the relay's approval endpoint until the owner answers: 'approved', 'declined' or 'expired'. */
 // Until Hydra says the approval expired (15 min for a live turn, 24 h for a routine's: W3 contract-fixes 5).

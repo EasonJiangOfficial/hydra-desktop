@@ -29,10 +29,10 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
 // ---- 1. Shared settings.
 {
   // clapSensitivity (W6): null until Hydra sends one, so the Mac keeps its own (an older server sends none).
-  assert.deepEqual(SETTINGS_DEFAULTS, { wakePhrase: 'Hey Hydra', sleepWord: null, clapSensitivity: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium' }, 'the contract\'s defaults');
+  assert.deepEqual(SETTINGS_DEFAULTS, { wakePhrase: 'Hey Hydra', sleepWord: null, clapSensitivity: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium', approveAll: false }, 'the contract\'s defaults');
   assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
   const snake = cleanSettings({ settings: { wake_phrase: '  Okay   Computer ', sleep_word: 'Goodnight Hydra', model: 'claude-sonnet-5-5', effort_live: 'high', effort_routine: 'low' } });
-  assert.deepEqual(snake, { wakePhrase: 'Okay Computer', sleepWord: 'Goodnight Hydra', clapSensitivity: null, model: 'claude-sonnet-5-5', effortLive: 'high', effortRoutine: 'low' });
+  assert.deepEqual(snake, { wakePhrase: 'Okay Computer', sleepWord: 'Goodnight Hydra', clapSensitivity: null, model: 'claude-sonnet-5-5', effortLive: 'high', effortRoutine: 'low', approveAll: false });
   assert.deepEqual(cleanSettings({ settings: { wakePhrase: 'Hey Jarvis', model: 'claude-haiku-5-5', effortLive: 'medium' } }).model, 'claude-haiku-5-5', 'camelCase too');
   const bad = cleanSettings({ settings: { wake_phrase: 'x', model: 'gpt-9', effort_live: 'ultra', effort_routine: 3 } }, snake);
   assert.deepEqual(bad, snake, 'values out of range keep what was there');

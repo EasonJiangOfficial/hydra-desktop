@@ -618,6 +618,13 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
 
 // Verbs that act on the world: a tool named like this always asks, whatever the server says about it.
 const MCP_RISKY = /(?:^|_)(send|delete|remove|trash|destroy|erase|wipe|drop|purge|truncate|pay|payment|payments|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate|execute|exec|sql|migration|migrate|reset|merge|archive)(?:_|$)/;
+/** E2 approve-all: a connected server's call (an MCP tool or a claude.ai connector) that is deletion-class, so it asks
+ *  even with Approve all on: destructive by the server's hint, or named to delete, trash, send, pay... (MCP_RISKY). A
+ *  tag from the call itself, never from the question's words. */
+export const deletesCall = ({ name, annotations } = {}) => annotations?.destructiveHint === true || MCP_RISKY.test(snake(name));
+/** E2: the owner's Approve all says yes for this ask: a yes/no (choices) whose deletion tag is exactly false. A deletion,
+ *  an ask with no tag and a typed prompt still ask. Off: every ask asks. */
+export const approveAllSays = (approveAll, opts) => approveAll === true && Array.isArray(opts?.choices) && opts.deletion === false;
 // Every string in a call's arguments at any depth, each line of it on its own too (V8-6: nothing is skipped). More than
 // LIMIT strings, or one line longer than MAX_ARG, is too much to check: such a call is never SAFE.
 const MAX_ARG = 4096, LIMIT = 2000;

@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
-import { BLOCK, MCP_NAME, checkMcpServer } from './safety.mjs';
+import { BLOCK, MCP_NAME, checkMcpServer, deletesCall } from './safety.mjs';
 import { DIR, onPurge, onRestore, readJson, toBin, writeJson } from './store.mjs';
 
 export const SECRET_MARK = '@roamies-secret'; // an env or header value kept in the secret store
@@ -207,9 +207,10 @@ async function defaultManager() {
 // straight to the secret store and never into the conversation.
 const clipText = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s);
 export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, openUrl = () => {}, userName = 'the user', keyStore = 'secret store', checkCall }) {
-  // Every ask asks the owner (there is no setting that skips it).
-  const confirm = async (question, ctx) => {
-    return isYes(await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal));
+  // Every ask asks the owner, unless Approve all is on and it is not a deletion (E2: deletion is the structured tag
+  // sidekick ask() and a relay approval go by).
+  const confirm = async (question, ctx, { deletion = false } = {}) => {
+    return isYes(await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true, deletion }, ctx?.signal));
   };
   const askKey = async (label, server, ctx) => {
     const v = await ask({ prompt: `Paste the ${label} for ${server} (kept in your ${keyStore}, never in the chat)`, placeholder: label, mask: true }, ctx?.signal);
@@ -246,7 +247,7 @@ export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, ope
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
         if (command && !allowActions()) throw new Error(`A server that runs on this computer is a command, and commands are switched off. Tell ${userName} to turn on "Allow File Edits & Commands" if they want it, or use the service's remote address if it has one.`);
         // Always asked, even with Allow prompts skipped: a server runs code or reaches a service for them from now on.
-        if (!(await confirm(`Connect ${name}? ${v.reason}`, ctx, true))) throw new Error(`${userName} said no, so ${name} wasn't added.`);
+        if (!(await confirm(`Connect ${name}? ${v.reason}`, ctx))) throw new Error(`${userName} said no, so ${name} wasn't added.`);
         for (const k of envKeys) if (!(k in secretEnv)) secretEnv[k] = await askKey(k, name, ctx);
         for (const k of headerKeys) if (!(k in secretHeaders)) { const key = await askKey(k === 'Authorization' ? 'key or token' : k, name, ctx); secretHeaders[k] = bearer && !/^bearer\s/i.test(key) ? `Bearer ${key}` : key; }
         const p = await mcp.probe({ name, command, args, url, env: secretEnv, headers: secretHeaders });
@@ -265,7 +266,7 @@ export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, ope
       execute: async ({ name, reason }, ctx) => {
         if (!mcp.has(name)) throw new Error(`There's no connection called ${name}.`);
         if (!String(reason ?? '').trim()) throw new Error('Say why in reason, so the question shows it.');
-        if (!(await confirm(`Remove the ${name} connection and its keys? It stays in Recently deleted for 30 days, where it can be put back.\n\nWhy: ${String(reason).trim()}`, ctx))) throw new Error(`${userName} said no; ${name} stays.`);
+        if (!(await confirm(`Remove the ${name} connection and its keys? It stays in Recently deleted for 30 days, where it can be put back.\n\nWhy: ${String(reason).trim()}`, ctx, { deletion: true }))) throw new Error(`${userName} said no; ${name} stays.`);
         await mcp.remove(name);
         return `Removed ${name}.`;
       },
@@ -294,7 +295,7 @@ export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, ope
         // Its arguments too: a path in them is checked like read_file (a server's file tools read past every other rule).
         const v = checkCall({ name: tool, annotations: t.annotations, args: parsed });
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
-        if (v.level !== 'safe' && !(await confirm(`${server}: ${tool} ${JSON.stringify(parsed)}${v.reason ? ` ${v.reason}` : ''}`, ctx, v.always))) throw new Error(`${userName} said no, so ${tool} wasn't run.`);
+        if (v.level !== 'safe' && !(await confirm(`${server}: ${tool} ${JSON.stringify(parsed)}${v.reason ? ` ${v.reason}` : ''}`, ctx, { deletion: deletesCall({ name: tool, annotations: t.annotations }) }))) throw new Error(`${userName} said no, so ${tool} wasn't run.`);
         return t.execute(parsed, ctx);
       },
     },

@@ -7,10 +7,10 @@
 import { CONFIG_PATH, DATA_DIR, OLDER_DATA, ROAMIES_DIR } from './datadir.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
-import { DANGER, HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
-import { askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from './relay.mjs';
+import { HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
+import { askAsApproval, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from './relay.mjs';
 import { brainFor, CLAP_LEVELS, cleanWakePhrase, createSettingsWatch, hydraModelPick, wakePhraseFor } from './agentsettings.mjs';
-import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
+import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, approveAllSays, deletesCall, isYes, redactArgs } from './safety.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
 import { CATALOG_PROVIDERS, createCatalogs } from './catalogs.mjs';
@@ -366,6 +366,8 @@ const hydraTools = createHydraTools({ api: hydraHttp, log: (k, d) => logLine(k, 
 // Hydra's shared agent settings (W5 contract 1): wake phrase, sleep word, model and effort, read at start, on a change
 // push from the Hydra window (refreshSettings) and every 60 s.
 const agentSettings = createSettingsWatch({ api: hydraHttp, log: (k, d) => logLine(k, d), onChange: (next, before) => applyHydraSettings(next, before) });
+const approveAll = () => agentSettings.current.approveAll === true;
+const autoYes = (opts) => approveAllSays(approveAll(), opts);
 const relay = createRelay({
   api: hydraHttp, runTurn: (t, h) => relayTurn(t, h), log: (k, d) => logLine(k, d),
   // The turns this Mac stopped, kept across restarts so a stopped turn is never run twice.
@@ -830,7 +832,9 @@ const agents = createAgents({
     open: (p) => (process.platform === 'win32' ? winOpen(p) : new Promise((r) => execFile(MAC ? 'open' : 'xdg-open', [p], () => r()))),
     reveal: async (p) => reveal(p),
     // Starting an agent and copying what it made ask the owner (agents.mjs; owner's rule, DESIGN.md "Mac actions").
-    confirm: async (question, signal) => isYes(await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, signal)),
+    confirm: async (question, signal) => isYes(await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true, deletion: false }, signal)),
+    // An agent's own asks (its process) follow the same rule: Approve all answers a non-deletion one (agents.mjs).
+    approveAll: () => approveAll(),
   },
 });
 tools.push(...agents.tools);
@@ -1881,6 +1885,10 @@ function ask(opts, signal) {
   // Only while that turn runs: anything it started that asks later (it shouldn't) gets the local bubble.
   const relayed = relayAsk.getStore();
   if (relayed?.live) return relayed.ask(opts, signal);
+  // Approve all (agent_settings.approve_all, owner: "there should be a mode that approves all actions"): a yes/no
+  // tagged deletion: false is a yes at once. A deletion, an untagged ask and a typed prompt still ask (E2). A relay
+  // turn's asks stay server approvals (above): the server applies it there, keeping the approval row.
+  if (autoYes(opts)) { logLine('ask_auto', { question: String(opts.placeholder ?? '').slice(0, 120) }); return Promise.resolve('yes'); }
   askQueued ??= oneYesNoAtATime(showAsk);
   return askQueued(opts, signal);
 }
@@ -3229,7 +3237,7 @@ async function connectorGate(name, input, signal, may = null) {
   if (v.level === SAFE) return true;
   if (v.level === 'block') return false;
   const app = c.server.replace(/^claude_ai_/, '').replace(/_/g, ' ');
-  if (!isYes(await ask({ placeholder: askSummary(app, c.tool, input), choices: ['Allow', "Don't allow"], always: true }, signal))) return false;
+  if (!isYes(await ask({ placeholder: askSummary(app, c.tool, input), choices: ['Allow', "Don't allow"], always: true, deletion: deletesCall({ name: c.tool }) }, signal))) return false;
   // A relay turn: still live right before the write runs.
   const r = relayAsk.getStore();
   return !r?.alive || await r.alive();
@@ -3237,13 +3245,8 @@ async function connectorGate(name, input, signal, may = null) {
 // Mac tools that only look: a relay turn runs them without checking it is still live first.
 const MAC_READS = new Set(['take_screenshot', 'list_windows', 'read_window', 'see_photo', 'read_file', 'list_files', 'search_files', 'show_list', 'list_commitments', 'list_jobs', 'plan_steps', 'use_skill', 'draw']);
 const TURN_OVER = 'This turn is over, so it was not done.';
-// A relay turn's ask (W3 contract-fixes 6): a yes/no becomes a server approval the owner answers on any surface
-// (approve: relay.mjs); 'yes' only when he approved. A typed question has nobody to answer it on this Mac: no answer.
-const relayAsker = (approve) => async (opts) => {
-  if (!opts?.choices) { logLine('relay_ask', { typed: true }); return null; }
-  const summary = String(opts.placeholder ?? opts.prompt ?? '').trim();
-  return (await approve({ summary, danger: DANGER.test(summary) })) === 'approved' ? 'yes' : null;
-};
+// A relay turn's ask (W3 contract-fixes 6): a server approval (askAsApproval, relay.mjs).
+const relayAsker = (approve) => askAsApproval(approve, logLine);
 const resultText = (r) => {
   if (typeof r === 'string') return r;
   if (Array.isArray(r)) return r.map((c) => (typeof c === 'string' ? c : c?.text ?? '')).join(' ');

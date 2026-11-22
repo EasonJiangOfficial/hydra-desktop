@@ -400,6 +400,12 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
       if (a.turns > LIMITS.turns) stop(a.id, { state: 'failed', reason: `Used all its ${LIMITS.turns} turns` });
     } else if (m.t === 'plan') { p.event = now(); a.step = one(m.text, 60); update(a); }
     else if (m.t === 'ask') {
+      // The owner's Approve all (E2) answers a yes/no tagged deletion: false at once; a deletion still waits for him.
+      if (m.deletion === false && config.approveAll?.() === true) {
+        log('agent_ask_auto', { id: a.id, question: String(m.question ?? '').slice(0, 120) });
+        p.child.send({ t: 'reply', id: m.id, value: true });
+        return;
+      }
       // Every yes/no waits for the owner (a routine running alone waits too, as an approval on its row).
       if (a.state === 'working') { a.workMs += now() - a.workFrom; a.workFrom = null; }
       a.state = 'waiting'; a.told = false; a.ask = { id: m.id, question: String(m.question ?? ''), always: m.always !== false, at: now() };

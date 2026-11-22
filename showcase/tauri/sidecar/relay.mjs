@@ -30,12 +30,26 @@
 //   session, then calls done() again. At most HOLD_MAX holds; past that it says so and ends the turn with an error
 //   (Hydra keeps his words in the thread), never a loop and never a dropped addition.
 // Offline or refused between turns: it backs off (1 s up to a minute), never a busy loop.
-import { delay, waitApproval } from './hydramcp.mjs';
+import { DANGER, delay, waitApproval } from './hydramcp.mjs';
 import { agentEvents } from './agentstream.mjs';
 // The server's shapes and limits (src/lib/agent/relay-schema.ts, copied verbatim).
 import { z } from 'zod';
 import fs from 'node:fs';
 import { ADDED_PREFIX, LIMITS, localTurnSchema, relayEventSchema, scopeSchema } from './relayschema.mjs';
+/** E2: this build sends a structured deletion tag on every relay approval (POST /api/agent/relay/approval). */
+export const APPROVE_CAPS = Object.freeze({ approveAllDeletionTags: 1 });
+/**
+ * A relay turn's ask (W3 contract-fixes 6): a yes/no becomes a server approval the owner answers on any surface
+ * (approve, below); 'yes' only when he approved. A typed question has nobody to answer it on this Mac: no answer.
+ * deletion (E2): the ask's own structured tag, never its words; an untagged ask is sent as a deletion, so the server's
+ * Approve all never skips it. A deletion is dangerous too.
+ */
+export const askAsApproval = (approve, log = () => {}) => async (opts) => {
+  if (!opts?.choices) { log('relay_ask', { typed: true }); return null; }
+  const summary = String(opts.placeholder ?? opts.prompt ?? '').trim();
+  const deletion = opts.deletion !== false;
+  return (await approve({ summary, danger: deletion || DANGER.test(summary), deletion })) === 'approved' ? 'yes' : null;
+};
 import { SAFE, checkMcpCall } from './safety.mjs';
 
 const BACKOFF = [1000, 2000, 5000, 10_000, 30_000, 60_000];
@@ -395,8 +409,10 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       else timer ??= setTimeout(flush, flushMs);
     };
     // A Mac-side ask (a connector send, a Mac tool, a risky click) as a server approval: 'approved', 'declined' or
-    // 'expired'. Anything that goes wrong is not a yes.
-    const approve = async ({ summary, danger = true } = {}) => {
+    // 'expired'. Anything that goes wrong is not a yes. deletion (E2): the ask's structured tag, sent so the server's
+    // Approve all never skips a deletion; an ask that doesn't say is a deletion. approveAllDeletionTags: 1 declares
+    // that this build tags every ask (APPROVE_CAPS).
+    const approve = async ({ summary, danger = true, deletion = true } = {}) => {
       if (lost || closed || turnCtrl.signal.aborted) return 'expired';
       // Never cut (tenth review R10-1): a yes must cover only what was shown. A question longer than the server takes
       // isn't asked there at all; the owner is told to ask on the Mac, where it shows whole.
@@ -410,7 +426,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       // 429: not made yet, so asked again after its Retry-After. A 5xx may have made it: never asked twice.
       for (let i = 0; ; i++) {
         try {
-          r = await api.req('/api/agent/relay/approval', { method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), summary: s, danger: !!danger }, signal: turnCtrl.signal, timeout: 20_000 });
+          r = await api.req('/api/agent/relay/approval', { method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), summary: s, danger: !!danger, deletion: deletion !== false, ...APPROVE_CAPS }, signal: turnCtrl.signal, timeout: 20_000 });
         } catch { return 'expired'; }
         if (r.status !== 429 || i >= retry.length) break;
         await sleep(retryAfterMs(r, retry[i]), turnCtrl.signal).catch(() => {});

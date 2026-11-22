@@ -1,11 +1,26 @@
 // Every ask asks (owner: "for deletion of everything have the agent confirm before doing ... for everything"; the old
-// "Skip Allow prompts" setting is gone), a no keeps the step from running, BLOCK never asks, and relative paths start
-// in the working folder. Run: npm test
+// "Skip Allow prompts" setting is gone), with one opt-in exception, the owner's Approve all (owner: "there should be a
+// mode that approves all actions"): no setting skips a deletion ask; Approve all skips the rest; Approve all off, every
+// ask asks. A no keeps the step from running, BLOCK never asks, and relative paths start in the working folder.
+// The ask here goes through the same rule as sidekick ask() (approveAllSays, safety.mjs). Run: npm test
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createTools } from '../tools.mjs';
+import { fakeHands } from './fakehands.mjs';
+import { approveAllSays } from '../safety.mjs';
+
+// The working folder (~/Roamies for the chat) lives in the home folder; the test's home is a temp folder (npm test).
+const HOME = os.homedir();
+assert.ok(fs.realpathSync.native(HOME).startsWith(fs.realpathSync.native(os.tmpdir())) || HOME.includes('roamies-test-'), 'runs only with a temp home');
+// Fakes only, set before tools.mjs loads: a fake hands helper, and open/osascript/screencapture/sips that only log.
+const dir = fs.mkdtempSync(path.join(HOME, 'approveall-'));
+const bin = path.join(dir, 'bin'), launched = path.join(dir, 'launched.log');
+fs.mkdirSync(bin);
+for (const c of ['open', 'osascript', 'screencapture', 'sips']) fs.writeFileSync(path.join(bin, c), `#!/bin/sh\necho ${c} "$@" >> '${launched}'\nexit 0\n`, { mode: 0o755 });
+process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+const fake = fakeHands(dir);
+const { createTools } = await import('../tools.mjs');
 
 const noop = async () => {};
 const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' };
@@ -13,8 +28,6 @@ const sidekick = fs.readFileSync(new URL('../sidekick.mjs', import.meta.url), 'u
 assert.ok(!/skipAllow|skipallow|Skip Allow/.test(sidekick.replace('delete config.skipAllow;', '')) && !/skipAllow|Skip Allow/.test(panelSrc), 'the setting, its switch and its menu item are gone');
 assert.match(sidekick, /delete config\.skipAllow;/, 'an old saved value is dropped');
 
-// The working folder (~/Roamies for the chat) lives in the home folder; the test's home is a temp folder (npm test).
-const HOME = os.homedir();
 for (const p of ['x.txt', 'notes/new.md', '.config/git/config']) {
   const workdir = fs.mkdtempSync(path.join(HOME, 'askalways-'));
   fs.writeFileSync(path.join(workdir, 'x.txt'), 'hi');
@@ -36,4 +49,87 @@ for (const p of ['x.txt', 'notes/new.md', '.config/git/config']) {
   await assert.rejects(tools.find((t) => t.name === 'write_file').execute({ path: '~/.zshrc', content: 'x' }, undefined), /Blocked for safety/, 'BLOCK stays blocked');
   assert.deepEqual(asked, [], 'BLOCK never asks');
 }
-console.log('every ask asks: ok');
+
+// ---- Approve all (E2).
+assert.equal(approveAllSays(true, { choices: ['Allow', "Don't allow"], deletion: false }), true);
+for (const o of [{ choices: ['Allow'], deletion: true }, { choices: ['Allow'] }, { prompt: 'Paste the key', deletion: false }, null]) assert.equal(approveAllSays(true, o), false, `asks: ${JSON.stringify(o)}`);
+assert.equal(approveAllSays(false, { choices: ['Allow'], deletion: false }), false, 'off: every ask asks');
+{
+  const wins = [{ id: 1, pid: 10, app: 'TextEdit', title: 'Draft', text: 'x' }, { id: 2, pid: 20, app: 'Notes', title: 'Notes', text: 'y' }];
+  const store = await import('../store.mjs'), jobs = await import('../jobs.mjs'), skills = await import('../skills.mjs');
+  let on = false, answer = null;
+  const asked = [];
+  const ask = async (o) => {
+    if (approveAllSays(on, o)) return 'yes';
+    asked.push(o.placeholder ?? o.prompt);
+    return typeof answer === 'function' ? answer(o) : answer;
+  };
+  const t = createTools({ ...base, workdir: dir, ask, skills: { changed: () => {} }, jobs: { changed: () => {}, run: noop } });
+  const T = (n) => t.tools.find((x) => x.name === n);
+  const run = (p) => p.then((x) => String(x?.content?.[0]?.text ?? x), (e) => String(e?.message ?? e));
+  const reset = (setting, ans = null) => { on = setting; answer = ans; asked.length = 0; fake.clear(); fake.set({ wins }); t.nextTurn?.(); };
+  const managed = () => fake.calls().filter((c) => c[0] === 'MANAGE').map((c) => c.slice(1));
+
+  for (const setting of [false, true]) {
+    const tag = `approve all ${setting ? 'on' : 'off'}`;
+    // Not deletions: a new file, a quit, a hide, a close, an open, a new skill. On: done, nothing asked. Off: asked.
+    reset(setting, 'yes');
+    const f = path.join(dir, `new-${setting}.txt`);
+    await run(T('write_file').execute({ path: f, content: 'new' }, {}));
+    assert.equal(fs.readFileSync(f, 'utf8'), 'new', `${tag}: written`);
+    assert.equal(asked.length, setting ? 0 : 1, `${tag}: a new file ${setting ? 'runs unasked' : 'asks'}`);
+    for (const what of ['quit', 'hide', 'close']) {
+      reset(setting, 'yes');
+      const r = await run(T('manage_app').execute({ do: what, app: 'TextEdit' }, {}));
+      assert.deepEqual(managed(), [[what, 'TextEdit']], `${tag}: ${what} ran (${r})`);
+      assert.equal(asked.length, setting ? 0 : 1, `${tag}: ${what} ${setting ? 'runs unasked' : 'asks'}: ${asked}`);
+    }
+    reset(setting, 'yes');
+    await run(T('open').execute({ target: 'https://ui.elevenlabs.io' }, {}));
+    assert.equal(asked.length, setting ? 0 : 1, `${tag}: an open ${setting ? 'runs unasked' : 'asks'}: ${asked}`);
+    reset(setting, 'yes');
+    await run(T('save_skill').execute({ name: `Orb shot ${setting}`, description: 'Screenshot the orbs.', steps: '1. Open the page.' }, {}));
+    assert.equal(asked.length, setting ? 0 : 1, `${tag}: a new skill ${setting ? 'saves unasked' : 'asks'}`);
+
+    // Deletions: every one asks whatever the setting, and a no keeps it.
+    const no = async (label, p, check) => {
+      reset(setting, null);
+      const r = await run(p());
+      assert.equal(asked.length >= 1, true, `${tag}: ${label} asks (${r})`);
+      assert.match(r, /said no/, `${tag}: ${label}: a no stops it`);
+      check?.();
+    };
+    fs.writeFileSync(f, 'keep');
+    await no('an overwrite', () => T('write_file').execute({ path: f, content: 'gone' }, {}), () => assert.equal(fs.readFileSync(f, 'utf8'), 'keep'));
+    const c = await store.addCommitment(`Call the bank ${setting}`, null);
+    await no('dropping a commitment', () => T('update_commitment').execute({ id: c.id, status: 'dropped', reason: 'done elsewhere' }, {}), () => assert.equal(store.getCommitment(c.id).status, 'open'));
+    const fact = await store.addFact(`Likes tea ${setting}`);
+    await no('forgetting a fact', () => T('forget_fact').execute({ id: fact.id, reason: 'wrong' }, {}), () => assert.ok(store.listFacts().some((x) => x.id === fact.id)));
+    const job = await jobs.addJob({ title: `Digest ${setting}`, brief: 'Sum up.', due: 'in 5h' });
+    await no('removing a job', () => T('update_job').execute({ id: job.id, action: 'remove', reason: 'not needed' }, {}), () => assert.ok(jobs.getJob(job.id)));
+    await no('deleting a skill', () => T('forget_skill').execute({ name: `Orb shot ${setting}`, reason: 'wrong' }, {}), () => assert.ok(skills.skillExists(`Orb shot ${setting}`)));
+    await no('replacing a skill', () => T('save_skill').execute({ name: `Orb shot ${setting}`, description: 'New.', steps: '1. Other.' }, {}));
+    // A force quit loses unsaved work: it asks, and so does the helper's unsaved-work ask after a yes.
+    await no('a force quit', () => T('manage_app').execute({ do: 'force_quit', app: 'TextEdit' }, {}), () => assert.deepEqual(managed(), []));
+    reset(setting, (o) => (/anyway\?$/.test(o.placeholder) ? null : 'yes'));
+    const fq = await run(T('manage_app').execute({ do: 'force_quit', app: 'TextEdit' }, {}));
+    assert.deepEqual(asked, ['Force quit TextEdit?', 'Force quitting TextEdit loses anything unsaved. Force quit anyway?'], `${tag}: both asked (${fq})`);
+    assert.deepEqual(managed(), [], `${tag}: nothing quit on a no`);
+    // Putting a file back over the one there now replaces it: asks. (The overwrite above, said yes, keeps the old one.)
+    reset(setting, 'yes');
+    await run(T('write_file').execute({ path: f, content: 'changed' }, {}));
+    const kept = store.listBin().filter((x) => x.kind === 'file' && store.getBin(x.id)?.data?.path === fs.realpathSync(f)).at(-1);
+    assert.ok(kept, `${tag}: the old file is in Recently deleted`);
+    await no('a restore over a file', () => T('restore_deleted').execute({ id: kept.id }, {}), () => assert.equal(fs.readFileSync(f, 'utf8'), 'changed'));
+    // The helper's own risky step (it could delete, pay, send or quit) asks, even after Approve all said yes to the plan.
+    reset(setting, (o) => (/Go ahead\?$/.test(o.placeholder) ? null : 'yes'));
+    fake.set({ wins, act: { ok: false, needsConfirm: true, step: 0, why: 'That click could delete the note.', label: 'Delete' } });
+    // A yes there would loop on the fake (it asks at that step again): 10 s is a fail, never a hang.
+    const risky = await Promise.race([run(T('act_in_app').execute({ target: 'Notes', steps: [{ do: 'click_text', text: 'Note one' }] }, {})), new Promise((r) => setTimeout(() => r('no answer in 10 s'), 10_000).unref())]);
+    assert.deepEqual(asked.filter((q) => /Go ahead\?$/.test(q)), ['That click could delete the note. Go ahead?'], `${tag}: the risky step asks (${risky}; ${asked})`);
+    assert.equal(asked.length, setting ? 1 : 2, `${tag}: the plan itself ${setting ? 'runs unasked' : 'asks'}: ${asked}`);
+    assert.match(risky, /said no/);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+console.log('every ask asks, Approve all skips only non-deletions: ok');

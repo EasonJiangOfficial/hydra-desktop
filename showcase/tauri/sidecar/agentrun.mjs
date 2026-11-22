@@ -74,7 +74,8 @@ async function run({ agent: a, model: md, content }) {
     // Only 'acting in an app' goes up, so the overlay turns click-through and ignores its Allow buttons meanwhile.
     allowActions: () => allow, ui: (m) => { if (m?.kind === 'hands' && 'on' in m && process.send) process.send({ t: 'ui', msg: { kind: 'hands', on: !!m.on } }); }, openUrl: () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: (ms) => new Date(ms).toLocaleString(),
     commitmentsText: () => '', userName: a.userName || 'The user', workdir: a.dir, own: a.dir, pointScale: () => pointScale(md.model ?? ''),
-    ask: (opts, signal) => request({ t: 'ask', question: String(opts?.placeholder ?? ''), always: !!opts?.always }, signal).then((yes) => (yes ? 'yes' : null)),
+    // deletion (E2): the ask's own tag; untagged counts as a deletion, so Approve all never answers it.
+    ask: (opts, signal) => request({ t: 'ask', question: String(opts?.placeholder ?? ''), always: !!opts?.always, deletion: opts?.deletion !== false }, signal).then((yes) => (yes ? 'yes' : null)),
     // web_search's side search runs on the same Anthropic sign-in as this agent; other providers use the keyless engines.
     sideSearch: async () => {
       if (md.provider !== 'anthropic') return null;
