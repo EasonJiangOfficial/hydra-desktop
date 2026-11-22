@@ -70,7 +70,8 @@
         if (!quiet) S(name);
       };
       let wasFlung = false, wasAsleep = false, snoreT = 3;
-      const spawn = (x, y, vx, vy, g, lvl, size = 0, rate = 1) => parts.push({ x, y, vx, vy, g, lvl, size, rate, life: 1 });
+      // Hydra's orb throws off no LED sparks, dust or debris (flat, restrained motion): only the classic look does.
+      const spawn = (x, y, vx, vy, g, lvl, size = 0, rate = 1) => { if (look !== 'hydra') parts.push({ x, y, vx, vy, g, lvl, size, rate, life: 1 }); };
       let browAt = [];
       let P = 4, gw = 0, gh = 0, IW = 0, IH = 0, R = 40, t = 0, dripT = 0.6;
       const off = document.createElement('canvas');
@@ -515,10 +516,14 @@
         // it covers are marked, so the patch shown (and wiped next frame) holds all of it.
         vdots.length = 0;
         const dot = (x, y, r, shade) => vdots.push(x, y, r, shade);
-        Object.assign(jst, { asleep: !!Roamie.asleep, dt: jst.dt });
+        // Asleep: it greys out and shrinks to 60% where it is, over 0.4 s (at once under reduced motion); waking reverses it.
+        const sleepTo = Roamie.asleep ? 1 : 0;
+        jst.sleepK = env.reduced || jst.sleepK == null ? sleepTo : jst.sleepK + clamp(sleepTo - jst.sleepK, -(jst.dt ?? 0.016) / 0.4, (jst.dt ?? 0.016) / 0.4);
+        const ease = jst.sleepK * jst.sleepK * (3 - 2 * jst.sleepK);
+        Object.assign(jst, { asleep: !!Roamie.asleep, sleepE: ease, dt: jst.dt });
         vreach = form === 'cursor' ? null : [bx, by, R * 1.42];
         if (form === 'cursor') J.cursor({ dot, L, th }, bx / P, by / P, bx / P - AX, by / P - AY, jst);
-        else J.body({ dot, L, th }, bx / P, by / P, R / P, jst);
+        else J.body({ dot, L, th }, bx / P, by / P, (R / P) * (1 - 0.4 * ease), jst);
         const ext = vreach ? vreach[2] / P + 1 : 6;
         const gx0 = Math.floor(bx / P - ext), gx1 = Math.ceil(bx / P + ext), gy0 = Math.floor(by / P - ext), gy1 = Math.ceil(by / P + ext);
         if (gx0 < dx0) dx0 = Math.max(0, gx0); if (gx1 > dx1) dx1 = Math.min(gw - 1, gx1);
@@ -605,6 +610,7 @@
         morph,
         get look() { return look; },
         setLook(l) { look = pickLook(l); jst.spin = 0; jst.tail = null; },
+        refit() { if (lastEnv) this.resize(lastEnv); },
         resize(env) {
           lastEnv = env;
           const S = Roamie.unit(env);
@@ -614,7 +620,8 @@
           IW = gw * K; IH = gh * K;
           off.width = IW; off.height = IH; img = octx.createImageData(IW, IH); u32 = new Uint32Array(img.data.buffer); pd = null;
           if (bloom) { bloom.width = Math.ceil(gw / 4); bloom.height = Math.ceil(gh / 4); }
-          R = form === 'cursor' ? 26 : clamp(S * 0.15, 28, 140) * (form === 'small' ? 0.5 : 1); m.radius = R * (o.ears || o.antenna ? 1.35 : 1.25);
+          // Hydra's orb: the size setting is its outer edge (48 px by default), on every screen.
+          R = form === 'cursor' ? 26 : look === 'hydra' ? (Roamie.orbPx ?? 48) / 2 : clamp(S * 0.15, 28, 140) * (form === 'small' ? 0.5 : 1); m.radius = R * (o.ears || o.antenna ? 1.35 : 1.25);
         },
         boop() { sq.kick(11); S('boop'); if (ant) ant.forEach((p, i) => { p.vx += rand(-1, 1) * 260 * i; }); if (!forced) startAct('hype', true); },
         grab() { S('grab'); },

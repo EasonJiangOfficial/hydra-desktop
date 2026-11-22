@@ -205,13 +205,25 @@
       if (fromX != null && spotOK(fromX, fromY)) return [fromX, fromY];
       return [(S.l + S.r) / 2, (S.t + S.b) / 2];
     };
-    const setStation = (x, y, byCursor = null) => { station.x = x; station.y = y; station.byCursor = byCursor; m.anchor = { x, y, r: k.R * 0.35 }; };
+    const setStation = (x, y, byCursor = null) => { station.x = x; station.y = y; station.byCursor = DOCKED ? null : byCursor; m.anchor = { x, y, r: DOCKED ? 0 : k.R * 0.35 }; };
+    // Hydra's orb (owner: "the vocaliser orb shoulndt follow my cursor"): docked in one place, never beside or after
+    // the cursor, never fleeing it and never leaving the screen. Default: the main screen's bottom-right corner, 24 px
+    // in from the visible edges (clear of the Dock). Dragging it moves it; the spot is kept per screen size.
+    const DOCKED = !!R.hydra;
+    const dockKey = () => `hydra.orb.${Math.round(W)}x${Math.round(H)}`;
+    const dockSpot = () => {
+      const S = bounds(), r = m.radius ?? k.R;
+      const fit = ([x, y]) => [clamp(x, S.l + r + 4, S.r - r - 4), clamp(y, S.t + r + 4, S.b - r - 4)];
+      try { const v = JSON.parse(localStorage.getItem(dockKey()) ?? 'null'); if (Array.isArray(v) && v.length === 2 && v.every(Number.isFinite)) return fit(v); } catch {}
+      return fit([S.r - 24 - k.R, S.b - 24 - k.R]);
+    };
+    const saveDock = (x, y) => { try { localStorage.setItem(dockKey(), JSON.stringify([Math.round(x), Math.round(y)])); } catch {} };
     // Pop up right beside the cursor, like a buddy at your elbow: to its right and a little below the tip
     // (the arrow's body points down-right), else its left, else above or below. Bubbles then open on the
     // side away from the cursor, so whatever it's pointing at stays visible.
     const besideCursor = (side = 'right', at = presence.ptr) => {
       const p = at;
-      if (!p) return null;
+      if (!p || DOCKED) return null;
       const [cx, cy] = p, rad = m.radius, gx = rad + 22;
       const R0 = [[cx + gx, cy + rad * 0.45], [cx + gx, cy - rad * 0.9]], L0 = [[cx - gx, cy + rad * 0.45], [cx - gx, cy - rad * 0.9]];
       const c = [...(side === 'left' ? [L0[0], R0[0], L0[1], R0[1]] : [R0[0], L0[0], R0[1], L0[1]]), [cx + 10, cy + rad + 34], [cx, cy - rad - 18]];
@@ -353,7 +365,7 @@
 
     // A new request (talking, typing, summoning): come over to the cursor if it's somewhere else now.
     const comeToCursor = () => {
-      if (R.sidebar?.on) return; // game mode: it stays in its panel
+      if (R.sidebar?.on || DOCKED) return; // game mode: it stays in its panel; Hydra stays docked
       const p = presence.ptr;
       if (!p || !visible() || pen.held || m.dragging || m.flung) return;
       if (station.byCursor && Math.hypot(p[0] - station.byCursor[0], p[1] - station.byCursor[1]) < k.R * 2.5) return;
@@ -363,7 +375,7 @@
     };
     const nextVariant = () => (ORDER.includes(forcedVariant) ? forcedVariant : ORDER[presence.n++ % ORDER.length]);
     // Popping up at the cursor: in place (materialize or crt), never dropping in from the top of the screen.
-    const entrance = () => { let v = nextVariant(); if (v === 'drop' && station.byCursor && !forcedVariant) v = nextVariant(); return v; };
+    const entrance = () => { if (DOCKED) return 'materialize'; let v = nextVariant(); if (v === 'drop' && station.byCursor && !forcedVariant) v = nextVariant(); return v; };
     const visible = () => k.presence === 'shown' || k.presence === 'in';
     // Bubbles and tools wait until the body has (nearly) arrived.
     const stage = () => k.presence === 'shown' || (k.presence === 'in' && k.presU > 0.72);
@@ -373,6 +385,7 @@
       // Game mode (sidebar.js): at the top of the panel at the screen's edge, never beside a cursor that isn't there.
       const dock = R.sidebar?.dock?.();
       if (dock) { setStation(dock[0], dock[1]); station.atDock = true; return dock; }
+      if (DOCKED) { const d = dockSpot(); setStation(d[0], d[1]); return d; }
       const near = besideCursor();
       if (near) { setStation(near[0], near[1], presence.ptr.slice()); station.quietUntil = now + 4; return near; }
       const [cx, cy] = presence.cursor ?? [null, null];
@@ -984,6 +997,8 @@
         end() { hand.want = false; hand.took = false; hand.next = null; return handKick(); },
       },
       // Make (x, y) home and move there now, e.g. to restore where the user last left it.
+      // Hydra: to its docked spot on this screen (the saved one, else the bottom-right corner).
+      dock: () => { if (!DOCKED) return; const d = dockSpot(); api.place(d[0], d[1]); station.dockWH = `${W}x${H}`; },
       place: (x, y) => {
         setStation(x, y); m.x = x; m.y = y; m.vx = m.vy = 0; m.mode = 'rest'; m.rest = 1;
         station.moving = false; station.flee = 0; station.quietUntil = now + 1;
@@ -1208,7 +1223,7 @@
         presence.ptr = !R.game && mx != null && mx >= 0 && my >= 0 && mx <= W && my <= H ? [mx, my] : null;
         if (popping) { if (presence.ptr) follow(env, dt); else { m.drive = null; fol.on = false; } }
         const onStage = stage();
-        if (presence.auto) {
+        if (presence.auto && !DOCKED) {
           const hover = env.mouse?.active && Math.hypot(env.mouse.x - m.x, env.mouse.y - m.y) < k.R * 1.5;
           // A turn in progress (#83) and a voice still talking both count: an answer moved onto the card has no bubble
           // left to keep it here, and leaving mid-sentence left nothing on screen to stop it with.
@@ -1224,6 +1239,8 @@
         }
         mouthT -= dt;
         if (k.presence === 'shown') {
+          // Docked: on its spot for this screen size (first frame, or the overlay moved to another screen).
+          if (DOCKED && station.dockWH !== `${W}x${H}` && !m.dragging && !pen.held) api.dock();
           if (station.x == null) setStation(m.x, m.y);
           const held = m.dragging || m.flung;
           // Game mode turned on while it's up: off to the panel at the screen's edge, once (it can still be dragged).
@@ -1235,6 +1252,7 @@
           // A plain click (press without moving it) isn't a move.
           if (station.held && !held && station.from && Math.hypot(m.x - station.from[0], m.y - station.from[1]) > k.R * 0.5) {
             setStation(m.x, m.y); station.quietUntil = now + 2.5; station.moving = false;
+            if (DOCKED) saveDock(m.x, m.y);
           }
           station.held = held;
           // A fullscreen game pinned the cursor (host.js): leave the spot beside it or under it, clear of where it's pinned.
@@ -1249,7 +1267,7 @@
           else { fol.on = false; m.drive = null; }
           nativeStep(dt, self);
           // While drawing, stay put: the user's cursor is supposed to come over here.
-          if (!held && env.mouse && !pen.held && !station.byCursor) {
+          if (!DOCKED && !held && env.mouse && !pen.held && !station.byCursor) {
             const cx = env.mouse.x, cy = env.mouse.y, dBody = Math.hypot(cx - m.x, cy - m.y);
             // Pointing right at it or its bubble means "I want this"; hovering around it means "you're in my way".
             const onIt = dBody < m.radius * 1.1 || (b && hitBubble(b, cx, cy));

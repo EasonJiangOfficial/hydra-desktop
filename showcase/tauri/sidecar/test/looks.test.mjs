@@ -3,14 +3,15 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_VOICE } from '../fish.mjs';
 
-// One character: Hydra, with the one Fish Audio voice the owner picked. No other look, size or picker is left.
+// One character: Hydra, with the one Fish Audio voice the owner picked. No other look or picker is left; the orb's
+// size is a setting (owner, 2026-11-22: "it's way too big"): Small 40, Medium 48 (default), Large 64.
 const src = (p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8');
 const side = src('../sidekick.mjs');
 const HYDRA_VOICE = '612b878b113047d9a770c069c8b4fdfe';
 assert.match(side, /const LOOKS = \[\['hydra', 'Hydra', HYDRA_VOICE\]\];/);
 assert.match(side, new RegExp(`const HYDRA_VOICE = '${HYDRA_VOICE}';`));
 assert.equal(DEFAULT_VOICE, HYDRA_VOICE, 'Fish Audio speaks in Hydra\'s voice by default');
-assert.match(side, /const SIZES = \[\['default', 'Default'\]\];/);
+assert.match(side, /const SIZES = \[\['small', 'Small'\], \['default', 'Medium'\], \['large', 'Large'\]\];/);
 const OLD = /\b(jarvis|glayos|ultren|anime girl|sarah|adrian|rita x)\b|'classic'|people\.js/i;
 for (const f of ['../../../panel/panel.js', '../../../panel/index.html', '../../../onboarding/onboarding.js', '../../../onboarding/index.html', '../../../roamies/host.js', '../../../roamies/notch.js', '../../../desktop.html', '../gemini.mjs']) {
   assert.ok(!OLD.test(src(f)), `${f} names no removed character`);

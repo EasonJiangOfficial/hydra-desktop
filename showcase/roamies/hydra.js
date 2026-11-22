@@ -32,12 +32,14 @@
     body(k, cx, cy, rad, st) {
       const still = reducedMQ.matches;
       const t = still ? 0 : st.t, asleep = !!(st.asleep || R.asleep);
-      const v = still ? 0 : this.level({ ...st, asleep });
-      const spinRate = asleep ? 0 : st.mode === 'think' ? 0.9 : 0.18;
+      // e: 0 awake to 1 asleep, eased by the caller over 0.4 s (the shade and stillness follow it).
+      const e = st.sleepE ?? (asleep ? 1 : 0);
+      const v = still ? 0 : this.level({ ...st, asleep: false }) * (1 - e);
+      const spinRate = (st.mode === 'think' ? 0.9 : 0.18) * (1 - e);
       st.spin = still ? 0 : (st.spin ?? 0) + spinRate * (st.dt ?? 0.016);
       const yaw = st.spin, pitch = -0.38;
       const cyw = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-      const breath = asleep || still ? 1 : 1 + 0.012 * Math.sin(t * 1.3);
+      const breath = still ? 1 : 1 + 0.012 * Math.sin(t * 1.3) * (1 - e);
       const dots = rad < 9 ? DOTS.small : DOTS.default;
       for (const p of dots) {
         // A ripple runs over the surface; the voice (or the mic) raises it, pushing the dots outward.
@@ -48,9 +50,11 @@
         const px = cx + x * r, py = cy + y * r;
         // Near dots are ink and a little larger; far ones pale, so it reads as an open sphere seen through.
         const near = (z + 1) / 2;
-        const shade = asleep ? 0.75 + 0.25 * (1 - near) : clamp(1 - near * 1.15, 0, 0.85);
-        if (k.dot) k.dot(px, py, (0.16 + 0.14 * near) * Math.max(1, rad / 10), shade);
-        else k.put(px, py, Math.max(1, Math.round((k.L - 1) * (1 - shade)) + (near > 0.8 && !asleep ? 1 : 0)));
+        // Asleep: pale gray.
+        const shade = (1 - e) * clamp(1 - near * 1.15, 0, 0.85) + e * (0.75 + 0.25 * (1 - near));
+        // Dots keep a size that reads at 40 to 64 px across: never smaller than about 1.1 px.
+        if (k.dot) k.dot(px, py, Math.max((0.16 + 0.14 * near) * Math.max(1, rad / 10), 0.55 / (k.P ?? 2)), shade);
+        else k.put(px, py, Math.max(1, Math.round((k.L - 1) * (1 - shade)) + (near > 0.8 && e < 0.5 ? 1 : 0)));
       }
     },
 

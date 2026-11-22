@@ -432,6 +432,7 @@
 
   // ---------- voice (⌃⌥) ----------
   // ---------- the bridge to the main window: the web app's orb mirrors this one (hydra.rs, docs/BRIDGE.md) ----------
+  const ORB_PX = { small: 40, default: 48, large: 64 };
   let micLevel = 0, hearing2 = false, orbSent = '', orbAt = 0;
   function orbNow() {
     const out = Roamie.voiceOut?.playing() ? Roamie.voiceOut.level() : 0;
@@ -538,7 +539,8 @@
     if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
     // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
     if (m.kind === 'listen_after') { waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
-    if (m.kind === 'size') { for (const t of Roamie.tiles ?? []) t.creature.setForm?.(m.size); return; }
+    // The orb's size (outer edge, px). It never changes form: the size is the setting.
+    if (m.kind === 'size') { Roamie.orbPx = ORB_PX[m.size] ?? 48; for (const t of Roamie.tiles ?? []) t.creature.refit?.(); return; }
     if (m.kind === 'look') {
       for (const t of Roamie.tiles ?? []) t.creature.setLook?.(m.look);
       field.setAttribute('aria-label', 'Message for Hydra');
@@ -569,6 +571,8 @@
     if (m.kind === 'intro') { if (capR()) N().say(m.text); else getAgent().intro(m.x, m.text); return; }
     if (m.kind === 'esc') { onEsc(); return; }
     if (m.kind === 'summon') {
+      // Hydra's orb stays docked and on screen: the shortcut only brings it back if it isn't there (never to the cursor).
+      if (Roamie.hydra && !notchOn()) { const a = getAgent(); if (!a.visible) a.show({ summoned: true }); return; }
       // ⌃⌥S toggles; the menu's Show Sidekick only ever shows. With the capsule on, it's the capsule that comes out.
       if (notchOn()) {
         if (!N().active) N().hello();
@@ -629,8 +633,8 @@
   const ready = () => {
     const a = getAgent();
     if (!a) return setTimeout(ready, 150);
-    a.setAuto(true);
-    a.hide({ instant: true });
+    // Hydra: always on screen, docked (agent.js DOCKED); no hiding when idle.
+    if (Roamie.hydra) a.show(); else { a.setAuto(true); a.hide({ instant: true }); }
     send({ type: 'ui_ready' });
   };
   ready();

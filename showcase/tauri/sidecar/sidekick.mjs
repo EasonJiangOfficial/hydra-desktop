@@ -153,8 +153,8 @@ const SESSION = LINUX ? linuxSession() : '';
 const WAYLAND = SESSION === 'wayland';
 const POINTER_OK = seesPointer(process.platform, SESSION);
 const HOTKEYS_OK = hasHotkeys(process.platform, SESSION);
-// Cursor size follows the pointer, which a Wayland session can't see over other apps.
-const SIZES = [['default', 'Default']];
+// The orb's size (its outer edge): Small 40 px, Medium 48 px, Large 64 px (roamies/host.js ORB_PX).
+const SIZES = [['small', 'Small'], ['default', 'Medium'], ['large', 'Large']];
 const sizeNow = () => (SIZES.some(([s]) => s === config.size) ? config.size : 'default');
 // One character: Hydra, the Hydra Agent (roamies/hydra.js: an open sphere of ink dots), with one voice: the Fish Audio
 // voice the owner picked for it (a public reference_id, not a secret). config.fishVoice can override it.
@@ -182,7 +182,7 @@ let shellInfo = null; // resolves the shell's reply to it: screens, tray, panel,
 {
   const saved = readJson(CONFIG_PATH, { backup: true }); // an unreadable file is set aside, never overwritten
   if (saved && typeof saved === 'object' && !Array.isArray(saved)) config = { ...DEFAULTS, ...saved };
-  config.look = 'hydra'; config.size = 'default'; // one character, one size
+  config.look = 'hydra'; // one character
   // Before voices were per look: the one picked becomes the current look's.
   for (const [one, each] of [['geminiVoice', 'geminiVoices'], ['studioVoice', 'studioVoices']]) {
     if (!(one in config)) continue;
