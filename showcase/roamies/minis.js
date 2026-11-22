@@ -1,4 +1,4 @@
-// The mini agent: a small version of the Sidekick (the LED-matrix dither blob in its five-colour palette, ordered
+// The mini agent: a small version of the Sidekick (a dither blob in a five-step gray ramp, ordered
 // dither, 3x3 dots on a 4 px grid at 2x, pixel eyes) drawn on a small canvas, in the poses of a background agent's
 // life: hatch, fly, work, wait, done, fail, stop. Also the pixel-art file icons of the "made" shelf and fileKind.
 // API: Roamie.minis.draw(ctx, { size, dpr, pose, t, time, glyph, vx, vy, squash, reduce, seed }), .icon(kind),
@@ -23,8 +23,8 @@
     return (m && BY_EXT.get(m[1].toLowerCase())) || 'other';
   };
 
-  // ---------- pixel-art file icons: 12x12 grids in the teal family ----------
-  const INK = { k: '#051214', d: '#0e5c60', m: '#28c4b8', a: '#78ffe2', h: '#e6fffa' };
+  // ---------- pixel-art file icons: 12x12 grids in ink and grays on white ----------
+  const INK = { k: '#ffffff', d: '#ffffff', m: '#a1a1a6', a: '#1d1d1f', h: '#424245' };
   const blank = () => Array.from({ length: 12 }, () => Array(12).fill('.'));
   const put = (g, cells, ch) => { for (const [r, c] of cells) if (g[r]?.[c] != null) g[r][c] = ch; };
   const row = (g, r, c0, c1, ch) => { for (let c = c0; c <= c1; c++) g[r][c] = ch; };
@@ -72,7 +72,8 @@
   };
 
   // ---------- the mini agent ----------
-  const PAL = [[4, 16, 18], [14, 92, 96], [40, 196, 184], [120, 255, 226], [230, 255, 250]].map((c) => `rgb(${c.join(',')})`);
+  // A gray ramp: ink for the pupils, then light to dark for the blob's dots (darkest where it's lit).
+  const PAL = ['#1D1D1F', '#D2D2D7', '#A1A1A6', '#6E6E73', '#424245'];
   const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => (v + 0.5) / 16);
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
@@ -112,7 +113,7 @@
     for (const s of [-1, 1]) {
       const ex = Math.round((cx + s * r * 0.34 * sx + look[0] * cell) / cell) * cell, ey = Math.round((cy - r * 0.12 * sy + look[1] * cell) / cell) * cell;
       // A lit patch round each eye, so it reads through the dither.
-      ctx.fillStyle = PAL[3];
+      ctx.fillStyle = '#FFFFFF';
       for (let j = -1; j <= 2; j++) for (let i = -1; i <= 1; i++) ctx.fillRect(ex + i * cell, ey + j * cell, cell - 1, cell - 1);
       ctx.fillStyle = PAL[0];
       if (open > 0) ctx.fillRect(ex, ey + (h === 1 ? cell : 0), cell - 1, h * cell - 1);
@@ -152,7 +153,7 @@
     if (pose === 'work') {
       cy += Math.sin(T * 2.4 + seed) * 1.2 * dpr; sy = 1 + Math.sin(T * 4.8 + seed) * 0.03; sx = 2 - sy;
       blob(ctx, cx, cy, r, sx, sy, 0, cell); eyes(ctx, cx, cy, r, sx, sy, cell, open, [0.3, 0]);
-      if (glyph && GLYPHS[glyph]) bits(ctx, GLYPHS[glyph], S - 7 * dpr, 0, Math.max(1, Math.round(dpr)), G?.HOT ?? '#e6fffa');
+      if (glyph && GLYPHS[glyph]) bits(ctx, GLYPHS[glyph], S - 7 * dpr, 0, Math.max(1, Math.round(dpr)), G?.TEXT ?? '#1D1D1F');
       return;
     }
     if (pose === 'wait') {
@@ -161,8 +162,8 @@
       blob(ctx, cx, cy - hop + (1 - sy) * r, r, sx, sy, 0, cell); eyes(ctx, cx, cy - hop, r, sx, sy, cell, 1, [0, -1]);
       // A pixel "?" in a small bubble, top right.
       const px = Math.max(1, Math.round(dpr)), bx = S - 8 * dpr, by = 0;
-      ctx.fillStyle = 'rgba(5,18,20,0.95)'; ctx.fillRect(bx - px, by, 7 * px, 9 * px);
-      bits(ctx, ASK, bx, by + px, px, G?.ACC ?? '#78ffe2');
+      ctx.fillStyle = 'rgba(255,255,255,0.97)'; ctx.fillRect(bx - px, by, 7 * px, 9 * px);
+      bits(ctx, ASK, bx, by + px, px, G?.TEXT ?? '#1D1D1F');
       return;
     }
     if (pose === 'done') {
@@ -173,12 +174,12 @@
       // Sparkles, then the pen's tick (agent-cards.js draws the same mark).
       if (!reduce && t < 1.2) for (let i = 0; i < 4; i++) {
         const a = -Math.PI / 2 + (i - 1.5) * 0.9, d = 6 + t * 8, f = clamp(1 - Math.abs(t - 0.5) / 0.6, 0, 1);
-        ctx.globalAlpha = f; ctx.fillStyle = i % 2 ? (G?.ACC ?? '#78ffe2') : (G?.HOT ?? '#e6fffa');
+        ctx.globalAlpha = f; ctx.fillStyle = i % 2 ? (G?.MID ?? '#6E6E73') : (G?.TEXT ?? '#1D1D1F');
         const x = size / 2 + Math.cos(a) * (size * 0.3 + d) - 1, y = size / 2 - 4 + Math.sin(a) * (size * 0.3 + d) - 1;
         ctx.fillRect(x, y - 1, 1, 3); ctx.fillRect(x - 1, y, 3, 1);
       }
       ctx.globalAlpha = 1;
-      if (G) G.pen(ctx, [[size - 10, 6], [size - 7.5, 8.5], [size - 3, 2.5]], G.HOT, 2, reduce ? 1 : clamp((t - 0.4) / 0.3, 0, 1));
+      if (G) G.pen(ctx, [[size - 10, 6], [size - 7.5, 8.5], [size - 3, 2.5]], G.TEXT, 2, reduce ? 1 : clamp((t - 0.4) / 0.3, 0, 1));
       return;
     }
     if (pose === 'fail') {

@@ -164,7 +164,7 @@
     };
 
     // Presence: in auto mode the sidekick hides when idle and comes back for anything it has to do.
-    const ORDER = ['materialize', 'crt', 'drop'];
+    const ORDER = ['materialize', 'drop']; // no CRT power-on: flat, restrained motion
     const forcedVariant = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('enter') : null;
     // ptr: the real cursor whenever it's on this screen (even when it hasn't moved for a while), else null.
     const presence = { auto: false, idle: 1.5, summonIdle: 4.5, lastActive: 0, summoned: false, working: false, cursor: null, ptr: null, n: 0 };
@@ -390,10 +390,10 @@
       k.appear(entrance(), x, y);
     };
     const MAX_COLS = 38, MAX_LINES = 7, THINK_COLS = 28, THINK_LINES = 1, METER = 7;
-    // Bubble text: Martian Mono (0.7 em per letter), sized to the bubble's line grid.
+    // Bubble text: the system sans (about 0.56 em per letter on average), sized to the bubble's line grid.
     const fontPx = (t) => Math.round(CH * t * 0.64 * 2) / 2;
-    const colW = (t) => fontPx(t) * 0.7 + 0.35;
-    const TEXT_INK = '#dcfff6', TEXT_ACCENT = '#78ffe2';
+    const colW = (t) => fontPx(t) * 0.56 + 0.35;
+    const TEXT_INK = '#1D1D1F', TEXT_ACCENT = '#1D1D1F', TEXT_DIM = '#6E6E73', TEXT_CODE = '#424245';
     const T = () => clamp(k.P * 0.42, 1.4, 2.4);
     const G = R.glass;
     // Padding inside a bubble. The thinking tag is slim, one line, with its three dots before the words.
@@ -485,7 +485,11 @@
       for (const l of (bb.expanded ? bb.lines : shownLines)) cols = Math.max(cols, Math.min(l.s.length, maxCols));
       if (bb.lines.length > 1) cols = Math.max(cols, Math.min(maxCols, 18));
       const rows = clamp(bb.expanded ? bb.lines.length : shownLines.length, 1, maxRows);
-      return { cols, rows, maxRows, w: cols * colW(t) + dotsDx(bb), h: rows * CH * t };
+      // Proportional type runs narrower than the column grid: the frame hugs the widest line as drawn (bold a touch wider).
+      const font = `${bb.kind === 'thought' ? 400 : 500} ${fontPx(t)}px ${G.SANS}`;
+      let tw = 0;
+      for (const l of (bb.expanded ? bb.lines : shownLines)) tw = Math.max(tw, G.textW(l.s, font));
+      return { cols, rows, maxRows, w: Math.min(cols * colW(t), Math.ceil(tw * 1.06) + 2) + dotsDx(bb), h: rows * CH * t };
     };
 
     const step = (bb, dt, env) => {
@@ -520,8 +524,8 @@
       // grows critically damped too: an overshoot as each line arrives bobbed the text up and down mid-read.
       const [sk, sc] = bb.input ? [460, 42] : [190, 28];
       spring(bb.w, tw, sk, sc, dt); spring(bb.h, thh, sk, sc, dt);
-      spring(bb.pop, bb.closing ? 0 : 1, 240, 15, dt);
-      spring(bb.cloud, bb.kind === 'thought' ? 1 : 0, 120, 13, dt);
+      spring(bb.pop, bb.closing ? 0 : 1, 240, 31, dt); // critically damped: no overshoot
+      spring(bb.cloud, bb.kind === 'thought' ? 1 : 0, 120, 22, dt);
       // scroll: follow the newest line while speaking
       const totalLines = bb.lines.filter((l) => l.start <= bb.shown).length;
       const maxScroll = Math.max(0, (bb.expanded ? bb.lines.length : totalLines) - inner.rows);
@@ -584,7 +588,7 @@
       const tip = beside
         ? { x: m.x + (bb.side === 'right' ? 1 : -1) * k.R * 0.92, y: m.y - k.R * 0.25 }
         : { x: m.x + clamp((bb.x.x + w / 2 - m.x) * 0.25, -k.R * 0.4, k.R * 0.4), y: bb.below ? m.y + k.R * 0.95 : m.y - k.R * 0.98 };
-      spring(bb.tail.x, tip.x, 90, 9, dt); spring(bb.tail.y, tip.y, 90, 9, dt);
+      spring(bb.tail.x, tip.x, 90, 19, dt); spring(bb.tail.y, tip.y, 90, 19, dt);
       bb.trail = clamp(bb.trail + dt * (bb.kind === 'thought' ? 3 : -4), 0, 1);
       // lifetime
       if (bb.closing) { bb.closing += dt; return; }
@@ -597,7 +601,7 @@
       }
     };
 
-    // ---- bubbles: the card look, with a stepped tail to the body (or, thinking, two little steps up from it) ----
+    // ---- bubbles: the card look, with a small tail to the body (or, thinking, two little dots up from it) ----
     // The frame as drawn this instant: it pops in and out around the point its tail comes from.
     const bubbleBox = (bb) => {
       const pop = clamp(bb.pop.x, 0, 1.08), beside = bb.side === 'left' || bb.side === 'right';
@@ -620,7 +624,7 @@
         [[0.32, 8], [0.7, 5]].forEach(([u, sz], i) => {
           if (bb.trail < i * 0.3) return;
           const s = sz * bb.cloud.x, cx = base[0] + (tip[0] - base[0]) * u, cy = base[1] + (tip[1] - base[1]) * u;
-          G.chrome(ctx, cx - s / 2, cy - s / 2, s, s, { corner: i ? 1 : 2, glint: false });
+          G.chrome(ctx, cx - s / 2, cy - s / 2, s, s, { corner: s, glint: false });
         });
       }
       const tail = speechTail > 0.05 ? { side, at: across ? tip[0] : tip[1], to: tip, w: 14 * speechTail } : null;
@@ -629,19 +633,18 @@
       const streaming = bb.kind !== 'thought' && (bb.shown < bb.text.length || (bb.input?.focused && !bb.input.processing && !bb.closing));
       if (streaming && f.w > 40) {
         const run = f.w - 32, u = pen.reduced ? 0.4 : (now * 0.8) % 1;
-        ctx.save(); ctx.shadowColor = G.rgba(G.ACC, 0.8); ctx.shadowBlur = 6; ctx.fillStyle = G.HOT;
+        ctx.save(); ctx.fillStyle = G.TEXT;
         ctx.fillRect(f.x + 8 + run * u, f.y - 0.25, 16, 1.5); ctx.restore();
       }
-      // Thinking: three small squares, one lit at a time; before the words when there are any.
+      // Thinking: three small dots, one dark at a time (an eased cross-fade); before the words when there are any.
       if (bb.kind === 'thought' && bb.cloud.x > 0.3) {
-        const dx = bb.text ? f.x + padX(bb) : f.x + (f.w - DOTS_W) / 2, cy = f.y + f.h / 2, lit = Math.floor(now * 5) % 3;
+        const dx = bb.text ? f.x + padX(bb) : f.x + (f.w - DOTS_W) / 2, cy = f.y + f.h / 2, ph = (now * 2.5) % 3, a0 = ctx.globalAlpha;
         for (let i = 0; i < 3; i++) {
-          const on = i === lit;
-          ctx.save();
-          if (on) { ctx.shadowColor = G.rgba(G.ACC, 0.8); ctx.shadowBlur = 6; } else ctx.globalAlpha *= 0.55;
-          ctx.fillStyle = on ? G.ACC : G.MID; ctx.fillRect(Math.round(dx + i * 10), Math.round(cy - 2 - (on ? 1.5 : 0)), 4, 4);
-          ctx.restore();
+          const d = Math.min(Math.abs(ph - i), 3 - Math.abs(ph - i)), on = pen.reduced ? (i === 1 ? 1 : 0) : clamp(1 - d, 0, 1);
+          ctx.fillStyle = on > 0.5 ? G.TEXT : G.LINE; ctx.globalAlpha = a0 * (0.55 + 0.45 * on);
+          ctx.beginPath(); ctx.arc(dx + i * 10 + 2, cy, 2.25, 0, Math.PI * 2); ctx.fill();
         }
+        ctx.globalAlpha = a0;
       }
       // Listening: the voice level as thin glowing bars under the transcript, a sweep while it's finished off.
       if (bb.input?.listen) {
@@ -649,7 +652,7 @@
         const n = Math.max(1, Math.floor((x1 - x0) / 5));
         while (inp.levels.length < n) inp.levels.unshift(0);
         if (inp.levels.length > n) inp.levels.splice(0, inp.levels.length - n);
-        ctx.save(); ctx.shadowColor = G.rgba(G.ACC, 0.6); ctx.shadowBlur = 4; ctx.fillStyle = G.ACC;
+        ctx.save(); ctx.fillStyle = G.TEXT;
         for (let i = 0; i < n; i++) {
           let v = inp.levels[i];
           if (inp.processing) v = 0.15 + 0.7 * Math.max(0, Math.sin(now * 9 - i * 0.55)) ** 3;
@@ -678,12 +681,12 @@
         const bx = f.x + f.w - 7, top = f.y + padY(bb), len = Math.max(4, f.h - padY(bb) * 2);
         const total = bb.lines.length, frac = bb.rows / total, pos = bb.scroll.x / Math.max(1, total - bb.rows);
         const tl = Math.max(6, len * frac), t0 = top + (len - tl) * clamp(pos, 0, 1);
-        ctx.fillStyle = G.rgba(G.ACC, 0.15); ctx.fillRect(bx, top, 2, len);
-        ctx.fillStyle = G.ACC; ctx.fillRect(bx, t0, 2, tl);
+        ctx.fillStyle = G.TINT; ctx.fillRect(bx, top, 2, len);
+        ctx.fillStyle = G.MID; ctx.fillRect(bx, t0, 2, tl);
         if (bb.ended && bb.scroll.x < total - bb.rows - 0.05) {
-          const cx = f.x + f.w - 20, cy = f.y + f.h - 7 + (Math.sin(now * 6) > 0 ? 1 : 0);
-          ctx.fillStyle = G.HOT;
-          for (const [dx, dy] of [[-4, -2], [-2, 0], [0, 2], [2, 0], [4, -2]]) ctx.fillRect(cx + dx - 1, cy + dy - 1, 2, 2);
+          const cx = f.x + f.w - 20, cy = f.y + f.h - 7;
+          ctx.strokeStyle = G.MID; ctx.lineWidth = 1.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+          ctx.beginPath(); ctx.moveTo(cx - 4, cy - 2); ctx.lineTo(cx, cy + 2); ctx.lineTo(cx + 4, cy - 2); ctx.stroke();
         }
       }
       ctx.restore();
@@ -716,13 +719,13 @@
         let f = fonts.get(st);
         if (!f) {
           const w = st & (md?.BOLD ?? 0) ? 700 : base, it = st & (md?.ITAL ?? 0) ? 'italic ' : '';
-          f = `${it}${w} ${fpx}px "Martian Mono", "Roamies Arabic", Menlo, ui-monospace, monospace`; fonts.set(st, f);
+          f = `${it}${w} ${fpx}px ${G.SANS}`; fonts.set(st, f);
         }
         return f;
       };
       let curFont = '';
       tctx.textBaseline = 'middle'; tctx.textAlign = 'left';
-      const ink = dim ? css(PAL[L - 2], 0.9) : TEXT_INK, accent = dim ? ink : TEXT_ACCENT;
+      const ink = dim ? TEXT_DIM : TEXT_INK, accent = dim ? ink : TEXT_ACCENT;
       for (let li = first; li <= last; li++) {
         const line = lines[li], cy = (li - s0 + 0.5) * lh;
         // Lines scrolling past the top or bottom fade out instead of being cut in half.
@@ -742,25 +745,31 @@
           }
           continue;
         }
+        // Proportional letters: each sits after the last one's real width; a line wider than the grid is squeezed to it.
+        tctx.font = curFont = fontFor(0);
+        const lw = tctx.measureText(line.s).width, sq = lw > iw ? iw / lw : 1;
+        let px = 0;
         for (let j = 0; j < line.s.length; j++) {
           const idx = line.start + j;
           if (idx >= shown) break;
           if (line.s[j] === ' ') {
+            const sw = tctx.measureText(' ').width * sq;
             // A link's underline runs on under the spaces between its words.
-            if (R.md && (bb.sty?.[idx] ?? 0) & R.md.LINK && (bb.sty?.[idx + 1] ?? 0) & R.md.LINK) { tctx.fillStyle = TEXT_ACCENT; tctx.fillRect(j * cw, cy + lh * 0.36, cw, Math.max(1, t * 0.4)); }
+            if (R.md && (bb.sty?.[idx] ?? 0) & R.md.LINK && (bb.sty?.[idx + 1] ?? 0) & R.md.LINK) { tctx.fillStyle = TEXT_ACCENT; tctx.fillRect(px, cy + lh * 0.36, sw, Math.max(1, t * 0.4)); }
+            px += sw;
             continue;
           }
           const em = emojiAt(line.s, j);
           const ch = em ? em.cluster : line.s[j];
-          // Each new letter lands white, then settles to the text colour (code and links in the accent). It lands
-          // in place: a little hop per letter made the line being read shake while it streamed in.
+          // Each new letter lands in ink and stays (code in the second gray, links underlined). It lands in place: a
+          // little hop per letter made the line being read shake while it streamed in.
           const st = ph ? 0 : bb.sty?.[idx] ?? 0, f = fontFor(st);
           if (f !== curFont) { tctx.font = f; curFont = f; }
-          const age = ph ? 9 : now - (bb.at[idx] ?? 0), x = j * cw + (em ? cw * 0.15 : 0), y = cy;
-          const marked = md && st & (md.CODE | md.LINK);
-          tctx.fillStyle = age < 0.12 ? '#ffffff' : marked ? accent : ink;
-          tctx.fillText(ch, x, y);
-          if (md && st & md.LINK) tctx.fillRect(x, cy + lh * 0.36, cw, Math.max(1, t * 0.4));
+          const x = px, y = cy, adv = tctx.measureText(ch).width * sq;
+          tctx.fillStyle = md && st & md.CODE && !dim ? TEXT_CODE : md && st & md.LINK ? accent : ink;
+          tctx.save(); tctx.translate(x, y); tctx.scale(sq, 1); tctx.fillText(ch, 0, 0); tctx.restore();
+          if (md && st & md.LINK) tctx.fillRect(x, cy + lh * 0.36, adv, Math.max(1, t * 0.4));
+          px += adv;
           if (em) j += em.n - 1;
         }
       }
@@ -771,7 +780,9 @@
         if (bb.text) ({ li, col } = caretAt(bb.lines, bb.input.caret ?? bb.text.length));
         if (col >= bb.cols) col = bb.cols - 1;
         const cy = (li - s0) * lh;
-        if (cy > -1 && cy < ih) { tctx.fillStyle = css(HOT); tctx.fillRect(col * cw + 0.5, cy + lh * 0.15, Math.max(1.5, t * 0.8), lh * 0.7); }
+        tctx.font = fontFor(0);
+        const cxp = bb.text ? Math.min(iw - 1, tctx.measureText((bb.lines[li]?.s ?? '').slice(0, col)).width) : 0;
+        if (cy > -1 && cy < ih) { tctx.fillStyle = TEXT_INK; tctx.fillRect(cxp + 0.5, cy + lh * 0.15, Math.max(1.5, t * 0.6), lh * 0.7); }
       }
       // Clip to the frame as it is this instant: it may still be growing, or shrinking away on close.
       const cx1 = fr.x + fr.w - padX(bb) + 2, cy1 = fr.y + fr.h - padY(bb) - (bb.input?.listen ? (METER + 1) * P : 0) - footH(bb) + 2;
@@ -808,29 +819,27 @@
       if (alpha <= 0) return;
       ctx.save();
       ctx.globalAlpha *= alpha;
-      // It lands in three small steps.
-      ctx.translate(0, pen.reduced ? 0 : -Math.round((1 - u) * 3) * 3);
-      G.chrome(ctx, g.x, g.y, g.w, g.h, { edge: fail ? G.CORAL : G.ACC });
+      // It eases into place.
+      ctx.translate(0, pen.reduced ? 0 : -(1 - u) * (1 - u) * 6);
+      G.chrome(ctx, g.x, g.y, g.w, g.h, { edge: fail ? G.CORAL : G.LINE });
       const sx = g.x + 20, sy = g.y + g.h / 2;
       if (!st.status) {
         const head = Math.floor(now * 14) % 8;
         for (let i = 0; i < 8; i++) {
           const a = (i / 8) * Math.PI * 2 - Math.PI / 2, d = (head - i + 8) % 8;
-          ctx.fillStyle = d === 0 ? G.HOT : d < 3 ? G.ACC : G.DEEP;
+          ctx.fillStyle = d === 0 ? G.TEXT : d < 3 ? G.MID : G.LINE;
           ctx.fillRect(Math.round(sx + Math.cos(a) * 5) - 1, Math.round(sy + Math.sin(a) * 5) - 1, 2, 2);
         }
         // Its progress along the bottom edge when known, else a light running along it.
         const run = g.w - 32;
-        ctx.save(); ctx.shadowColor = G.rgba(G.ACC, 0.8); ctx.shadowBlur = 6; ctx.fillStyle = G.ACC;
+        ctx.save(); ctx.fillStyle = G.TEXT;
         if (st.p != null) ctx.fillRect(g.x + 16, g.y + g.h - 1.5, run * clamp(st.p, 0, 1), 1.5);
         else ctx.fillRect(g.x + 16 + (run - 14) * (pen.reduced ? 0.3 : (now * 0.9) % 1), g.y + g.h - 1.5, 14, 1.5);
         ctx.restore();
       } else if (!fail) {
-        ctx.fillStyle = G.ACC;
-        for (const [dx, dy] of [[-4, 0], [-3, 1], [-2, 2], [-1, 3], [0, 4], [1, 3], [2, 2], [3, 1], [4, 0], [5, -1], [6, -2]]) ctx.fillRect(sx + dx - 1, sy + dy - 1, 2, 2);
+        G.pen(ctx, [[sx - 5, sy], [sx - 1.5, sy + 3.5], [sx + 5.5, sy - 3.5]], G.TEXT, 1.75);
       } else {
-        ctx.fillStyle = G.CORAL;
-        for (let q = -4; q <= 4; q += 2) { ctx.fillRect(sx + q - 1, sy + q - 1, 2, 2); ctx.fillRect(sx + q - 1, sy - q - 1, 2, 2); }
+        G.pen(ctx, [[sx - 4, sy - 4], [sx + 4, sy + 4]], G.CORAL, 1.75); G.pen(ctx, [[sx + 4, sy - 4], [sx - 4, sy + 4]], G.CORAL, 1.75);
       }
       let tx = g.x + 36;
       if (verb) tx += G.typed(ctx, verb, tx, sy + 0.5, TAG_VERB, G.DIM, (st.age - 0.08) / 0.25) + 7;

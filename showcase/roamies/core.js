@@ -482,9 +482,9 @@
   // Text in a right-to-left script (Hebrew, Arabic, Syriac, Thaana, N'Ko and their presentation forms, #69).
   const RTL = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
   R.rtl = (s) => RTL.test(String(s ?? ''));
-  // A canvas font for right-to-left text: the Arabic font first, so its own narrow space is used between Arabic words
-  // (Martian Mono's space is a whole monospace cell). Other text keeps the font it was given.
-  R.rtlFont = (s, font) => (R.rtl(s) ? String(font).replace('"Martian Mono"', '"Roamies Arabic RTL", "Martian Mono"') : font);
+  // A canvas font for right-to-left text: a stack still naming the old monospace face gets the system font instead, so
+  // Arabic words keep a normal space between them. Other text keeps the font it was given.
+  R.rtlFont = (s, font) => (R.rtl(s) ? String(font).replace('"Martian Mono", "Roamies Arabic"', 'system-ui, -apple-system, "Helvetica Neue"').replace('"Martian Mono"', 'system-ui, -apple-system, "Helvetica Neue"') : font);
   R.hitRects = (test, box, cell = 12, pad = 8) => {
     const out = [];
     const x0 = Math.floor(box[0]), y0 = Math.floor(box[1]), cols = Math.ceil(box[2] / cell), rows = Math.ceil(box[3] / cell);

@@ -5,7 +5,7 @@
   const R = window.Roamie;
   const { clamp } = R;
   const G = R.glass;
-  const BODY = `400 13px ${G.MONO}`, NOW = `500 13px ${G.MONO}`, SMALL = `400 11px ${G.MONO}`, HEAD = `500 10px ${G.MONO}`;
+  const BODY = `400 13px ${G.SANS}`, NOW = `500 13px ${G.SANS}`, SMALL = `400 12px ${G.SANS}`, HEAD = `400 12px ${G.SANS}`;
   const now = () => performance.now() / 1000;
 
   // ---------- a card beside the Sidekick: placed and sprung beside it, opening from its top-left corner ----------
@@ -24,7 +24,7 @@
       let tx = side === 'right' ? m.x + gap : m.x - gap - w, ty = Math.min(m.y - h / 2 + slot, m.y + k.R * 1.2 - h);
       if (tx < l + 8 || tx + w > r - 8) { tx = m.x - w / 2; ty = m.y - k.R * 1.4 - h - P * 4 - Math.abs(slot); if (ty < t + 8) ty = m.y + k.R * 1.4 + P * 4 + Math.abs(slot); }
       tx = clamp(tx, l + 8, Math.max(l + 8, r - w - 8)); ty = clamp(ty, t + 8, Math.max(t + 8, b - h - 8));
-      const spring = (s, target) => { s.v += ((target - s.x) * 70 - s.v * 11) * dt; s.x += s.v * dt; };
+      const spring = (s, target) => { s.v += ((target - s.x) * 70 - s.v * 17) * dt; s.x += s.v * dt; };
       if (!this.placed) { this.x.x = tx; this.y.x = ty; this.placed = true; }
       spring(this.x, tx); spring(this.y, ty);
       this.geo = { x: Math.round(this.x.x), y: Math.round(this.y.x), w, h };
@@ -39,7 +39,8 @@
       const before = this.steps ?? [];
       this.steps = (e.steps ?? []).map((s, i) => ({ ...s, at: before[i]?.state === s.state ? before[i].at : now() }));
       for (const [i, s] of this.steps.entries()) if (!fresh && before[i] && before[i].state !== s.state && (s.state === 'ok' || s.state === 'bad')) k.S(s.state === 'ok' ? 'tick' : 'error');
-      this.head = String(e.head ?? 'your request').toLowerCase();
+      const head = String(e.head ?? 'your request').toLowerCase();
+      this.head = head.charAt(0).toUpperCase() + head.slice(1);
       this.lay = null;
       if (e.final) this.close(k, 4.5);
     }
@@ -68,10 +69,8 @@
       ctx.globalAlpha *= fade;
       G.chrome(ctx, x, y, Math.max(16, w * e), Math.max(16, L.h * e));
       if (a > 0) {
-        ctx.fillStyle = 'rgba(120,255,226,0.06)'; ctx.fillRect(x + 2, y + 2, w - 4, 24);
-        ctx.fillStyle = G.DEEP; ctx.fillRect(x + 2, y + 26, w - 4, 1);
-        [0, 1].forEach((k) => { ctx.fillStyle = k ? G.DEEP : G.ACC; ctx.fillRect(x + 12 + k * 12, y + 11, 5, 5); });
-        G.typed(ctx, this.head, x + w / 2, y + 14, HEAD, G.DIM, a / 0.4, { anchor: 'middle' });
+        ctx.fillStyle = G.EDGE; ctx.fillRect(x + 1, y + 26, w - 2, 1);
+        G.typed(ctx, this.head, x + 14, y + 14, HEAD, G.DIM, a / 0.4);
         const steps = this.steps ?? [], done = steps.filter((s) => s.state === 'ok' || s.state === 'bad').length;
         G.typed(ctx, `${done} of ${steps.length}`, x + w - 14, y + 14, HEAD, G.DIM, 1, { anchor: 'end' });
         ctx.save(); ctx.beginPath(); ctx.rect(x + 2, y + 27, w - 4, L.h - 29); ctx.clip();
@@ -80,15 +79,15 @@
           if (!s || ra <= 0) return;
           const ry = y + r.y;
           if (r.why) { r.why.forEach((ln, j) => G.typed(ctx, ln, x + 40, ry + 8 + j * 16, SMALL, G.NOTE, (ra - 0.1) / 0.4)); return; }
-          const since = t - s.at, ink = s.state === 'ok' ? G.MID : s.state === 'bad' ? G.CORAL : s.state === 'now' ? G.ACC : '#3f8f88';
-          if (s.state === 'now') { ctx.fillStyle = 'rgba(120,255,226,0.07)'; ctx.fillRect(x + 4, ry, w - 8, r.h); }
+          const since = t - s.at, ink = s.state === 'ok' ? G.MID : s.state === 'bad' ? G.CORAL : s.state === 'now' ? G.TEXT : G.LINE;
+          if (s.state === 'now') { ctx.fillStyle = G.TINT; ctx.fill(G.steppedPath(x + 4, ry, w - 8, r.h, 8)); }
           G.pen(ctx, G.ringPts(x + 24, ry + 12, 7, r.i * 2.3), ink, 2.2, ra / 0.3);
           const font = s.state === 'now' ? NOW : BODY;
           r.lines.forEach((ln, j) => G.typed(ctx, ln, x + 40, ry + 13 + j * 19, font, s.state === 'ok' || !s.state ? G.DIM : G.TEXT, (ra - 0.1) / 0.4));
           // Done: a tick in the ring, then the words struck through.
           if (s.state === 'ok') {
             const u = Math.min(ra, since);
-            G.pen(ctx, [[x + 19.5, ry + 12], [x + 22.5, ry + 15.5], [x + 28.5, ry + 8]], G.HOT, 2.2, u / 0.2);
+            G.pen(ctx, [[x + 19.5, ry + 12], [x + 22.5, ry + 15.5], [x + 28.5, ry + 8]], G.TEXT, 2.2, u / 0.2);
             r.lines.forEach((ln, j) => G.pen(ctx, [[x + 38, ry + 13 + j * 19], [x + 42 + G.textW(ln, font), ry + 12.5 + j * 19]], G.MID, 1.6, (u - 0.15 - j * 0.2) / 0.3));
           }
           if (s.state === 'bad') {
@@ -99,7 +98,7 @@
           // The step being done: its ring pulses outward.
           if (s.state === 'now' && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
             const p = (t % 1.4) / 1.4;
-            ctx.save(); ctx.globalAlpha *= 1 - p; ctx.strokeStyle = G.ACC; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x + 24, ry + 12, 8 + p * 9, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+            ctx.save(); ctx.globalAlpha *= 1 - p; ctx.strokeStyle = G.LINE; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x + 24, ry + 12, 8 + p * 9, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
           }
         });
         ctx.restore();
