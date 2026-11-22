@@ -358,7 +358,8 @@ function sdkOptions(o, resume, link) {
     canUseTool: async (name, toolInput) => (name.startsWith(TOOL_PREFIX) ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `${name} is not available in Roamies.` }),
     includePartialMessages: true,
     pathToClaudeCodeExecutable: o.executable,
-    env: { ...(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION) },
+    // No telemetry or other non-essential calls from Claude Code: only the model requests leave this Mac.
+    env: { ...(o.env ?? process.env), CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: String(MAX_TOOL_DESCRIPTION), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1' },
     abortController,
     stderr: (d) => link.stderr?.(d),
     ...(resume ? { resume } : {}),
