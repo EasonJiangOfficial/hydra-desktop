@@ -36,4 +36,15 @@ assert.match(panel, /toggle\('Detached orb'[\s\S]{0,300}act\(h\.detached \? 'orb
 assert.match(host, /if \(Roamie\.orbAttached == null\) Roamie\.orbAttached = true;/);
 assert.match(host, /m\.kind === 'orb_mode'\) \{ Roamie\.orbAttached = !m\.detached;/);
 assert.match(core, /R\.orbAttached\) continue;/);
+// Right-click, "Attach to Hydra" (owner: "right clicking and hitting attach to hydra doesnt wokr"): the overlay answers
+// a choice's first button with 'yes', not its label, so the offer must read that answer as a yes. Run the real branch.
+assert.match(host, /onChoose: \(i\) => finishAsk\(i === 0 \? 'yes' : null\)/, 'first button answers yes');
+const offer = side.match(/else if \(id === 'orb:offer' && orbDetached\(\)\) \{([\s\S]*?)\n  \}\n/)[1];
+const { isYes } = await import('../safety.mjs');
+for (const [answer, attached] of [['yes', true], [null, false]]) {
+  const o = { config: { orbDetached: true }, isYes, ask: async () => answer, mode: [] };
+  o.setOrbMode = (d, from) => o.mode.push([d, from]);
+  await vm.runInNewContext(`(async () => {${offer}\n})()`, o);
+  assert.deepEqual(o.mode, attached ? [[false, 'orb']] : [], `answer ${answer}`);
+}
 console.log('orb mode tests: passed');

@@ -2734,8 +2734,9 @@ async function onMenu(id, via) {
   else if (id === 'orb:detach') setOrbMode(true, 'menu');
   else if (id === 'orb:attach') setOrbMode(false, 'menu');
   else if (id === 'orb:offer' && orbDetached()) {
+    // The overlay answers a choice's first button with 'yes' (host.js finishAsk), never with its label.
     const a = await ask({ placeholder: 'The orb', choices: ['Attach to Hydra', 'Keep it here'] });
-    if (/^attach/i.test(String(a ?? ''))) setOrbMode(false, 'orb');
+    if (isYes(a)) setOrbMode(false, 'orb');
   }
   else if (id === 'power:wake') power.wake('panel');
   else if (id === 'power:sleep') power.sleep('panel');
