@@ -796,16 +796,21 @@
         micPicker(v),
         v.mac ? toggle('Mute Mac while talking', 'Other sounds go quiet while you talk', v.mute, () => act('mutetalk'), 'mutetalk') : null,
         v.mac && v.on ? speakPicker(v) : null)
-      : group(null, 'When the mic opens without a key.', null,
+      : [group('Triggers', 'Ways to start talking without a key. Heard on this Mac only; nothing leaves it until you talk.', null,
+        v.mac ? toggle('Clap to talk', needs('A double clap starts listening. Asleep, it wakes Hydra.'), v.clapTalk, () => act('claptalk'), 'claptalk') : null,
+        v.wake ? toggle('Key phrase', needs(`Say “Hey ${v.wakeName || 'Hydra'}” to start listening. Not while asleep.`), v.wakeWord, () => act('wakeword'), 'wakeword') : null,
+        v.wake ? el('div', { className: 'setting' }, el('span', {}, 'Phrase'),
+          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: `Hey ${v.wakeName || 'Hydra'}` }), link('Change', () => act('wakename'), { k: 'wakename', aria: 'Change the key phrase' }))) : null,
+        el('div', { className: 'setting' }, el('span', {}, 'Sleep word', info('Said while Hydra listens, it puts Hydra to sleep at once.')),
+          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: v.sleepWord ?? 'Hydra, sleep' }), link('Change', () => act('sleepword', true), { k: 'sleepword', aria: 'Change the sleep word' }))),
+        v.mac ? toggle('Interrupt by talking', needs('Talk while Hydra speaks to stop it and say something new. A double clap does it too.'), v.barge, () => act('barge'), 'barge') : null),
+      group('After replies', 'When the mic opens without a key.', null,
         toggle('Auto-listen', needs(v.listenEvery ? 'Mic opens after every spoken reply.' : 'Mic opens when I ask you something.'), v.autoListen, () => act('autolisten'), 'autolisten'),
         v.autoListen && v.listenChoices ? el('div', { className: 'reveal', 'data-anim': 'listen-more' },
           toggle('After every reply', needs('Not just questions, so you can keep talking.'), v.listenEvery, () => act('listenevery'), 'listenevery'),
           el('p', { className: 'sub', textContent: 'Mic waits for you' }),
           picks('Mic waits for you', v.listenChoices.map((s) => [String(s), `${s} s`]), String(v.listenSecs), (x) => act(`listensecs:${x}`), 'listensecs')) : null,
-        toggle('Listen after reminders', needs('Mic opens after a reminder, so you can say “snooze 10 minutes”.'), v.snoozeListen, () => act('snoozelisten'), 'snoozelisten'),
-        v.wake ? toggle('Wake word', needs(`Say “Hey ${v.wakeName || 'Roamies'}” to talk. Mic stays on.`), v.wakeWord, () => act('wakeword'), 'wakeword') : null,
-        v.wake ? el('div', { className: 'setting' }, el('span', {}, 'Wake word name', el('small', { textContent: `Hey ${v.wakeName || 'Roamies'}` })),
-          link('Change', () => act('wakename'), { k: 'wakename', aria: 'Change the wake word name' })) : null))];
+        toggle('Listen after reminders', needs('Mic opens after a reminder, so you can say “snooze 10 minutes”.'), v.snoozeListen, () => act('snoozelisten'), 'snoozelisten'))])];
   }
   // The keys that work from anywhere. On Wayland no app may hold its own, so it lists the commands to bind instead.
   const SHORTCUT_LABELS = { summon: 'Show or hide me', snap: 'Ask about an area', list: 'Your list' };
@@ -911,13 +916,10 @@
     const h = state.hydra ?? {};
     const clap = CLAP.reduce((best, [v]) => (Math.abs(+v - (h.clap ?? 0.5)) < Math.abs(+best - (h.clap ?? 0.5)) ? v : best), '0.5');
     return [
-      group('Agent', 'Asleep after 5 minutes without talk. A double clap wakes it.', null,
+      group('Agent', 'Asleep after 5 minutes without talk. A double clap wakes it. The sleep word and the other triggers are on the Listening page.', null,
         el('div', { className: 'setting' },
           el('span', {}, h.asleep ? 'Asleep' : 'Listening'),
           h.asleep ? btn('Wake', () => act('power:wake'), { kind: 'primary', k: 'power:wake' }) : btn('Sleep', () => act('power:sleep'), { k: 'power:sleep' })),
-        el('div', { className: 'setting' },
-          el('span', {}, 'Sleep word', info('Said while it listens, it puts Hydra to sleep at once.')),
-          el('span', { className: 'row-btns' }, el('span', { className: 'val', textContent: h.sleepWord ?? 'Hydra, sleep' }), link('Change', () => act('sleepword', true), { k: 'sleepword', aria: 'Change the sleep word' }))),
         el('p', { className: 'sub', textContent: 'Clap sensitivity' }),
         picks('Clap sensitivity', CLAP, clap, (x) => act(`clapsens:${x}`), 'clapsens', { '0.2': 'Only loud claps close by.', '0.5': 'Claps from across a desk.', '0.8': 'Softer claps from across the room.' })),
       group("Hydra's data", 'The Hydra agent API. Pairing comes with it.', null,
@@ -1204,7 +1206,7 @@
       fallbacks: { on: true, slots: ['gemini:gemini-3.8-flash', ''], limited: [{ label: 'Claude', until: at + 40 * 60e3 }], using: 'gemini:gemini-3.8-flash' },
       // Effort per slot: '' is automatic (low); computer use is set to High, and backup 1 (Gemini, which only thinks at High) too.
       efforts: { default: '', computer: 'high', code: '', agents: '', draw: '', web: '', backup1: 'high', backup2: '' },
-      voice: { on: true, keys: '⌃⌥', ready: true, mac: true, lang: 'auto', langOnline: null, studioSpeak: 'short', mute: true, autoListen: q.has('listen'), listenEvery: false, listenSecs: 8, listenChoices: [3, 5, 8, 10, 15], mics: [{ id: 'BuiltIn', name: 'MacBook Pro Microphone' }, { id: 'airpods', name: 'AirPods Pro' }], mic: '', micAuto: 'MacBook Pro Microphone', wake: !q.has('nowake'), wakeWord: false, wakeName: 'Roamies', download: null }, askKeys: '⌥⌘', brief: { on: true, todoist: false, canTodoist: true }, focus: { until: null, task: '', list: ['YouTube', 'Reddit', 'X', 'Steam', 'Netflix'], custom: false }, sync: { dir: '', at: null, error: null, paused: false }, shortcuts: { talk: { value: 'control+option', pairs: [['control+option', 'Control+Option'], ['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] }, keys: [{ id: 'summon', words: 'Control+Option+S' }, { id: 'snap', words: 'Control+Option+A' }, { id: 'list', words: 'Control+Option+L' }] }, writeKeys: { value: 'option+command', pairs: [['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] },
+      voice: { on: true, keys: '⌃⌥', ready: true, mac: true, lang: 'auto', langOnline: null, studioSpeak: 'short', mute: true, autoListen: q.has('listen'), listenEvery: false, listenSecs: 8, listenChoices: [3, 5, 8, 10, 15], mics: [{ id: 'BuiltIn', name: 'MacBook Pro Microphone' }, { id: 'airpods', name: 'AirPods Pro' }], mic: '', micAuto: 'MacBook Pro Microphone', wake: !q.has('nowake'), wakeWord: true, wakeName: 'Hydra', clapTalk: true, barge: true, sleepWord: 'Hydra, sleep', download: null }, askKeys: '⌥⌘', brief: { on: true, todoist: false, canTodoist: true }, focus: { until: null, task: '', list: ['YouTube', 'Reddit', 'X', 'Steam', 'Netflix'], custom: false }, sync: { dir: '', at: null, error: null, paused: false }, shortcuts: { talk: { value: 'control+option', pairs: [['control+option', 'Control+Option'], ['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] }, keys: [{ id: 'summon', words: 'Control+Option+S' }, { id: 'snap', words: 'Control+Option+A' }, { id: 'list', words: 'Control+Option+L' }] }, writeKeys: { value: 'option+command', pairs: [['option+command', 'Option+Command'], ['control+command', 'Control+Command'], ['control+shift', 'Control+Shift'], ['option+shift', 'Option+Shift']] },
       sound: true, notch: q.has('notch') || q.has('capsule') ? 'drop' : null, notchReal: q.has('notch'), actions: false, skipAllow: false, login: { on: true },
       update: { available: new URLSearchParams(location.search).has('update') && new URLSearchParams(location.search).get('update') !== 'failed' ? '0.9.1' : null, installing: false, checking: false, result: null },
       intro: false,
@@ -1235,7 +1237,7 @@
     // ?v=0.1.36&from=0.1.35: What's new as it looks just after updating from one version to the other.
     if (q.get('v')) s.version = q.get('v');
     if (q.get('from')) s.whatsNewFrom = q.get('from');
-    if (q.get('tab')) setTimeout(() => { if (q.get('mtab')) ui.mtab = q.get('mtab'); if (q.get('atab')) ui.tabs.abilities = q.get('atab'); show(q.get('tab')); }, 0);
+    if (q.get('tab')) setTimeout(() => { if (q.get('mtab')) ui.mtab = q.get('mtab'); if (q.get('atab')) ui.tabs.abilities = q.get('atab'); if (q.get('ltab')) ui.tabs.listening = q.get('ltab'); show(q.get('tab')); }, 0);
     setTimeout(() => window.__panel({ kind: 'state', state: s }), 0);
     return async (cmd, args) => {
       if (cmd !== 'sidecar_send') return null;

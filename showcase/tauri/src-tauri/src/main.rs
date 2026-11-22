@@ -327,6 +327,12 @@ fn to_sidekick_buddy(app: &AppHandle, msg: &Value) {
 fn orb_state(app: AppHandle, window: WebviewWindow, msg: Value) {
     if is_overlay(window.label()) {
         hydra::push(&app, &msg);
+        // Speaking or not, for barge-in: the voice helper listens over Hydra's voice only while it plays.
+        static SPEAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let now = msg.get("state").and_then(Value::as_str) == Some("Speaking");
+        if SPEAKING.swap(now, Ordering::Relaxed) != now {
+            to_voice(&app, &json!({ "cmd": "speaking", "on": now }));
+        }
     }
 }
 
@@ -1833,9 +1839,12 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 // The language takes are recognised in ("auto": the Mac's own language list). macOS helper only.
                 let lang = msg.get("lang").and_then(Value::as_str).unwrap_or("auto");
                 to_voice(app, &json!({ "cmd": "lang", "id": lang }));
-                // Hydra asleep: only the on-device double-clap detector listens. The sleep word, while it's awake.
+                // The on-device double-clap detector: asleep it only wakes Hydra; awake (clap-to-talk) it starts a take.
+                // The sleep word, while it's awake. Barge-in: talking over Hydra stops it and starts a take.
                 let clap = msg.get("clap").and_then(Value::as_bool).unwrap_or(false);
-                to_voice(app, &json!({ "cmd": "clap", "on": clap, "sensitivity": msg.get("clapSensitivity").and_then(Value::as_f64).unwrap_or(0.5) }));
+                to_voice(app, &json!({ "cmd": "clap", "on": clap, "sensitivity": msg.get("clapSensitivity").and_then(Value::as_f64).unwrap_or(0.5),
+                    "asleep": msg.get("asleep").and_then(Value::as_bool).unwrap_or(false), "talk": msg.get("clapTalk").and_then(Value::as_bool).unwrap_or(false) }));
+                to_voice(app, &json!({ "cmd": "barge", "on": msg.get("barge").and_then(Value::as_bool).unwrap_or(true) }));
                 to_voice(app, &json!({ "cmd": "sleep_word", "phrase": msg.get("sleepWord").and_then(Value::as_str).unwrap_or("") }));
             } else {
                 stop_voice(app);

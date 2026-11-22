@@ -627,17 +627,44 @@ final class Voice {
     private var configObserver: NSObjectProtocol?
     // Wake word: on in settings; held off while Roamies answers and speaks; resting just after a take.
     private var wakeOn = false
-    // Asleep: the mic is open only for the double-clap detector (clap.swift); no words are made of anything.
+    // The double-clap detector (clap.swift): asleep, the mic is open only for it and no words are made of anything;
+    // awake, a double clap starts a take (clap-to-talk). With the key phrase on, wake listening's mic hears claps too.
     private var clapOn = false, clapRetryAt = 0.0
-    lazy var clapper = ClapListener { [weak self] in
-        guard let self, self.clapOn else { return }
-        log("double clap")
-        emit(["type": "clap"])
-    }
-    func setClap(_ on: Bool) {
+    private(set) var asleep = false, clapTalk = false
+    lazy var clapper = ClapListener { [weak self] in self?.clapHeard() }
+    func setClap(_ on: Bool, asleep: Bool? = nil, talk: Bool? = nil) {
+        if let asleep { self.asleep = asleep }
+        if let talk { clapTalk = talk }
         guard on != clapOn else { return }
         clapOn = on; clapRetryAt = 0
         if !on { clapper.stop() }
+    }
+    /// A double clap from any of the mics listening (the clap detector, wake listening, or barge-in while Hydra speaks).
+    func clapHeard() {
+        guard clapOn || speaking else { return }
+        switch Trigger.decide(.clap, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) {
+        case .wake: log("double clap"); emit(["type": "clap"])
+        case .take: guard phase == .idle || phase == .wake else { return }; log("double clap: listening"); startTake(via: "clap")
+        case .none: break
+        }
+    }
+    // Barge-in: while Hydra speaks, the owner talking over it (or a double clap) stops the speech and starts a take.
+    // The speech stops because a take starting does that already (the sidecar on voice_state listening).
+    private(set) var bargeOn = true, speaking = false
+    private var bargeRetryAt = 0.0
+    lazy var barger = BargeListener(onTalk: { [weak self] in self?.talkedOver() }, onClap: { [weak self] in self?.clapHeard() })
+    func setBarge(_ on: Bool) { bargeOn = on; if !on { barger.stop() } }
+    func setSpeaking(_ on: Bool) { speaking = on; if !on { barger.stop() } }
+    private func talkedOver() {
+        guard Trigger.decide(.voice, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take, phase == .idle || phase == .wake else { return }
+        log("talked over Hydra: listening")
+        startTake(via: "barge")
+    }
+    /// A hands-free take, as the talk keys start one; mode tells the overlay what started it.
+    private func startTake(via: String) {
+        barger.stop()
+        emit(["type": "trigger", "via": via])
+        listenNow()
     }
     var wakeHold = false {
         didSet { if wakeOn && wakeHold != oldValue { wakeLog(wakeHold ? "paused while Roamies answers" : "resumed") } }
@@ -817,9 +844,21 @@ final class Voice {
             return now - (releasedAt ?? now) >= Self.releaseDebounce
         }()
 
-        // The clap detector has the mic only while nothing else does: a take or wake listening stops it.
-        if clapper.running && (!clapOn || phase != .idle) { clapper.stop() }
-        else if clapOn && phase == .idle && !clapper.running && now >= clapRetryAt && !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+        // Hydra speaking (and interrupting allowed): the barge-in mic, with echo cancellation, has the mic to itself.
+        let barging = bargeOn && speaking && !asleep && (phase == .idle || phase == .wake) && !dryRun && LiveTest.url == nil
+        if barger.running && !barging { barger.stop() }
+        else if barging && !barger.running && now >= bargeRetryAt && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+            if phase == .wake { stopWake() }
+            if engine != nil { stopAudio(close: true) }
+            if clapper.running { clapper.stop() }
+            barger.clapSensitivity = clapper.sensitivity
+            if !barger.start(device: InputDevice.forListening()) { bargeRetryAt = now + 30 }
+        }
+        // The clap detector has the mic only while nothing else does: a take, wake listening (which hears claps itself)
+        // or barge-in stops it.
+        let clapAlone = clapOn && phase == .idle && !wakeOn && !barger.running
+        if clapper.running && !clapAlone { clapper.stop() }
+        else if clapAlone && !clapper.running && now >= clapRetryAt && !dryRun && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
             if engine != nil { stopAudio(close: true) }
             if !clapper.start(device: InputDevice.forListening()) { clapRetryAt = now + 30 }
         }
@@ -827,7 +866,7 @@ final class Voice {
         switch phase {
         case .idle:
             if chord && !prevChord && !blocked { arm(now) }
-            else if wakeAllowed(now) { startWake(now) }
+            else if !barger.running && wakeAllowed(now) { startWake(now) }
         case .wake:
             if chord && !prevChord && !blocked { stopWake(); arm(now); return }
             if !wakeOn || wakeHold { stopWake(); return } // while Roamies answers, the mic stays open but unheard
@@ -1066,6 +1105,7 @@ final class Voice {
         if SleepWord.heard(in: text) { wakeLog("heard the sleep word"); emit(["type": "sleep_word"]); recycleWake(now); return }
         let (rest, d, miss) = WakeWord.scan(text)
         guard let rest else { if let miss { wakeMiss = miss }; return }
+        guard Trigger.decide(.phrase, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take else { return }
         wakeLog("heard the phrase (distance \(d ?? 0))")
         wakeMiss = nil
         // Same mic, same recogniser: what follows the phrase is already the start of the take.
@@ -1144,9 +1184,14 @@ final class Voice {
         }
         guard let r = makeRecognizer() else { return fail("unavailable", [:]) }
         let gain = autoGain, feed = feed
+        // Wake listening keeps the mic, so it listens for a double clap too (made on the first buffer, at its rate).
+        var clapDet: ClapDetector?
+        let clapK = clapper.sensitivity
         let ingest = { [weak self] (buffer: AVAudioPCMBuffer) in
             guard let samples = buffer.floatChannelData?[0] else { feed.append(buffer); return }
             let n = Int(buffer.frameLength)
+            if clapDet == nil { clapDet = ClapDetector(rate: buffer.format.sampleRate, sensitivity: clapK) }
+            if clapDet?.feed(samples, count: n) == true { DispatchQueue.main.async { if self?.phase == .wake { self?.clapHeard() } } }
             var sum: Float = 0
             for i in 0 ..< n { sum += samples[i] * samples[i] }
             let rms = sqrt(sum / Float(max(n, 1)))
@@ -1317,6 +1362,8 @@ if args.contains("--test-gain") {
 }
 // --test-clap checks the double-clap detector on made-up sounds (clap.swift); exits 1 on a failure.
 if args.contains("--test-clap") { exit(ClapTest.run()) }
+// --test-triggers checks what a clap, the key phrase and talking over Hydra do, awake and asleep, and the talk detector.
+if args.contains("--test-triggers") { exit(TriggerTest.run()) }
 // --test-wake checks the wake phrase matcher on transcripts the recogniser could write; exits 1 on a failure.
 if args.contains("--test-wake") {
     var bad = 0
@@ -1587,9 +1634,13 @@ Thread.detachNewThread {
         case "pill": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.wave.off = !on; if !on { voice.wave.hide() } } }
         case "wake": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.setWake(on) } }
         // Hydra is asleep: listen for a double clap only ({"cmd":"clap","on":true,"sensitivity":0.5}).
+        // Awake, with clap-to-talk on: a double clap starts a take ({"asleep":false,"talk":true}).
         case "clap":
-            let on = msg["on"] as? Bool == true, k = msg["sensitivity"] as? Double
-            DispatchQueue.main.async { if let k { voice.clapper.sensitivity = k }; voice.setClap(on) }
+            let on = msg["on"] as? Bool == true, k = msg["sensitivity"] as? Double, asleep = msg["asleep"] as? Bool, talk = msg["talk"] as? Bool
+            DispatchQueue.main.async { if let k { voice.clapper.sensitivity = k }; voice.setClap(on, asleep: asleep, talk: talk) }
+        // Interrupt by talking (a setting), and whether Hydra is speaking now (from the overlay's player).
+        case "barge": let on = msg["on"] as? Bool != false; DispatchQueue.main.async { voice.setBarge(on) }
+        case "speaking": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.setSpeaking(on) }
         case "sleep_word": let p = msg["phrase"] as? String ?? ""; DispatchQueue.main.async { SleepWord.set(p) }
         // The name after "Hey" (empty: Roamies). Only whether it's custom is logged, never the word.
         case "wake_name":
