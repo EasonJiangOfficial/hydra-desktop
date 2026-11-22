@@ -303,7 +303,7 @@ export function stepsText(steps, { clipboard } = {}) {
   return steps.map((s, i) => `${i + 1}. ${one(s)}`).join('\n');
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null, readClipboard = defaultClipboard }) {
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null, readClipboard = defaultClipboard, remote = () => false }) {
   // Relative paths start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   let axNudged = 0;
@@ -408,7 +408,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   async function windowShows(wins, ctx, { okApp = null } = {}) {
     const asks = [];
     for (const w of [wins].flat()) {
-      const v = checkWindow(w, HOME);
+      const v = checkWindow(w, HOME, { viewers: !remote() });
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
       if (v.level === ASK && v.app && okApp && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
@@ -877,7 +877,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       {
         name: 'list_windows', description: 'List the open app windows (app, title, id), front to back.',
         parameters: z.object({}),
-        execute: async () => {
+        // A relay turn (remote(): the owner is not at this Mac, R11-1): every window's app and title is not a plain
+        // read of the three folders, so it asks first.
+        execute: async (_a, ctx) => {
+          if (remote() && !(await confirm('List every open window on your Mac, with each app and window title?', ctx))) throw new Error(`${userName} said no, so I didn't list your windows.`);
           const res = await hands('windows');
           return res.windows.map((w) => `window:${w.id}  ${w.app}${w.title ? ` — ${w.title}` : ''}${w.frontApp ? '  (frontmost app)' : ''}`).join('\n') || 'No windows open.';
         },

@@ -11,10 +11,10 @@ import assert from 'node:assert/strict';
 import crypto, { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
-import { HOLD_MAX, INPUT_PREFIX, TOO_MANY_ADDED, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from '../relay.mjs';
+import { ADDITIONS_UNANSWERED, HOLD_MAX, INPUT_PREFIX, TOO_MANY_ADDED, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from '../relay.mjs';
 import { ADDED_PREFIX, relayApprovalSchema, relayBatchSchema, relayEventsAnswerSchema, relaySubturnSchema, subturnResultSchema } from '../relayschema.mjs';
 import { ClaudeCodeAgent } from '../claudecode.mjs';
-import { BRAIN_SYSTEM, MAC_OFFLINE_TEXT, askMacTool, createBrainTurn } from '../brain-server.mjs';
+import { BRAIN_SYSTEM, MAC_OFFLINE_TEXT, MAC_UNSURE_TEXT, askMacTool, createBrainTurn } from '../brain-server.mjs';
 import { showTool } from '../hydramcp.mjs';
 
 assert.ok(fs.realpathSync(os.homedir()).startsWith(fs.realpathSync(os.tmpdir())), 'runs with a temp HOME (test/run.mjs)');
@@ -218,6 +218,9 @@ const askMac = (hydra, parent, o = {}) => askMacTool({ api: hydra.api('brain-1',
   assert.deepEqual([...hydra.approvals.values()].map((a) => a.summary), ['Open app: /Applications/Safari.app'], 'one relay approval with the full target');
   assert.ok(beats >= 1, 'the brain renewed its own turn while it waited');
   assert.equal(hydra.posts.filter((b) => b.turnId === parent.id).length, 0, 'nothing of the sub-turn was posted to the parent');
+  // R11-7: a sub-turn never says inputsSeen, so Hydra takes no additions for it.
+  const subPosts = hydra.posts.filter((b) => b.device === 'mac-1');
+  assert.ok(subPosts.length > 0 && subPosts.every((b) => b.inputsSeen === undefined), 'no inputsSeen on a sub-turn');
 }
 {
   // Approval declined: nothing done; ask_mac returns what the Mac said.
@@ -301,5 +304,103 @@ const askMac = (hydra, parent, o = {}) => askMacTool({ api: hydra.api('brain-1',
   const mine = fs.readFileSync(new URL('../relayschema.mjs', import.meta.url));
   assert.equal(crypto.createHash('sha256').update(mine).digest('hex'), WEB_SHA256, 'relayschema.mjs differs from the web\'s relay-schema.ts: copy it again and update the hash');
   assert.ok(relayEventsAnswerSchema.safeParse({ ok: true, status: 'claimed', inputs: [{ seq: 1, text: 'x' }] }).success);
+}
+// ---- 7. Round 11.
+{
+  // R11-2: an addition the session took, then max turns before it was answered: answered in a next round, then done.
+  const hydra = fakeHydra();
+  let round = 0;
+  const { query, calls } = sdk(async function* (ctx) {
+    await ctx.next();
+    if (round++ === 0) {
+      yield* says('Thursday: dentist.');
+      await ctx.next(); // the owner's addition is taken (addInput true, so Hydra counts it seen)
+      yield { type: 'result', subtype: 'error_max_turns' };
+      return;
+    }
+    yield* says(' Friday: free.');
+    yield result;
+  });
+  const t = turnFor(hydra);
+  const relay = relayOn(hydra.api('brain-1', 'brain'), sessionRunner(query, {}));
+  relay.start();
+  await until(() => hydra.posts.length >= 1);
+  t.inputs.push({ seq: 1, text: 'and Friday?' });
+  await until(() => t.status === 'done' || t.status === 'error');
+  await relay.stop();
+  assert.equal(t.status, 'done');
+  assert.equal(calls.inputs.at(-1).message.content.at(-1).text, `${ADDED_PREFIX}and Friday?`, 'the unanswered addition is prompted again');
+  assert.equal(hydra.said(t), 'Thursday: dentist. Friday: free.', 'and answered before the done');
+}
+{
+  // R11-2: the session fails after it took an addition: the error says his words were not answered.
+  const hydra = fakeHydra();
+  const { query } = sdk(async function* (ctx) {
+    await ctx.next();
+    yield* says('Working.');
+    await ctx.next();
+    yield { type: 'result', subtype: 'error_during_execution', errors: ['boom'] };
+  });
+  const t = turnFor(hydra);
+  const relay = relayOn(hydra.api('brain-1', 'brain'), sessionRunner(query, {}));
+  relay.start();
+  await until(() => hydra.posts.length >= 1);
+  t.inputs.push({ seq: 1, text: 'and Friday?' });
+  await until(() => t.status === 'error');
+  await relay.stop();
+  assert.match(t.events.at(-1).message, /boom What you added while I worked was not answered\. Say it again\./);
+}
+{
+  // R11-8: held words with no one to answer them end with their own code (the web rewrites a brain's mac_failed).
+  const hydra = fakeHydra();
+  const t = turnFor(hydra);
+  t.beforePost = (row, b) => { if (b.events.at(-1)?.type === 'done' && !row.inputs.length) row.inputs.push({ seq: 1, text: 'and savings?' }); };
+  const relay = relayOn(hydra.api('brain-1', 'brain'), async (turn, h) => { h.emit({ type: 'text', delta: 'You have $5.' }); }, { inputBeatMs: 60_000 });
+  relay.start();
+  await until(() => t.status === 'error');
+  await relay.stop();
+  assert.deepEqual(t.events.at(-1), ADDITIONS_UNANSWERED);
+  assert.notEqual(ADDITIONS_UNANSWERED.code, 'mac_failed');
+}
+{
+  // R11-3: the POST /subturn fails after Hydra made it (a timeout): never sent again in this turn; the model is told.
+  const hydra = fakeHydra();
+  const parent = heldParent(hydra);
+  const real = hydra.api('brain-1', 'brain');
+  let posts = 0;
+  const api = { req: async (p, o = {}) => {
+    if (p === '/api/agent/relay/subturn' && o.method === 'POST') { posts++; await real.req(p, o); throw new Error('timed out'); }
+    return real.req(p, o);
+  } };
+  const tool = askMacTool({ api, turn: { id: parent.id, claimId: parent.claimId, surface: 'phone' }, pollMs: 5 });
+  assert.equal(await tool.execute({ instruction: 'open Safari' }), MAC_UNSURE_TEXT);
+  assert.equal(await tool.execute({ instruction: 'open Safari' }), MAC_UNSURE_TEXT, 'asked again: not sent again');
+  assert.equal(posts, 1);
+  assert.equal([...hydra.turns.values()].filter((x) => x.parentTurnId === parent.id).length, 1, 'one sub-turn, so the Mac runs it once');
+  // A 5xx the same way.
+  const five = askMacTool({ api: { req: async () => res(503, { error: 'unavailable' }) }, turn: { id: parent.id, claimId: parent.claimId, surface: 'phone' } });
+  assert.equal(await five.execute({ instruction: 'open Safari' }), MAC_UNSURE_TEXT);
+}
+{
+  // R11-4: ask_mac stops waiting before the turn's deadline (less a margin), with what the Mac said so far.
+  const hydra = fakeHydra();
+  const parent = heldParent(hydra);
+  const t0 = Date.now();
+  const tool = askMac(hydra, parent, { deadline: t0 + 30_000 + 80, marginMs: 30_000 });
+  const text = await Promise.race([tool.execute({ instruction: 'take a screenshot' }), wait(3000).then(() => 'still waiting')]);
+  assert.equal(text, 'Your Mac took too long.', 'answered before the turn ends, not after 240 s');
+  assert.ok(Date.now() - t0 < 1500);
+  const late = askMac(hydra, parent, { deadline: Date.now() + 1000, marginMs: 30_000 });
+  assert.match(await late.execute({ instruction: 'take a screenshot' }), /no time left/);
+  // The relay hands the runner its deadline: when Hydra ends a live turn.
+  const h2 = fakeHydra();
+  turnFor(h2);
+  let got = null;
+  const before = Date.now();
+  const relay = relayOn(h2.api('brain-1', 'brain'), async (turn, h) => { got = h.deadline; await h.done(); }, { liveCapMs: 280_000 });
+  relay.start();
+  await until(() => got !== null);
+  await relay.stop();
+  assert.ok(got >= before + 280_000 && got <= Date.now() + 280_000, `deadline ${got - before} ms after the start`);
 }
 console.log('relay up + mac delegate: passed');

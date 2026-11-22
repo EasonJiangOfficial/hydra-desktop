@@ -449,12 +449,14 @@ async function* claudeCodeLoop(messages, o) {
   // takes it into the turn under way, or answers it right after; a result that comes before any assistant message
   // after the last addition is not the end yet (the addition is still to be answered).
   let step = 0, addedAt = 0, answeredAt = 0, streamed = false;
+  const added = []; // [{ at, text }]: what was not answered when the run ends goes to o.onLeft (R11-2)
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
   // After begin(): the first message is on the input already, so an addition always comes after it.
   o.takeInput?.((text) => {
     if (aborted || !input || !String(text ?? '').trim()) return false;
     input.push(toSdkUserMessage([{ type: 'text', text: String(text) }]));
     addedAt = ++step;
+    added.push({ at: addedAt, text: String(text) });
     return true;
   });
 
@@ -500,6 +502,7 @@ async function* claudeCodeLoop(messages, o) {
     }
   } finally {
     o.takeInput?.(null);
+    o.onLeft?.(added.filter((a) => a.at > answeredAt).map((a) => a.text));
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
@@ -534,7 +537,7 @@ export function resumeId(state, messages) {
  */
 export class ClaudeCodeAgent {
   #running = false;
-  #add = null; #early = [];
+  #add = null; #early = []; #left = [];
   constructor(options) {
     this.options = options;
     this.resume = options.resume ?? null;
@@ -549,12 +552,14 @@ export class ClaudeCodeAgent {
   setSignal(signal) { this.options = { ...this.options, signal }; }
   /** While a prompt runs: the owner's added words go into it as one more user message. False when nothing runs. */
   addInput(text) { return this.#add ? this.#add(text) : false; }
+  /** After a prompt's run: the added words it took but ended before answering (max turns, an error), as given. */
+  unanswered() { return [...this.#left]; }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
     this.#running = true;
     this.messages.push({ role: 'user', content });
     // Additions before Claude Code has started wait for it (the stream starts when it is first read).
-    this.#early = [];
+    this.#early = []; this.#left = [];
     this.#add = (t) => { this.#early.push(t); return true; };
     return new AgentStream(this.#run(), () => { this.#running = false; });
   }
@@ -569,6 +574,7 @@ export class ClaudeCodeAgent {
       return yield* claudeCodeLoop(loopMsgs, {
         ...o, resume,
         takeInput: (fn) => { this.#add = fn; if (fn) for (const t of this.#early.splice(0)) fn(t); },
+        onLeft: (l) => { this.#left = l; },
         onSessionId: (id) => { sessionId = id; },
         onRateLimit: o.onRateLimit ?? ((info) => void recordClaudeCodeRateLimit(info).catch(() => {})),
       });

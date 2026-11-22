@@ -783,6 +783,8 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
   focus: HANDS_OK ? { start: (m, t) => startFocus(m, t), stop: () => stopFocus() } : null,
   firedReminders: () => firedReminders,
   allowActions: () => config.allowActions, ui, ask, openUrl, userName,
+  // In a relay turn the owner is not at this Mac: window reads with no file in the three folders ask (R11-1).
+  remote: () => !!relayAsk.getStore()?.live,
   speak: (line) => { if (!turnVoice) return false; turnVoice.say(line); return true; },
   onHandoff: (task) => { activity.handoff(task); panel(); },
   commitmentsText: () => [commitmentsText(), doneTodayText() && `Done today:\n${doneTodayText()}`].filter(Boolean).join('\n'),
@@ -2540,7 +2542,8 @@ function onVoice(m) {
     if (m.ok && Number.isFinite(m.peakDb) && Number.isFinite(m.riseDb)) {
       config.clapCalibration = { peakDb: Math.max(-90, Math.min(0, m.peakDb)), riseDb: Math.max(0, Math.min(90, m.riseDb)) }; saveConfig(); voiceConfig();
       panelNote('Got your claps. Clapping twice wakes me in this room now.');
-    } else panelNote(`I heard ${Number(m.heard) || 0} clap${m.heard === 1 ? '' : 's'}, not two. Try again, a bit louder.`, true);
+    } else if (m.soft) panelNote('Those sounds were too soft to be claps. Try again, a bit louder.', true);
+    else panelNote(`I heard ${Number(m.heard) || 0} clap${m.heard === 1 ? '' : 's'}, not two. Try again, a bit louder.`, true);
     clapCalibrating = false; if (panelOpen) panel();
   }
   else if (m.type === 'voice_clap_level' && panelOpen) send({ type: 'panel', msg: { kind: 'clap_level', db: Number(m.db) || -120, floor: Number(m.floor) || -120, needs: Number(m.needs) || -40 } });

@@ -61,23 +61,34 @@ const SUBTURN_ENDED = new Set(['done', 'error', 'expired']);
  * /api/agent/relay/subturn {turnId, claimId, instruction} makes the sub-turn; GET ?id= is polled (first at once, so an
  * offline Mac answers "Your Mac is offline." with no wait) until done, error or expired, and its text is the result.
  * While it waits, alive() renews this turn's lease every beatMs (the relay's own heartbeat runs too); a turn that is
- * over stops the wait. waitMs caps it (the web's turn ends at 280 s).
+ * over stops the wait. waitMs caps it, and so does the turn's deadline (h.deadline: the web ends it at 280 s) less
+ * marginMs, so the brain still has time to tell the owner what his Mac did or said so far (R11-4).
+ * Not idempotent on the server: a POST that fails in transport or with a 5xx may have made the sub-turn, so it is never
+ * sent again in this turn; the model is told the Mac may already be doing it (R11-3).
  */
-export function askMacTool({ api, turn, alive = async () => true, signal, sleep = delay, pollMs = 1000, beatMs = 15_000, waitMs = 240_000, now = Date.now, log = () => {} }) {
+export const MAC_UNSURE_TEXT = "Hydra did not answer, so your Mac may already be doing this. Do not call ask_mac again in this turn: tell the owner it may be under way on his Mac and to check there.";
+export function askMacTool({ api, turn, alive = async () => true, signal, sleep = delay, pollMs = 1000, beatMs = 15_000, waitMs = 240_000, deadline = null, marginMs = 30_000, now = Date.now, log = () => {} }) {
+  let unsure = false;
   return {
     name: 'ask_mac',
     description: "Ask the owner's Mac to do or look at something on it: open or control an app, find or read a file, list or read a window, take and describe a screenshot. One clear, complete instruction in plain words. Returns what his Mac did or found. Never for Hydra's own data.",
     parameters: z.object({ instruction: z.string().trim().min(1).max(LIMITS.instruction) }),
     execute: async ({ instruction }) => {
-      const r = await api.req('/api/agent/relay/subturn', { method: 'POST', body: { turnId: turn.id, claimId: turn.claimId, instruction: String(instruction).trim() }, signal, timeout: 20_000 });
+      if (unsure) return MAC_UNSURE_TEXT;
+      const limit = Math.min(waitMs, Number.isFinite(deadline) ? deadline - now() - marginMs : Infinity);
+      if (limit <= 0) return 'This turn has no time left to ask your Mac. Tell the owner to ask again.';
+      let r = null;
+      try { r = await api.req('/api/agent/relay/subturn', { method: 'POST', body: { turnId: turn.id, claimId: turn.claimId, instruction: String(instruction).trim() }, signal, timeout: 20_000 }); } catch { /* below */ }
+      if (signal?.aborted) throw new Error('Stopped.');
+      if (!r || r.status >= 500) { unsure = true; log('ask_mac', { status: r?.status ?? 'unreachable', unsure: true }); return MAC_UNSURE_TEXT; }
       const made = await r.json().catch(() => null);
       if (r.status !== 201 || typeof made?.subTurnId !== 'string') {
         log('ask_mac', { status: r.status, error: String(made?.error ?? '').slice(0, 40) });
         throw new Error(r.status === 409 ? 'This turn is over, so your Mac was not asked.' : `Hydra did not pass this to your Mac (${made?.error ?? r.status}).`);
       }
       const id = made.subTurnId, t0 = now();
-      let beat = now();
-      log('ask_mac', { subTurn: id, chars: instruction.length });
+      let beat = now(), sofar = '';
+      log('ask_mac', { subTurn: id, chars: instruction.length, limitMs: Number.isFinite(limit) ? limit : null });
       for (;;) {
         const g = await api.req(`/api/agent/relay/subturn?id=${encodeURIComponent(id)}`, { signal, timeout: 20_000 }).catch(() => null);
         const res = g?.ok ? subturnResultSchema.safeParse(await g.json().catch(() => null)) : null;
@@ -85,8 +96,9 @@ export function askMacTool({ api, turn, alive = async () => true, signal, sleep 
           log('ask_mac', { subTurn: id, status: res.data.status, chars: res.data.text.length });
           return res.data.text.trim() || (res.data.status === 'done' ? 'Your Mac finished and said nothing.' : 'Your Mac could not finish this.');
         }
+        if (res?.success && res.data.text.trim()) sofar = res.data.text.trim();
         if (signal?.aborted) throw new Error('Stopped.');
-        if (now() - t0 >= waitMs) return 'Your Mac took too long.';
+        if (now() - t0 >= limit) return `Your Mac took too long.${sofar ? ` What it said so far: ${sofar}` : ''}`;
         if (now() - beat >= beatMs) {
           beat = now();
           if (!(await alive())) throw new Error('This turn is over, so I stopped waiting for your Mac.');
@@ -180,7 +192,7 @@ export function createBrainTurn({ hydraTools, api = null, executable, settings =
       showTool({ onUi: (action) => emit({ type: 'ui', action }) }),
       // The Mac only in a live turn the brain holds (a routine or a sub-turn can't make one: the route says not_live).
       ...(api && (turn.surface === 'web' || turn.surface === 'phone') && !turn.parentTurnId && turn.claimId
-        ? [askMacTool({ api, turn, alive, signal, log, ...askMac })] : []),
+        ? [askMacTool({ api, turn, alive, signal, log, deadline: h.deadline, ...askMac })] : []),
     ];
     const { model, thinking } = brainFor(await Promise.resolve().then(settings).catch(() => SETTINGS_DEFAULTS), turn.surface);
     const agent = new ClaudeCodeAgent({

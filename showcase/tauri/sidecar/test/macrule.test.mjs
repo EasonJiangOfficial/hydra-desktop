@@ -66,14 +66,15 @@ if (a[0] === 'act') {
 }
 if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1], window: win, pixels: [800, 600] }; }
 if (a[0] === 'front') o = { ok: true, app: win.app };
+if (a[0] === 'windows') o = { ok: true, windows: [win] };
 if (a[0] === 'manage') o = { ok: true, done: 'quit ' + JSON.parse(a[1]).app };
 console.log(JSON.stringify(o));
 `);
   process.env.ROAMIES_HANDS = fake;
   const { createTools } = await import('../tools.mjs');
   const asks = [];
-  let answer = null;
-  const { tools, nextTurn } = createTools({ allowActions: () => true, ui: () => {}, ask: async (o) => { asks.push(o.placeholder); return typeof answer === 'function' ? answer(o.placeholder) : answer; }, openUrl: async () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME, skills: { changed: () => {} } });
+  let answer = null, remote = false;
+  const { tools, nextTurn } = createTools({ remote: () => remote, allowActions: () => true, ui: () => {}, ask: async (o) => { asks.push(o.placeholder); return typeof answer === 'function' ? answer(o.placeholder) : answer; }, openUrl: async () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME, skills: { changed: () => {} } });
   const T = (n) => tools.find((t) => t.name === n);
   const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
   const acts = () => calls().filter((c) => c[0] === 'act');
@@ -88,6 +89,33 @@ console.log(JSON.stringify(o));
   set({ window: { id: 7, app: 'TextEdit', title: 'n.txt', bounds: [0, 0, 800, 600], document: doc } });
   await T('take_screenshot').execute({ target: 'TextEdit' }, {});
   assert.equal(asks.length, 0, 'plain reads in the three folders never ask');
+
+  // On this Mac a browser window with no file is looked at freely, and the window list is free.
+  set({ window: { id: 9, app: 'Safari', title: 'Inbox (3) - Gmail', bounds: [0, 0, 800, 600] } });
+  await T('take_screenshot').execute({ target: 'browser' }, {});
+  assert.match(await T('list_windows').execute({}, {}), /Safari — Inbox/);
+  assert.equal(asks.length, 0);
+  // R11-1: in a relay turn (the owner is not at this Mac) those are not plain reads of the three folders: each asks, with
+  // the app and the window title, and a no shows nothing. A window showing a file in Documents is still free.
+  remote = true;
+  reset({ window: { id: 9, app: 'Safari', title: 'Inbox (3) - Gmail', bounds: [0, 0, 800, 600] } });
+  await assert.rejects(T('take_screenshot').execute({ target: 'browser' }, {}), /said no/);
+  assert.ok(asks[0].includes('the Safari window "Inbox (3) - Gmail"'), asks[0]);
+  for (const c of calls().filter((x) => x[0] === 'capture')) assert.ok(!fs.existsSync(c[1]), 'the picture is deleted');
+  await assert.rejects(T('read_window').execute({ target: 'Safari' }, {}), /said no/);
+  assert.ok(asks[1].includes('Safari') && asks[1].includes('Inbox (3) - Gmail'), asks[1]);
+  fs.writeFileSync(log, '');
+  await assert.rejects(T('list_windows').execute({}, {}), /said no/);
+  assert.equal(asks[2], 'List every open window on your Mac, with each app and window title?');
+  assert.equal(calls().filter((c) => c[0] === 'windows').length, 0, 'no window list was read');
+  reset({ window: { id: 9, app: 'Hydra', title: 'Hydra', bounds: [0, 0, 800, 600] } });
+  await assert.rejects(T('take_screenshot').execute({ target: 'Hydra' }, {}), /said no/, 'Hydra\'s own window too');
+  reset({ window: { id: 7, app: 'TextEdit', title: 'n.txt', bounds: [0, 0, 800, 600], document: doc } });
+  await T('take_screenshot').execute({ target: 'TextEdit' }, {});
+  assert.equal(asks.length, 0, 'a file in Documents is still a plain read');
+  remote = false;
+  // sidekick.mjs turns it on for exactly the relay turns (its relayAsk store).
+  assert.match(fs.readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8'), /createTools\(\{[\s\S]*?remote: \(\) => !!relayAsk\.getStore\(\)\?\.live,/);
 
   // Outside them: asks with the real path; a no reads nothing.
   reset();

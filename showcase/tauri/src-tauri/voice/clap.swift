@@ -51,6 +51,17 @@ final class ClapDetector {
 
     static let minGap = 0.15, maxGap = 0.8, quietBefore = 0.6, quietAfter = 0.45, flam = 0.15
     static let decayDb = 6.0, brightHz = 900.0, jumpDb = 9.0
+    /// "Clap twice" never calibrates to a pair quieter than this (a keystroke, a cup set down): it asks again (R11-6).
+    static let minCalPeakDb = -45.0
+
+    enum CalPick: Equatable { case none, soft, set(Calibration) }
+    /// "Clap twice": the newest transient and one 0.15 to 1.5 s before it are the owner's claps; the quieter one's peak and
+    /// rise set the calibration (a softer clap still counts at Medium). .soft when that peak is under minCalPeakDb.
+    static func pickCalibration(_ heard: [(t: Double, peak: Double, rise: Double)]) -> CalPick {
+        guard let last = heard.last, let first = heard.dropLast().last(where: { last.t - $0.t >= 0.15 && last.t - $0.t <= 1.5 }) else { return .none }
+        let c = Calibration(peakDb: min(first.peak, last.peak), riseDb: min(first.rise, last.rise))
+        return c.peakDb < minCalPeakDb ? .soft : .set(c)
+    }
 
     init(rate: Double, sensitivity: Double = 0.5, calibration: Calibration? = nil) {
         self.rate = rate
@@ -163,6 +174,8 @@ final class ClapDetector {
             else { say("\(line): kept sounding (a word, a note, a door)") }
             return settle()
         }
+        // Calibrating: typing (another sharp onset inside its window) is still not a clap (R11-6).
+        if calibrating, p.inner { say("\(line): sharp sounds close together (typing?)"); return settle() }
         if calibrating { onTransient?(p.peak, p.rise); say("\(line): heard (calibrating)"); return settle() }
         defer { lastTransient = p.t }
         let quiet = p.t - lastTransient
@@ -330,6 +343,17 @@ enum ClapTest {
         return n
     }
 
+    /// "Clap twice" on a recording: 1 when it would calibrate, 0 when not (none, or too soft).
+    static func calibrates(_ buf: [Float], rate: Double) -> Int {
+        let det = ClapDetector(rate: rate); det.calibrating = true
+        if ProcessInfo.processInfo.environment["CLAP_LINES"] != nil { det.onCandidate = { print(String(format: "    %.2f ", det.now) + $0) } }
+        var heard: [(t: Double, peak: Double, rise: Double)] = []
+        det.onTransient = { heard.append((det.now, $0, $1)) }
+        _ = det.feed(buf)
+        if case .set = ClapDetector.pickCalibration(heard) { return 1 }
+        return 0
+    }
+
     static func run() -> Int32 {
         var bad = 0
         func check(_ name: String, _ got: Int, _ want: Int) {
@@ -386,7 +410,17 @@ enum ClapTest {
             // Calibrated to claps this faint, Medium hears them; calibrated to loud ones, it doesn't.
             check("\(r) Hz: the same, calibrated to the owner's faint claps", wakes(b, rate: rate, calibration: .init(peakDb: -36, riseDb: 26)), 1)
             check("\(r) Hz: the same, calibrated to loud claps", wakes(b, rate: rate, calibration: .init(peakDb: -6, riseDb: 50)), 0)
+            // R11-6: "Clap twice" calibrates to a double clap, never to typing (two quick key pairs, 50 ms apart each).
+            b = base(); clap(&b, at: 1.0, rate: rate, rng: &rng); clap(&b, at: 1.45, rate: rate, rng: &rng)
+            check("\(r) Hz: calibrating to a double clap (calibrations)", calibrates(b, rate: rate), 1)
+            b = base(); for t in [1.0, 1.05, 1.4, 1.45] { clap(&b, at: t, rate: rate, peak: 0.3, rng: &rng, ring: 0) }
+            check("\(r) Hz: calibrating to two quick key pairs (calibrations)", calibrates(b, rate: rate), 0)
         }
+        // R11-6: a pair quieter than -45 dB is too soft to calibrate to: it asks again.
+        let soft = ClapDetector.pickCalibration([(1.0, -52, 20), (1.4, -50, 20)]) == .soft ? 0 : 1
+        check("a pair at -52 / -50 dB is too soft (soft = 0 wakes)", soft, 0)
+        let fine = ClapDetector.pickCalibration([(1.0, -36, 20), (1.4, -30, 22)]) == .set(.init(peakDb: -36, riseDb: 20)) ? 1 : 0
+        check("a pair at -36 / -30 dB sets -36 dB, rise 20 (set = 1)", fine, 1)
         return bad == 0 ? 0 : 1
     }
 }

@@ -270,8 +270,10 @@ export function checkRead(p, home, opts = {}) {
 const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint)|safari|google chrome|chrome|arc|firefox|microsoft edge|brave browser|opera|vivaldi|orion|zen|hydra)$/i;
 /** What a window shows (take_screenshot, read_window) before its text or picture reaches the model: each file it has
  *  open (its document, a file:// page) is read like read_file; a window with no file is free only in a viewer app,
- *  any other (Terminal, a password manager, Messages) asks, naming the app (tenth review R10-11). { level, reason }. */
-export function checkWindow(win, home) {
+ *  any other (Terminal, a password manager, Messages) asks, naming the app (tenth review R10-11). { level, reason }.
+ *  viewers: false (a relay turn: the owner is not at this Mac, R11-1): a window with no file asks in every app, a browser
+ *  or Hydra too, since only plain reads in the three folders run unasked. */
+export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
   if (win?.url) { try { const u = new URL(String(win.url).replace(/^view-source:/i, '')); if (u.protocol === 'file:') files.push(decodeURIComponent(u.pathname)); } catch { /* not a URL */ } }
@@ -281,7 +283,7 @@ export function checkWindow(win, home) {
     if (v.level === BLOCK) return verdict(BLOCK, `${app || 'That window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
     if (v.level === ASK) worst = verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`);
   }
-  if (!files.length && !WINDOW_VIEWERS.test(app)) {
+  if (!files.length && !(viewers && WINDOW_VIEWERS.test(app))) {
     const title = String(win?.title ?? '').trim();
     worst = { ...verdict(ASK, `Look at ${app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name"}? It has no file I can check, so it could show anything (a password, a message, a terminal).`), app };
   }

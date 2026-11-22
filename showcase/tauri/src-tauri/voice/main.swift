@@ -695,12 +695,15 @@ final class Voice {
         guard let until = calibrateUntil, uptime() <= until else { return }
         calibrated.append((uptime(), peak, rise))
         log(String(format: "clap calibration: a clap at %.1f dB, rise %.1f dB", peak, rise))
-        // Two claps close together: the quieter one's peak and rise set it (a softer clap still counts at Medium).
-        if let last = calibrated.last, let first = calibrated.dropLast().last(where: { last.t - $0.t >= 0.15 && last.t - $0.t <= 1.5 }) {
-            finishCalibration(ClapDetector.Calibration(peakDb: min(first.peak, last.peak), riseDb: min(first.rise, last.rise)))
+        // Two claps close together: the quieter one's peak and rise set it (a softer clap still counts at Medium); too
+        // soft to be claps, it asks again.
+        switch ClapDetector.pickCalibration(calibrated) {
+        case .set(let c): finishCalibration(c)
+        case .soft: finishCalibration(nil, soft: true)
+        case .none: break
         }
     }
-    private func finishCalibration(_ c: ClapDetector.Calibration?) {
+    private func finishCalibration(_ c: ClapDetector.Calibration?, soft: Bool = false) {
         calibrateUntil = nil
         claps.setCalibrating(false)
         if let c {
@@ -709,8 +712,8 @@ final class Voice {
             log(String(format: "clap calibration: set to %.1f dB, rise %.1f dB", c.peakDb, c.riseDb))
             emit(["type": "clap_calibrated", "ok": true, "peakDb": (c.peakDb * 10).rounded() / 10, "riseDb": (c.riseDb * 10).rounded() / 10])
         } else {
-            log("clap calibration: heard \(calibrated.count) clap\(calibrated.count == 1 ? "" : "s"), not two")
-            emit(["type": "clap_calibrated", "ok": false, "heard": calibrated.count])
+            log(soft ? "clap calibration: two sounds, too soft to be claps" : "clap calibration: heard \(calibrated.count) clap\(calibrated.count == 1 ? "" : "s"), not two")
+            emit(["type": "clap_calibrated", "ok": false, "heard": calibrated.count, "soft": soft])
         }
     }
     /// A double clap from the clap detector.

@@ -24,7 +24,7 @@
 //   the owner added on the web or the phone while the turn runs. Each new one goes to the turn (onInput: the runner
 //   pushes it into the running Claude Code session), and the next post acknowledges it with inputsSeen (highest seq).
 //   A live turn beats every inputBeatMs (5 s) so an addition never waits long. inputsSeen goes on every post, 0 on
-//   the first, so Hydra knows this device reads additions (a turn takes none until it does).
+//   the first, so Hydra knows this device reads additions (a turn takes none until it does). Never on a sub-turn.
 // - The done hold (0191): the runner ends with h.done({usage}), never a bare done event. A done Hydra answers with
 //   status "claimed" and new inputs is held: done() hands those words back and the runner answers them in the same
 //   session, then calls done() again. At most HOLD_MAX holds; past that it says so and ends the turn with an error
@@ -49,6 +49,9 @@ export const FAILED_MS = 10 * 60_000;
 export const HOLD_MAX = 5;
 export const TOO_MANY_ADDED = { type: 'error', code: 'too_many_additions', message: 'You added more while I worked than one turn can take. Say the rest again.' };
 export const INPUT_PREFIX = ADDED_PREFIX;
+/** Held words nobody can answer (a runner that ended without done()). Its own code: the web turns a brain's mac_failed
+ *  into a generic failure (R11-8). */
+export const ADDITIONS_UNANSWERED = { type: 'error', code: 'additions_unanswered', message: 'Hydra could not take in what you added. Say it again.' };
 const INPUT_MAX = LIMITS.inputText;
 /** The new additions in an events answer: [{seq, text}] with seq above `after`, in order; anything malformed is left out. */
 export function newInputs(answer, after = 0) {
@@ -190,16 +193,31 @@ export function askSummary(app, action, input, max = LIMITS.confirmSummary) {
 export async function relaySession({ agent, text, h, onEvent = () => {}, onRound = () => {} }) {
   const { emit, signal, onInput = () => {}, done } = h;
   const usage = {};
-  let prompt = text;
+  let prompt = text, again = 0;
+  // R11-2: words the session took (so Hydra counts them seen) but ended before answering (max turns, an error).
+  const left = () => (typeof agent.unanswered === 'function' ? agent.unanswered() : []);
   for (;;) {
     const stream = agent.prompt(prompt);
     onInput((t) => agent.addInput(`${INPUT_PREFIX}${t}`));
-    for await (const e of agentEvents(stream)) {
-      if (e.type === 'agent_done') for (const [k, v] of Object.entries(e.totalUsage ?? {})) if (Number.isFinite(v)) usage[k] = (usage[k] ?? 0) + v;
-      onEvent(e);
+    try {
+      for await (const e of agentEvents(stream)) {
+        if (e.type === 'agent_done') for (const [k, v] of Object.entries(e.totalUsage ?? {})) if (Number.isFinite(v)) usage[k] = (usage[k] ?? 0) + v;
+        onEvent(e);
+      }
+    } catch (e) {
+      if (signal?.aborted || !left().length) throw e;
+      throw Object.assign(new Error(`${String(e?.message ?? e).slice(0, 400)} What you added while I worked was not answered. Say it again.`), e?.code ? { code: e.code } : {});
     }
     if (signal?.aborted) throw new Error('Stopped.');
     onRound();
+    // Taken but not answered (it hit max turns): answered in the same session before the turn ends, capped.
+    const missed = left();
+    if (missed.length) {
+      if (++again <= HOLD_MAX) { prompt = missed.join('\n\n'); continue; }
+      emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' });
+      emit(TOO_MANY_ADDED);
+      return;
+    }
     const u = Object.keys(usage).length ? { ...usage } : undefined;
     if (!done) { emit({ type: 'done', ...(u ? { usage: u } : {}) }); return; }
     const more = await done({ usage: u });
@@ -310,8 +328,11 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       }
     };
     log('relay_turn', { id: turn.id, surface: turn.surface, slot });
+    // A sub-turn never says inputsSeen, so Hydra takes no additions for it (R11-7): they would reach a session framed as
+    // Hydra's words, and no thread.
+    const sub = isSubturn(turn);
     const send = (events) => api.req('/api/agent/relay/events', {
-      method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), ...(events.length ? { seq: sent + 1 } : {}), events, inputsSeen: seen }, timeout: 20_000,
+      method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), ...(events.length ? { seq: sent + 1 } : {}), events, ...(sub ? {} : { inputsSeen: seen }) }, timeout: 20_000,
     });
     const stop = (why, status) => {
       if (lost) return;
@@ -448,10 +469,11 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
     // The runner takes the additions: those that already came, then each as it comes.
     const inputs = (fn) => { onInput = fn; while (waiting.length && !closed && deliver(waiting[0])) waiting.shift(); };
     try {
-      await runTurn(turn, { emit, signal: turnCtrl.signal, approve, alive, onInput: inputs, done });
+      // deadline: when Hydra ends a live turn (its 280 s cap), so a tool that waits (ask_mac) can answer before it.
+      await runTurn(turn, { emit, signal: turnCtrl.signal, approve, alive, onInput: inputs, done, deadline: isLive ? t0 + liveCapMs : null });
       if (!closed && !lost) {
         // A runner that ended without done(): its words, if Hydra held the end, have nobody to answer them. Say so.
-        if ((await done()).length) emit({ type: 'error', code: 'mac_failed', message: 'Hydra could not take in what you added. Say it again.' });
+        if ((await done()).length) emit(ADDITIONS_UNANSWERED);
       }
     } catch (e) {
       if (!closed) emit({ type: 'error', message: String(e?.message ?? e).slice(0, 500) || 'The Mac could not finish.', ...(e?.code ? { code: String(e.code) } : {}) });
