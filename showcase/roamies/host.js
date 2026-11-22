@@ -26,7 +26,10 @@
   };
   window.__roamieBuddy = (m) => { Roamie.wake?.(); Roamie.buddy.onEvent?.(m); };
   // handsBusy: Roamies is acting in another app (it may take the real cursor), so clicks always go through.
-  let hot = null, cursor = null, handsBusy = false, handsN = 0;
+  let hot = null, cursor = null, handsBusy = false;
+  // Who is acting in an app right now: 'chat' and each background agent by id. A set, not a count, so an agent that
+  // is stopped mid-act (its parent says so) or a sidecar restart (hands_reset) can't leave the overlay stuck.
+  const handsOn = new Set();
   Object.defineProperty(Roamie, 'handsBusy', { get: () => handsBusy, configurable: true });
   // Linux ("x11" or "wayland", set by the shell): clicks are let through by region instead (below).
   const LINUX = !!window.ROAMIE_LINUX;
@@ -566,6 +569,7 @@
       Roamie.agentHome?.event(m.e, { from: a.visible ? [a.pos.x, a.pos.y] : cursor });
       return;
     }
+    if (m.kind === 'hands_reset') { handsOn.clear(); handsBusy = false; return; }
     if (m.kind === 'hands') {
       // on/off: it is acting in another app. In between: where each step lands (global screen points) and when a
       // step takes the real cursor; the Sidekick hops there in its cursor form instead of chasing the cursor.
@@ -576,7 +580,7 @@
         if (px >= 0 && py >= 0 && px <= innerWidth && py <= innerHeight) { hand?.begin(); hand?.at(px, py, { tap: !m.step.hover }); }
       } else if (m.borrow) hand?.begin();
       // Counted: the chat and background agents can each be acting; clicks go through until every one is done.
-      else { handsN = Math.max(0, handsN + (m.on ? 1 : -1)); handsBusy = handsN > 0; if (handsBusy) setHot(false); else hand?.end(); }
+      else { const id = m.id ?? 'chat'; if (m.on) handsOn.add(id); else handsOn.delete(id); handsBusy = handsOn.size > 0; if (handsBusy) setHot(false); else hand?.end(); }
       return;
     }
     // Launch (and the relaunch after an update): the capsule says hi when it's on, else the Roamie waves by the cursor.

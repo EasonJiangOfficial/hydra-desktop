@@ -22,6 +22,7 @@ const mgr = createAgents({
   fork, root: agentsRoot(), userName: 'Ken', home: tmp, runner: fileURLToPath(new URL('../agentrun.mjs', import.meta.url)), safety: { checkRead, checkWrite, checkOpen },
   config: { model: async () => ({ provider: 'anthropic', model: 'fake', route: 'api' }), creds: async () => ({}), allowActions: () => true, image: () => null, open: async () => {}, reveal: async () => {} },
   ui: ({ e }) => {
+    if (!e) return; // hands on/off for the overlay
     events.push(e);
     // The yes from the row's Allow button.
     if (e.type === 'ask') setTimeout(() => mgr.answer(e.agent.id, true), 50);

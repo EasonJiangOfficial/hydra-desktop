@@ -404,7 +404,7 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     else if (m.t === 'creds') {
       Promise.resolve().then(() => config.creds(a.model)).then((c) => ({ apiKey: c?.accessToken ?? c?.apiKey, accountId: c?.accountId }), (e) => ({ error: String(e?.message ?? e) }))
         .then((value) => { if (p.child.connected) p.child.send({ t: 'reply', id: m.id, value }); });
-    } else if (m.t === 'ui' && m.msg?.kind === 'hands') ui({ kind: 'hands', on: !!m.msg.on });
+    } else if (m.t === 'ui' && m.msg?.kind === 'hands') ui({ kind: 'hands', on: !!m.msg.on, id: `agent:${a.id}` });
     else if (m.t === 'finish') a.result = m.result;
     else if (m.t === 'end') p.end = m;
   }
@@ -417,6 +417,8 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
   async function finish(a, p, code, signal) {
     if (procs.get(a.id) !== p) return;
     procs.delete(a.id);
+    // However it ended (done, stopped, killed mid-act): it isn't acting in an app any more.
+    ui({ kind: 'hands', on: false, id: `agent:${a.id}` });
     clearTimeout(p.kill);
     if (a.state === 'working' && a.workFrom) a.workMs += now() - a.workFrom;
     a.workFrom = null; a.ask = null; a.ended = now(); a.tool = null;
@@ -456,13 +458,20 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
   // Work time (waiting for a yes doesn't count), heartbeats and stalls, every few seconds.
   function check() {
     const t = now();
+    // Answered agents waiting for a slot: one carries on per free slot, oldest answer first.
+    for (const a of running().filter((x) => x.state === 'waiting' && x.ask?.answer !== undefined).sort((x, y) => x.ask.at - y.ask.at)) {
+      const p = procs.get(a.id);
+      if (!p || running().filter((x) => x.state === 'working').length >= capFor(a)) continue;
+      p.child.send({ t: 'reply', id: a.ask.id, value: a.ask.answer });
+      resume(a);
+    }
     for (const a of running()) {
       const p = procs.get(a.id);
       if (!p || p.stopping) continue;
       if (pub(a).workMs > LIMITS.workMs) stop(a.id, { state: 'failed', reason: 'Took longer than 30 minutes' });
       else if (t - p.beat > LIMITS.beatMs) stop(a.id, { state: 'failed', reason: 'Froze (no heartbeat for a minute)' });
       // Unanswered for a day: a no (never a yes), and the owner is told.
-      else if (a.state === 'waiting' && a.ask?.at && t - a.ask.at > LIMITS.askMs) {
+      else if (a.state === 'waiting' && a.ask?.at && a.ask.answer === undefined && t - a.ask.at > LIMITS.askMs) {
         const q = a.ask.question;
         log('agent_ask_expired', { id: a.id });
         answer(a.id, false);
@@ -481,10 +490,16 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     const a = agents.get(String(id)), p = procs.get(String(id));
     if (!a?.ask || !p) return false;
     if (allow && by !== 'owner' && a.ask.always) return 'owner';
+    // Answered while the cap is full: the answer is kept and the agent carries on once a slot frees (check()).
+    if (a.ask.answer === undefined && running().filter((x) => x.state === 'working').length >= capFor(a)) {
+      a.ask.answer = !!allow; a.step = 'Answered; waits for a free slot'; tell('update', a);
+      return true;
+    }
     p.child.send({ t: 'reply', id: a.ask.id, value: !!allow });
     resume(a);
     return true;
   }
+  const capFor = (a) => (a.model?.provider === 'local' ? LIMITS.local : LIMITS.running);
   const inside = (a, p) => {
     const real = (() => { try { return fs.realpathSync.native(p); } catch { return null; } })();
     const dirs = [a.dir, ...(a.delivered ?? [])].map((d) => { try { return fs.realpathSync.native(d); } catch { return null; } }).filter(Boolean);

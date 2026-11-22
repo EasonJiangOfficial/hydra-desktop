@@ -64,6 +64,8 @@ export function trimRun(msgs, budgetChars) {
   return msgs.map((m, i) => (m.role === 'tool' && i > 1 && i < keep ? { ...m, content: m.content.map((r) => ({ ...r, content: short(r.content) })) } : m));
 }
 
+// Stopped (SIGTERM from the parent): say it isn't acting in an app any more before going.
+process.on('SIGTERM', () => { try { process.send?.({ t: 'ui', msg: { kind: 'hands', on: false } }); } catch {} setTimeout(() => process.exit(143), 50); });
 async function run({ agent: a, model: md, content }) {
   allow = a.allow !== false;
   route = md.route === 'claude-code' ? 'claude-code' : 'api';

@@ -230,7 +230,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-agentmgr-')));
   const root = path.join(home, 'Roamies');
   let T = new Date(2026, 10, 13, 14, 5).getTime();
-  const children = [], events = [], opened = [], revealed = [];
+  const children = [], events = [], opened = [], revealed = [], hands = [];
   const fork = (runner, args, opts) => {
     const c = new EventEmitter();
     Object.assign(c, { runner, opts, sent: [], connected: true, signals: [], send(m) { c.sent.push(m); }, kill(sig) { c.signals.push(sig); if (sig === 'SIGTERM' && !c.stubborn) setImmediate(() => c.emit('close', null, sig)); } });
@@ -245,7 +245,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   };
   // macOS keeps temp folders under /private/var, a system path to checkOpen: the rule sees them under a plain home.
   const openRule = (p, h, o) => checkOpen(String(p).replace(home, '/Users/ken'), '/Users/ken', o);
-  const mk = () => createAgents({ fork, ui: (m) => events.push(m.e), config, root, userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen: openRule, checkLink }, home, now: () => T });
+  const mk = () => createAgents({ fork, ui: (m) => { if (m.kind === 'hands') hands.push(m); else events.push(m.e); }, config, root, userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen: openRule, checkLink }, home, now: () => T });
   const mgr = mk();
   const tick = () => new Promise((r) => setTimeout(r, 400));
   const lastOf = (type) => events.filter((e) => e.type === type).at(-1);
