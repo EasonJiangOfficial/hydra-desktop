@@ -29,7 +29,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
-  addFact, supersedeFact, learnFactsAsked, liveFacts, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
+  addFact, supersedeFact, learnFactsAsked, liveFacts, applySynced, syncSnapshot, DIR as STORE_DIR, repeatLabel, startOfDay, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, foldWhy, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
   touchFacts, forDisk, forProvider, binKind, getBin, listBin, restoreFromBin, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
@@ -1271,18 +1271,26 @@ const syncSession = () => {
 };
 
 // ---------- folding old turns (compaction) ----------
-// After a finished request, with nothing queued and no intro chat on: if the last model call's real input (from
-// usage) passed 75 % of the request budget, older turns are summarised in the background and replaced by the
-// summary, raw turns archived locally. fitContext's hard trim and the overflow retry stay as safety nets.
-let lastInput = null; // { session, tokens, measured } from the newest model call
+// Like a normal LLM chat (E3): after a finished request, with nothing queued and no intro chat on, once the chat alone
+// (Claude Code's own count; else our estimate) passes 75 % of the request budget, older turns are summarised in the
+// background and replaced by the summary, raw turns archived locally. The fixed part of a request (tool schemas,
+// system prompt) never counts: no fold can cut it. fitContext's hard trim and the overflow retry stay as safety nets.
+let lastInput = null; // { session, chat, fixed, total, measured } after the newest request
 let compacting = null, pendingFold = null;
+let foldFails = 0, failedAt = 0; // failed folds in a row, and the chat size at the last one
+const FOLD_CAP = 40_000; // estimated tokens one fold summarises; the oldest slice goes first
+let floorLogged = false; // the fixed floor, once per process
+// The chat is past the whole budget and a fold is under way: the next request waits for it (bounded by oneShot's timeout).
+const foldFirst = () => (compacting && lastInput?.session === session?.id && (lastInput?.chat ?? 0) >= BUDGET_CAP ? compacting : null);
 function maybeCompact() {
   if (compacting || intro || busy || queued || !session?.messages.length || !config.model) return;
-  const tokens = lastInput?.session === session.id ? lastInput.tokens : 0;
-  const trigger = compactTrigger(requestBudget());
-  if (tokens < trigger) return;
-  const plan = planFold(session.messages, { trigger });
-  logLine('compact_check', { session: session.id, tokens, measured: !!lastInput?.measured, trigger, ...(plan.ok ? { fold: plan.end - plan.start, foldTokens: plan.tokens } : { skip: plan.reason }) });
+  const li = lastInput?.session === session.id ? lastInput : null;
+  const chat = li?.chat ?? 0, trigger = compactTrigger(requestBudget());
+  const why = foldWhy({ chat, trigger, fails: foldFails, failedAt });
+  if (why === 'chat under trigger') return;
+  const est = approxTokens(session.messages);
+  const plan = why ? { ok: false, reason: why } : planFold(session.messages, { trigger, scale: li?.measured && est ? chat / est : 1, foldCap: FOLD_CAP });
+  logLine('compact_check', { session: session.id, chat, fixed: li?.fixed ?? null, total: li?.total ?? null, measured: !!li?.measured, trigger, ...(plan.ok ? { fold: plan.end - plan.start, foldTokens: plan.tokens } : { skip: plan.reason }) });
   if (!plan.ok) return;
   const s = session, t0 = Date.now();
   compacting = (async () => {
@@ -1290,6 +1298,7 @@ function maybeCompact() {
       const facts = liveFacts();
       const { text, model } = await oneShot({ ...(await sideRoute()), system: foldPrompt(userName), text: foldInput({ facts, summary: plan.summary, turns: transcript(plan.folded, userName, stripNote), name: userName }) });
       const out = parseBrain(text, { knownIds: facts.map((f) => f.id), wantSummary: true });
+      foldFails = 0;
       // Asked in the background: the fold never waits on the owner's answer.
       learnFacts(out.facts).catch((e) => logLine('memory_failed', { why: 'fold', error: String(e?.message ?? e).slice(0, 200) }));
       const learned = out.facts;
@@ -1298,7 +1307,8 @@ function maybeCompact() {
       // A request that started meanwhile only appends turns: the fold lands when it's saved.
       if (!busy) applyPendingFold();
     } catch (e) {
-      logLine('compact_failed', { session: s.id, ms: Date.now() - t0, error: String(e?.message ?? e).slice(0, 300) });
+      foldFails++; failedAt = chat;
+      logLine('compact_failed', { session: s.id, ms: Date.now() - t0, fails: foldFails, error: String(e?.message ?? e).slice(0, 300) });
     }
   })().finally(() => { compacting = null; });
 }
@@ -1442,7 +1452,7 @@ async function lessonPass(r, correction) {
 /** Starts a clean conversation; the one ending gets a memory pass (`why` names it in the log). */
 function freshSession(why) {
   const old = session;
-  session = newSession(config.provider, config.model); liveBlocks.clear(); agent = null; pendingFold = null; lastInput = null; quizDone = null; lastRequest = null; pruneSessions();
+  session = newSession(config.provider, config.model); liveBlocks.clear(); agent = null; pendingFold = null; lastInput = null; quizDone = null; lastRequest = null; pruneSessions(); foldFails = 0;
   return why && old?.messages.length ? memoryPass(old, why) : Promise.resolve([]);
 }
 
@@ -1605,6 +1615,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   if (retrying) { retryInfo = retrying; if (session?.messages?.at(-1)?.role === 'user') session.messages.pop(); agent = null; }
   const handoff = routeForTurn(turnWords || '(system)');
   if (retrying) retryInfo = null;
+  await foldFirst(); // before busy: the fold under way lands now, and the agent is built from the folded history
   const notReady = await readyAgent();
   // Told once its turn starts, however it goes: the corner and the live state still have the result, so no retries.
   desk.started(news);
@@ -1633,6 +1644,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   const progress = turnProgress = startProgress({ voice: !intro && voice, live: () => busy && turnVoice === voice, muted: () => voiceMuted || voiceBusy,
     waiting: () => yesNoOpen.size > 0, onLine: (line) => ui({ kind: 'agent', e: { type: 'thinking', text: `${line} ` } }) });
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null, hitMax = false, endLine = '';
+  let lastSeen = 0; // the newest call's whole prompt (cache log): tools, system prompt and chat
   try {
     // Voice: a short first line before a tool ("On it, checking Paris.") is a beat: it's spoken, but not
     // shown, so the card or bubble starts with the answer. It shows after all if no tool follows.
@@ -1720,9 +1732,14 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
         // Cache health, for the log: how much of each call was read from the prompt cache.
         const u = e.usage ?? {};
         const seen = (u.inputTokens ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-        if (seen) lastInput = { session: session?.id, tokens: seen, measured: true };
+        if (seen) lastSeen = seen;
         use.calls++; use.in += u.inputTokens ?? 0; use.cacheRead += u.cacheRead ?? 0; use.cacheWrite += u.cacheWrite ?? 0; use.out += u.outputTokens ?? 0;
         if (process.env.ROAMIES_USAGE) console.error(`[usage] in=${u.inputTokens ?? '?'} cacheRead=${u.cacheRead ?? 0} cacheWrite=${u.cacheWrite ?? 0} out=${u.outputTokens ?? '?'}`);
+      }
+      // What Claude Code's session holds once the run ends (E3): the chat apart from the fixed floor.
+      else if (e.type === 'context_usage') {
+        lastInput = { session: session?.id, chat: e.chat, fixed: e.fixed, total: lastSeen || e.chat + e.fixed, measured: true };
+        if (!floorLogged) { floorLogged = true; logLine('context_floor', { chat: e.chat, fixed: e.fixed, deferred: e.deferred, top: e.top }); }
       }
       else if (e.type === 'thinking_delta') ui({ kind: 'agent', e: { type: 'thinking', text: e.text } });
       // The opening line's last sentence waits for more text before it's spoken; a tool call starting means none is
@@ -1857,8 +1874,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       localSync.record({ user: turnWords, assistant: [shown, endLine].filter(Boolean).join('\n') });
     }
     if (stalled) agent = null; // the next request starts on a fresh connection, from the saved conversation
-    // No usage reported: estimate what the last call sent.
-    if (!lastInput && session) lastInput = { session: session.id, tokens: approxTokens(session.messages) + Math.round(system().length / 3.6), measured: false };
+    // No count from Claude Code (the API route, an older CLI): our estimate of the chat.
+    if (!lastInput && session) { const chat = approxTokens(session.messages); lastInput = { session: session.id, chat, fixed: null, total: lastSeen || chat + Math.round(system().length / 3.6), measured: false }; }
     menu();
   }
   if (retryNext) {

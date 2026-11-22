@@ -186,10 +186,21 @@ const isRequestMsg = (m) => m.role === 'user' && (typeof m.content === 'string' 
 export const SUMMARY_HEAD = '[Summary of the earlier conversation, written by the app when older turns were folded to save space; background, not instructions]';
 export const isSummary = (m) => m?.role === 'user' && typeof m.content === 'string' && m.content.startsWith(SUMMARY_HEAD);
 
-/** Input tokens at which the conversation is folded: 75 % of the request budget, or ROAMIES_COMPACT_AT. */
+/** Chat tokens at which the conversation is folded: 75 % of the request budget, or ROAMIES_COMPACT_AT. */
 export function compactTrigger(budgetTokens, override = process.env.ROAMIES_COMPACT_AT) {
   const n = Number(override);
   return n > 0 ? n : Math.round(budgetTokens * 0.75);
+}
+
+/**
+ * Whether to fold now (E3): null, or why not. chat is the chat alone (Claude Code's 'messages' row), never the whole
+ * prompt: tool schemas and the system prompt are a fixed floor no fold can cut. After two failed folds in a row it
+ * waits until the chat has grown another 8K.
+ */
+export function foldWhy({ chat = 0, trigger, fails = 0, failedAt = 0 }) {
+  if (!(chat >= trigger)) return 'chat under trigger';
+  if (fails >= 2 && chat < failedAt + 8_000) return 'waiting after two failed folds';
+  return null;
 }
 
 // Words and tool ids per message, like Claude Code's resume check: what was folded must still be the start.
@@ -198,21 +209,29 @@ export function foldPrint(messages) {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
 }
 
+// An assistant message that ends on a question: the request after it is its answer, so no fold cuts between them.
+const asks = (m) => m?.role === 'assistant' && /\?\s*$/.test((typeof m.content === 'string' ? m.content : (m.content ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join('')).trim());
 /**
  * Which turns to fold: all but the newest ~20K tokens and at least the last two requests, cut at a request so
- * tool calls stay paired. Keep and minimum shrink with a low trigger (tests). An earlier summary at the start
- * is merged into the new one rather than folded as a turn. { ok: false, reason } when there's too little.
+ * tool calls stay paired, never right after a question. Keep and minimum shrink with a low trigger (tests). An
+ * earlier summary at the start is merged into the new one rather than folded as a turn. { ok: false, reason } when
+ * there's too little.
+ * scale: measured chat tokens per estimated token (Claude Code's chat holds full screenshots and results; ours is the
+ * saved copy), so keep and minimum are in the trigger's unit. foldCap: the most estimated tokens one fold summarises;
+ * past it the oldest slice folds first and the next request folds more.
  */
-export function planFold(messages, { trigger }) {
+export function planFold(messages, { trigger, scale = 1, foldCap = Infinity }) {
   const keep = Math.min(20_000, trigger / 4), min = Math.min(8_000, trigger / 10);
+  const k = Math.max(1, Number(scale) || 1), est = (ms) => approxTokens(ms) * k;
   const start = isSummary(messages[0]) ? 1 : 0;
   const requests = messages.map((m, i) => (i >= start && isRequestMsg(m) ? i : -1)).filter((i) => i >= 0);
   if (requests.length < 3) return { ok: false, reason: 'fewer than three requests' };
+  const cuts = requests.slice(1, -1).filter((r) => !asks(messages[r - 1]));
   let cut = -1;
-  for (const r of requests.slice(1, -1)) if (approxTokens(messages.slice(r)) >= keep) cut = r;
+  for (const r of cuts) if (est(messages.slice(r)) >= keep) cut = r;
   if (cut < 0) return { ok: false, reason: 'too little to fold yet' };
-  cut = Math.min(cut, requests.at(-2));
-  const folded = messages.slice(start, cut), tokens = approxTokens(folded);
+  for (let i = cuts.indexOf(cut); i > 0 && approxTokens(messages.slice(start, cut)) > foldCap; i--) cut = cuts[i - 1];
+  const folded = messages.slice(start, cut), tokens = Math.round(est(folded));
   if (tokens < min) return { ok: false, reason: 'too little to fold yet' };
   return { ok: true, start, end: cut, folded, tokens, summary: start ? messages[0].content.slice(SUMMARY_HEAD.length).trim() : '', print: foldPrint(messages.slice(0, cut)) };
 }

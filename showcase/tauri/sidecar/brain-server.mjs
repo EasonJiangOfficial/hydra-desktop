@@ -4,8 +4,9 @@
 // relay approvals, 429/5xx retry, mac_failed for a re-claimed stopped turn) and the same Claude Code turn runner
 // (claudecode.mjs), on the owner's claude.ai login, with NO computer tools at all: only Hydra's MCP tools (Hydra's own
 // confirm gate), hydra_show, and his claude.ai connectors (Gmail, Calendar). Every built-in Claude Code tool is
-// switched off (tools: []) and listed in --disallowedTools as well, and anything else is denied in canUseTool, so
-// nothing the model writes can touch this server. A connector call that is not a plain read becomes a relay approval
+// switched off and listed in --disallowedTools as well, and anything else is denied in canUseTool, so nothing the
+// model writes can touch this server. The one built-in left is ToolSearch (E3): it only finds and loads a connector's
+// schema, so the connectors' ~600K tokens of schemas wait behind it instead of riding in every request. A connector call that is not a plain read becomes a relay approval
 // the owner answers on the web or the phone; it never runs before "approved".
 // The phone controls the Mac (W5 contract 7): in a web or phone turn the brain has one more tool, ask_mac, which makes a
 // relay sub-turn (POST /api/agent/relay/subturn) only the owner's Mac claims, waits for it while this turn stays alive,
@@ -34,13 +35,14 @@ import { SETTINGS_DEFAULTS, brainFor, createSettingsWatch } from './agentsetting
 import { FinalText } from './reply.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// Claude Code's own tools, every one disallowed (tools: [] already leaves them out; this is the second lock).
+// Claude Code's own tools, every one disallowed (tools: ['ToolSearch'] already leaves them out; this is the second
+// lock). ToolSearch is not here: it defers the connectors' schemas, and a connector call still goes through brainGate.
 export const BUILTIN_TOOLS = [
   'Agent', 'AskUserQuestion', 'Bash', 'BashOutput', 'Config', 'CronCreate', 'CronDelete', 'CronList', 'Edit', 'EnterPlanMode',
   'EnterWorktree', 'ExitPlanMode', 'ExitWorktree', 'Glob', 'Grep', 'KillShell', 'LS', 'LSP', 'ListMcpResourcesTool', 'Monitor',
   'MultiEdit', 'NotebookEdit', 'NotebookRead', 'PowerShell', 'REPL', 'Read', 'ReadMcpResourceTool', 'SendMessage', 'Skill',
   'SlashCommand', 'Task', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskOutput', 'TaskStop', 'TaskUpdate', 'TeamCreate', 'TeamDelete',
-  'TodoWrite', 'ToolSearch', 'WebFetch', 'WebSearch', 'Write',
+  'TodoWrite', 'WebFetch', 'WebSearch', 'Write',
 ];
 const SURFACES = { web: 'on the web', phone: 'on the phone', routine: 'as a routine', desktop: 'in Hydra Desktop' };
 export const BRAIN_SYSTEM = [
@@ -212,6 +214,7 @@ export function brainGate({ approve, alive = async () => true, may = null, log =
  * effort are Hydra's agent settings, read for every turn (settings(): GET /api/agent/state; the last good answer, or
  * the contract's defaults, when it fails). Only the final answer is sent as text (FinalText).
  */
+let floorLogged = false; // the fixed part of a request (tool schemas, system prompt), once per process
 export function createBrainTurn({ hydraTools, api = null, executable, settings = async () => SETTINGS_DEFAULTS, cwd, env = process.env, log = () => {}, query, spawn, askMac = {} }) {
   return async function brainTurn(turn, h) {
     const { emit, signal, approve, alive = async () => true } = h;
@@ -243,6 +246,7 @@ export function createBrainTurn({ hydraTools, api = null, executable, settings =
         if (e.type === 'text_delta') reply.push(e.text);
         else if (e.type === 'turn_end') reply.turnEnd(e.stopReason);
         else if (e.type === 'tool_call_start') { reply.tool(); names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
+        else if (e.type === 'context_usage' && !floorLogged) { floorLogged = true; log('context_floor', { chat: e.chat, fixed: e.fixed, deferred: e.deferred, top: e.top }); }
         else if (e.type === 'tool_call_end') { const n = names.get(e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? String(e.result ?? '').slice(0, 160) : words(n) }); }
       },
     });

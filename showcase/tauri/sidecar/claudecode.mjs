@@ -361,7 +361,10 @@ function sdkOptions(o, resume, link) {
     cwd: o.cwd,
     model: o.model,
     systemPrompt: { type: 'custom', prompt: o.system ?? '' },
-    tools: [], // none of Claude Code's own tools: only ours, through the bridge (and its safety checks)
+    // None of Claude Code's own tools: only ours, through the bridge (and its safety checks). With connectors, ToolSearch
+    // alone (E3): their schemas (~600K tokens) then wait behind it instead of riding in every request; ours stay loaded
+    // (alwaysLoad). It only finds and loads a schema: every connector call still comes to canUseTool and the gate.
+    tools: o.connectors ? ['ToolSearch'] : [],
     settingSources: [],
     // Without connectors only our tools exist. With them, no strict MCP config: claude.ai's servers load beside ours.
     ...(o.connectors ? {} : { strictMcpConfig: true }),
@@ -373,6 +376,7 @@ function sdkOptions(o, resume, link) {
     ...(o.disallowedTools?.length ? { disallowedTools: [...o.disallowedTools] } : {}),
     canUseTool: async (name, toolInput, opts) => {
       if (name.startsWith(TOOL_PREFIX)) return { behavior: 'allow', updatedInput: toolInput };
+      if (o.connectors && name === 'ToolSearch') return { behavior: 'allow', updatedInput: toolInput };
       if (o.connectors && connectorTool(name) && o.gate) {
         const ok = await Promise.resolve(o.gate(name, toolInput, opts?.signal)).catch(() => false);
         return ok ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `The owner did not allow ${name}, so it was not run.` };
@@ -412,6 +416,28 @@ function takeSpare(o, resume) {
   if (s.key === spareKey(o, resume)) return s;
   s.warm.then((w) => w?.close()).catch(() => {});
   return null;
+}
+
+// What Claude Code holds after a run (E3), from getContextUsage's rows: chat (the 'messages' row), fixed (every other
+// row in the window: system prompt, tool schemas, MCP instructions...) and deferred (schemas behind ToolSearch, not
+// in the window). top: the 5 biggest MCP tools, so the fixed floor can be seen. null when there is no messages row.
+export function contextOf(u) {
+  const rows = Array.isArray(u?.categories) ? u.categories : [];
+  const chat = rows.find((c) => c.id === 'messages');
+  if (!chat) return null;
+  const kind = (c) => c.kind ?? (c.isDeferred ? 'deferred' : /free|buffer/i.test(c.id ?? c.name ?? '') ? 'free' : 'used');
+  const sum = (f) => rows.filter((c) => c !== chat && f(kind(c))).reduce((n, c) => n + num(c.tokens), 0);
+  const top = (Array.isArray(u.mcpTools) ? u.mcpTools : []).filter((t) => t && !t.isDeferred).sort((a, b) => num(b.tokens) - num(a.tokens)).slice(0, 5)
+    .map((t) => ({ name: String(t.name), server: String(t.serverName ?? ''), tokens: num(t.tokens), ...(t.isLoaded === false ? { loaded: false } : {}) }));
+  return { type: 'context_usage', chat: num(chat.tokens), fixed: sum((k) => k === 'used'), deferred: sum((k) => k === 'deferred'), top };
+}
+const CONTEXT_USAGE_MS = 3_000; // 'summary' answers locally; a CLI that never answers must not hold the turn
+async function contextUsage(q) {
+  if (typeof q?.getContextUsage !== 'function') return null;
+  let timer;
+  const late = new Promise((r) => { timer = setTimeout(() => r(null), CONTEXT_USAGE_MS); });
+  try { return contextOf(await Promise.race([Promise.resolve().then(() => q.getContextUsage({ detail: 'summary' })), late])); }
+  catch { return null; } finally { clearTimeout(timer); }
 }
 
 // One run: `messages` ends with the pending user turn(s); assistant and tool messages are appended to it.
@@ -503,7 +529,7 @@ async function* claudeCodeLoop(messages, o) {
   };
   if (aborted) onAbort(); else o.signal?.addEventListener('abort', onAbort, { once: true });
 
-  let hitMaxTurns = false;
+  let hitMaxTurns = false, usage = null;
   try {
     for await (const item of channel) {
       if (item.kind === 'wake') continue;
@@ -539,7 +565,7 @@ async function* claudeCodeLoop(messages, o) {
       // Read before an error throws or max turns breaks: an error result names what its turn took too (R11f-1).
       const own = tookOf(message), took = own ?? turnTook;
       if (message.subtype !== 'success' || message.is_error) settle(took, false, !own);
-      if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; break; }
+      if (message.subtype === 'error_max_turns') { hitMaxTurns = cut = true; usage = await contextUsage(q); break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
         throw new Error(detail || `Claude Code stopped: ${message.subtype}`);
@@ -554,6 +580,7 @@ async function* claudeCodeLoop(messages, o) {
       turnAt = step; turnTook = null; results.push(step);
       if (took) { if (added.some((a) => !a.done)) continue; }
       else if (addedAt > answeredAt) continue;
+      usage = await contextUsage(q); // before close: what the session now holds
       break;
     }
   } catch (e) { cut = true; throw e; } finally {
@@ -576,6 +603,7 @@ async function* claudeCodeLoop(messages, o) {
   }
   if (aborted) mapper.pairDanglingToolCalls(INTERRUPTED_NOTE);
   if (hitMaxTurns) yield { type: 'max_turns', totalTurns: mapper.turn, maxTurns: o.maxTurns ?? 0 };
+  if (usage && !aborted) yield usage;
   yield { type: 'agent_done', totalTurns: mapper.turn, totalUsage: { ...mapper.totalUsage } };
   return { message: mapper.lastAssistant ?? { role: 'assistant', content: [] }, totalTurns: mapper.turn, totalUsage: { ...mapper.totalUsage } };
 }

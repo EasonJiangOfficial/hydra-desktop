@@ -116,11 +116,21 @@ const redact = (t) => redactText(String(t), { secrets: (secrets ??= environmentS
 // Things redactText doesn't know (it catches keys and tokens): card-like digit runs and named secrets.
 const SECRETISH = /\b(?:\d[ -]?){12,19}\b|\b(?:password|passcode|passphrase|pin code|api key|secret key|access token|2fa code|one-time code)\b/i;
 
+// The first balanced {...} (braces inside strings skipped): a model that writes two objects, or a note after the JSON,
+// still parses (E3: a fold failed on "Unexpected non-whitespace character after JSON").
 function jsonOf(text) {
   const raw = String(text ?? '').replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '');
-  const a = raw.indexOf('{'), b = raw.lastIndexOf('}');
-  if (a < 0 || b < a) throw new Error('no JSON in the reply');
-  return JSON.parse(raw.slice(a, b + 1));
+  const a = raw.indexOf('{');
+  if (a < 0) throw new Error('no JSON in the reply');
+  let depth = 0, str = false, esc = false;
+  for (let i = a; i < raw.length; i++) {
+    const c = raw[i];
+    if (str) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') str = false; }
+    else if (c === '"') str = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return JSON.parse(raw.slice(a, i + 1));
+  }
+  throw new Error('no JSON in the reply');
 }
 function cleanFacts(list, knownIds) {
   const known = new Set(knownIds);
