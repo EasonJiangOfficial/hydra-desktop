@@ -73,7 +73,7 @@ const o = calls.options;
 assert.equal(o.systemPrompt.prompt, 'You are Roamie.');
 assert.deepEqual(o.tools, [], 'none of Claude Code\'s own tools');
 assert.deepEqual(o.allowedTools, ['mcp__gg__read_file']);
-assert.equal(o.cwd, '/home/me'); assert.equal(o.pathToClaudeCodeExecutable, '/bin/claude'); assert.deepEqual(o.env, { A: '1', CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384' });
+assert.equal(o.cwd, '/home/me'); assert.equal(o.pathToClaudeCodeExecutable, '/bin/claude'); assert.deepEqual(o.env, { A: '1', CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1' }, 'no telemetry or other non-essential traffic from Claude Code');
 assert.equal(o.effort, 'low'); assert.equal(o.maxTurns, 24); assert.equal(o.resume, undefined, 'a fresh session');
 assert.deepEqual((await o.canUseTool('Bash', {})).behavior, 'deny', 'anything not ours is denied');
 const sent = calls.inputs[0].message.content.map((p) => p.text).join('\n');
