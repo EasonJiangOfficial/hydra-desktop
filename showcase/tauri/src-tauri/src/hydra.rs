@@ -126,7 +126,8 @@ const BRIDGE_JS: &str = r#"(() => {
   const stays = (u) => u.origin === location.origin || u.origin === 'https://vtspmnippnixoqtomfxi.supabase.co'
     || (u.protocol === 'https:' && !u.port && (u.hostname === 'plaid.com' || u.hostname.endsWith('.plaid.com')));
   document.addEventListener('click', (e) => {
-    if (e.defaultPrevented || e.button !== 0) return;
+    // Only a real click by the owner (a script's synthetic click can't open anything).
+    if (!e.isTrusted || e.defaultPrevented || e.button !== 0) return;
     const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (!a) return;
     let u; try { u = new URL(a.href, location.href); } catch { return; }
@@ -281,6 +282,7 @@ mod tests {
         // The page script: main frame and Hydra only, carries the secret, version 2.
         let js = bridge_js(t);
         assert!(js.contains(&format!("const T = '{t}'")) && !js.contains("__HYDRA_TOKEN__"));
+        assert!(js.contains("!e.isTrusted"), "only real clicks open links");
         assert!(js.contains("window.top !== window") && js.contains("version: 2") && js.contains("detach: () => call('detach')") && js.contains("get detached()"));
         assert_eq!(bridge_token().len(), 32);
         assert_eq!(bridge_token(), bridge_token(), "one secret per launch");
