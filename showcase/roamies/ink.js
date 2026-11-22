@@ -550,7 +550,7 @@
     },
     async copy(m) { sfx('tick'); leaveAfter(toast('Copied to your clipboard', m.text), 1800); },
     async open(m) { let h = m.url; try { h = new URL(m.url).hostname.replace(/^www\./, ''); } catch {} sfx('whoosh'); leaveAfter(toast(`Opening ${h}`, m.url, { spin: true }), 1800); },
-    async handoff(m) { sfx('toolstart'); leaveAfter(toast('Handed off', m.task || m.text || m.label || '', { spin: true }), 2200); },
+    async handoff(m) { leaveAfter(toast('Handed off', m.task || m.text || m.label || '', { spin: true }), 2200); },
     async button(m) {
       const k = 1.15, w = Math.round(textW(m.text, CHIP(k)) + 34), h = 32;
       const r = m.at ? nameSpot(rectOf(m), m.text, [w, h]) : place(w, h, m.part);
@@ -563,7 +563,8 @@
       for (let k = 0; k < 9; k++) { const a = (k / 9) * Math.PI * 2 + rnd(-0.2, 0.2), r0 = rnd(30, 40), ln = rnd(10, 16), col = k % 3 ? ACC : tone('amber'); add({ z: 9, p: 1, box: [x - 90, y - 90, 180, 180], live: () => true, draw(b, l, t) { const u = (t - this.born) / 0.8; if (u > 1) { this.alive = false; return; } const r = r0 + u * 22; l.save(); l.globalAlpha *= 1 - u; l.strokeStyle = col; l.lineWidth = 3; l.lineCap = 'round'; l.beginPath(); l.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r); l.lineTo(x + Math.cos(a) * (r + ln), y + Math.sin(a) * (r + ln)); l.stroke(); l.restore(); } }); }
       sfx(m.name === 'hype' ? 'hype' : 'pop'); await sleep(900);
     },
-    async sfx(m) { sfx(m.name); },
+    // A sound the model asks for (draw.mjs sfx) is silent: the premium chimes mark only real events (owner: random sounds).
+    async sfx() {},
   };
 
   // ---------------------------------------------------------------- cards and diagrams on calm space

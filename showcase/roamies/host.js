@@ -172,6 +172,8 @@
   // waveTurn: a spoken question whose "thinking" shows as dots beside the cursor (macOS), so the Sidekick
   // shows no thought cloud of its own. research: this turn's answer broke down into points, so it goes on the card.
   let hearing = false; // a voice take is open (the mic is on), so Esc can cancel it
+  // toolsRan: this request did something (a tool ran), so its end is a finished task: one 'done' chime, not one per tool.
+  let toolsRan = false;
   let waveTurn = false, research = false, heardText = false, spoken = '', fromWeb = false, listenTake = 0;
   // agentish: they asked for an agent, so the agents' corner hatches one instead of the thought cloud.
   let agentish = false;
@@ -289,6 +291,7 @@
         // Nor is it still working in another app, even if that work's end was missed.
         a.hand?.end();
         responding = true;
+        toolsRan = false;
         a.working?.(true);
         Roamie.voiceOut?.warm?.();
         heard = null;
@@ -350,6 +353,7 @@
         break;
       }
       case 'tool':
+        toolsRan = true;
         if (listen?.open) break;
         // Tools with nothing to show (listing commitments) don't interrupt the bubble.
         if (!e.anim) break;
@@ -407,6 +411,8 @@
         break;
       case 'done':
         responding = false;
+        if (toolsRan && !e.stopped) Roamie.sfx?.play('done');
+        toolsRan = false;
         a.working?.(false);
         if (agentish) { agentish = false; Roamie.agentHome?.hatchOff(); }
         if (research) panel()?.end(fromWeb ? 'From the web' : 'Answer');
@@ -420,6 +426,7 @@
       case 'error':
         dropAutoListen();
         responding = false;
+        toolsRan = false;
         a.working?.(false);
         if (agentish) { agentish = false; Roamie.agentHome?.hatchOff(); }
         if (research) panel()?.fail(e.message);
@@ -556,9 +563,10 @@
     // Hydra asleep (5 minutes without talk, or the sleep word) or awake: the orb holds still and pale while asleep.
     if (m.kind === 'orb_mode') { Roamie.orbAttached = !m.detached; pushOrb(true); return; }
     if (m.kind === 'wake_phrase') { wakePhrase = !!m.on; pushOrb(true); return; }
-    if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
+    // Its chimes play once: only in the overlay that holds Hydra (every overlay gets these messages).
+    if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound && getAgent()) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
     // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
-    if (m.kind === 'listen_after') { Roamie.sfx?.play('hydra_wake'); waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
+    if (m.kind === 'listen_after') { if (getAgent()) Roamie.sfx?.play('hydra_wake'); waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
     // The orb's size (outer edge, px). It never changes form: the size is the setting.
     if (m.kind === 'size') { Roamie.orbPx = ORB_PX[m.size] ?? 48; for (const t of Roamie.tiles ?? []) t.creature.refit?.(); return; }
     if (m.kind === 'look') {

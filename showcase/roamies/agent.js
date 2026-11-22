@@ -1102,7 +1102,7 @@
           // Live calls: when the animation reaches its end before the real tool, hold there (spinner keeps going).
           if (st.live && st.real === undefined) { st.parked = true; return; }
           const final = st.live ? st.real && ok : ok;
-          st.status = final ? 'ok' : 'fail'; k.S(final ? 'done' : 'error');
+          st.status = final ? 'ok' : 'fail'; // silent: the request's end chimes once (host.js toolsRan)
         };
         tool = st;
         def.start?.(st, C);

@@ -1709,8 +1709,9 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
         retryNext = { text, image, note, byVoice, listenAfter, news, info: { text, from: modelName(config.model), untilText: untilWords(lim.until), kind: lim.kind, count: retryCount + 1, fix } };
       }
     }
-    if (retryNext) ui({ kind: 'agent', e: { type: 'done' } });
-    else if (controller.signal.aborted && quiet) ui({ kind: 'agent', e: { type: 'done' } });
+    // stopped: this ending isn't a finished task (a retry follows, or it was stopped quietly), so no 'done' chime.
+    if (retryNext) ui({ kind: 'agent', e: { type: 'done', stopped: true } });
+    else if (controller.signal.aborted && quiet) ui({ kind: 'agent', e: { type: 'done', stopped: true } });
     else {
       const msg = stalled ? stallMessage() : controller.signal.aborted ? 'Okay, stopping.' : aloud(problem('reply', err, { who: PROVIDER_LABELS[config.provider] }));
       console.error('prompt failed', err);

@@ -39,7 +39,7 @@
   R.sfx = {
     names: Object.keys(MAP),
     play(name) {
-      const [file, gain] = MAP[name] ?? [];
+      const [file, gain] = Object.hasOwn(MAP, name) ? MAP[name] : [];
       const buf = buffers[file];
       if (!buf || !enabled || !unlocked || !live || live.ac.state !== 'running') return;
       const now = live.ac.currentTime;
