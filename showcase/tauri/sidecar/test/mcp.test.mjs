@@ -182,10 +182,10 @@ console.log('mcp ok');
 
   // Removing asks, then deletes; a no keeps it.
   answers = [null];
-  await assert.rejects(T.remove_connection.execute({ name: 'notes3' }), /said no/);
+  await assert.rejects(T.remove_connection.execute({ name: 'notes3', reason: 'they asked' }), /said no/);
   assert.equal(m.has('notes3'), true, 'a no keeps the connection');
   answers = ['yes'];
-  assert.equal(await T.remove_connection.execute({ name: 'notes3' }), 'Removed notes3.');
+  assert.equal(await T.remove_connection.execute({ name: 'notes3', reason: 'they asked' }), 'Removed notes3.');
   assert.equal(m.has('notes3'), false);
   console.log('mcp tools ok');
 }

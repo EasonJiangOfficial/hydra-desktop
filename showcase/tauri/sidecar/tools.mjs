@@ -7,11 +7,11 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkFetch, checkOpen, checkRead, checkTyped, checkWrite, isRiskyClick, riskyKey, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
-import { addCommitment, binLine, forgetFact, getBin, getCommitment, keepOldFile, listBin, listFacts, parseDue, parseRepeat, repeatLabel, restoreFromBin, updateCommitment } from './store.mjs';
+import { addCommitment, binKind, binLine, forgetFact, getBin, getCommitment, keepOldFile, listBin, listFacts, parseDue, parseRepeat, repeatLabel, restoreFromBin, updateCommitment } from './store.mjs';
 import { snoozeTarget, snoozeUntil } from './snooze.mjs';
 import { addJob, getJob, jobsText, removeJob, updateJob } from './jobs.mjs';
 import { deleteSkill, fetchSkills, installSkill, listSkills, readSkill, skillExists, readSkillFile, saveSkill, screenSkill, skillFiles } from './skills.mjs';
@@ -180,6 +180,8 @@ function controlList(controls, texts = []) {
     + (words.length ? `\nText on screen: ${words.join(' | ')}` : '');
 }
 // A safety verdict: blocked throws with the reason, otherwise returns the checked absolute path.
+// A delete's reason, said in the question (D4).
+const why = (reason) => (String(reason ?? '').trim() ? `\n\nWhy: ${String(reason).trim()}` : '');
 const allowed = (v) => { if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`); return v.path; };
 // Shrinks an image to at most 1568 px on its long side (Claude's own cap), never enlarging small ones. Returns [w, h].
 export async function fitImage(file) {
@@ -258,22 +260,30 @@ export function oneYesNoAtATime(ask) {
   };
 }
 
-/** act_in_app steps as the owner reads them in a question: every one, numbered, with all the text it types (D4). */
-export function stepsText(steps) {
+// The clipboard's text as a paste would put it in (macOS); null when it can't be read.
+const defaultClipboard = async () => {
+  if (process.platform !== 'darwin') return null;
+  const r = await run('pbpaste', [], { timeout: 2000 });
+  return r.err ? null : r.stdout;
+};
+
+/** act_in_app steps as the owner reads them in a question: every one, numbered, with all the text it types, what
+ *  each click is on and what a paste puts in (D4, V9-6). clipboard: its text, or null when it can't be read. */
+export function stepsText(steps, { clipboard } = {}) {
   const q = (t) => JSON.stringify(String(t ?? ''));
   const one = (s) => {
     switch (s.do) {
       case 'click_text': return `click ${q(s.text)}${s.near ? ` near ${q(s.near)}` : ''}`;
-      case 'click': return `click control ${s.id}`;
+      case 'click': return `click control ${s.id}${s.shown ? ` (${q(s.shown)})` : ''}`;
       case 'fill': return `fill ${q(s.field)} with ${q(s.text)}`;
       case 'set': return `set control ${s.id} to ${q(s.text)}`;
       case 'type': return `type ${q(s.text)}`;
       case 'choose': return `choose ${q(s.option)}${s.field ? ` in ${q(s.field)}` : ''}`;
-      case 'key': return `press ${s.key}`;
+      case 'key': return isPasteKey(s.key) ? `press ${s.key}, pasting ${clipboard == null ? 'what is on the clipboard (I can\'t read it)' : q(clipboard)}` : `press ${s.key}`;
       case 'click_at': return `click at ${Math.round(s.x)}, ${Math.round(s.y)}`;
       case 'hover': return s.text ? `point at ${q(s.text)}` : `point at ${Math.round(s.x ?? 0)}, ${Math.round(s.y ?? 0)}`;
       case 'scroll': return `scroll ${s.direction ?? 'down'}${s.text ? ` in ${q(s.text)}` : ''}`;
-      case 'focus': return `focus control ${s.id}`;
+      case 'focus': return `focus control ${s.id}${s.shown ? ` (${q(s.shown)})` : ''}`;
       case 'wait': return `wait ${s.seconds ?? 1} s`;
       default: return String(s.do);
     }
@@ -281,7 +291,7 @@ export function stepsText(steps) {
   return steps.map((s, i) => `${i + 1}. ${one(s)}`).join('\n');
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null }) {
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null, readClipboard = defaultClipboard }) {
   // Relative paths start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   let axNudged = 0;
@@ -891,9 +901,23 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           }
           // Delete, pay, send, sign out: ask first, whatever the request was. The helper refuses these clicks without it.
           const appName = sameApp && lastRead.app ? lastRead.app : asked;
+          // A paste puts in the clipboard's text: checked like typing, and shown in a whole-plan question (V9-6).
+          const clipboard = mapped.some((s) => s.do === 'key' && isPasteKey(s.key)) ? await Promise.resolve().then(readClipboard).catch(() => null) : undefined;
           for (const s of mapped) {
             // What it types is checked first: no file: or other odd links, no secret paths, hidden ones with a yes (F2).
-            const typed = ['type', 'fill', 'set'].includes(s.do) ? s.text : s.do === 'choose' ? s.option : null;
+            // Key steps type too: characters pressed one by one, and cmd+v pastes the clipboard (V9-6).
+            let typed = ['type', 'fill', 'set'].includes(s.do) ? s.text : s.do === 'choose' ? s.option : null;
+            if (s.do === 'key') {
+              if (isPasteKey(s.key)) {
+                if (clipboard == null && !(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It pastes what is on the clipboard, which I can't read.`, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+                typed = clipboard ?? '';
+              } else {
+                const ch = keyChar(s.key);
+                // ponytail: backspace undoes one character of the join; arrow keys that move the caret aren't followed.
+                if (ch === '\b') { if (typedSoFar.turn === turn) typedSoFar.text = typedSoFar.text.slice(0, -1); }
+                else if (ch) typed = ch;
+              }
+            }
             if (typed != null) {
               // What this request typed so far is checked joined with it too: "~/" then ".ssh/id_rsa" is one path
               // (eighth review V8-4). A path said yes to isn't asked about again in this request; the join goes on.
@@ -924,6 +948,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               if (!(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It ${keyDoes}.`, ctx))) throw new Error(`${userName} said no, so I didn't press ${s.key} (nothing after it ran either).`);
               s.confirmed = true; s.confirmedLabel = s.key;
             }
+            if (label && s.do === 'click') s.shown = label; // named in a whole-plan question; the helper ignores it
             delete s.label;
           }
           const plan = { steps: mapped, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
@@ -951,7 +976,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               // so the owner sees every step left, in full, and one yes covers exactly those (V8-3, V8-4, V8-7).
               if (r.whole) {
                 const left = plan.steps.slice(r.step);
-                if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left)}`, ctx))) {
+                // A click the owner can't see the target of (a spot on screen, a control with no name) isn't taken there:
+                // in a file panel it could pick any file (V9-6).
+                const blind = left.find((s) => s.do === 'click_at' || (s.do === 'hover' && !s.text) || (['click', 'focus'].includes(s.do) && !s.shown));
+                if (blind) throw new Error(`Blocked for safety: ${r.why} There I only click things by their name (click_text), so ${userName} can see what; "${stepsText([blind]).slice(3)}" doesn't say${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left, { clipboard })}`, ctx))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []), String(r.whole)];
@@ -1153,14 +1182,15 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     },
     {
       name: 'update_commitment',
-      description: "Mark a commitment done or dropped, or change its due or repeat (as in remember_commitment; \"none\" clears either). Done on a repeating one moves it to the next time; dropped ends the whole series, so only when they want it gone.",
-      parameters: z.object({ id: z.string(), status: z.enum(['open', 'done', 'dropped']).optional(), due: z.string().optional(), repeat: z.string().max(60).optional() }),
-      execute: async ({ id, status, due, repeat }, ctx) => {
-        // Dropping one deletes it (its whole series): owner's rule, every deletion asks.
+      description: "Mark a commitment done or dropped, or change its due or repeat (as in remember_commitment; \"none\" clears either). Done on a repeating one moves it to the next time; dropped ends the whole series, so only when they want it gone, with reason: why, in a few words (shown when asking).",
+      parameters: z.object({ id: z.string(), status: z.enum(['open', 'done', 'dropped']).optional(), due: z.string().optional(), repeat: z.string().max(60).optional(), reason: z.string().max(500).optional() }),
+      execute: async ({ id, status, due, repeat, reason }, ctx) => {
+        // Dropping one deletes it (its whole series): owner's rule, every deletion asks, with its reason (D4).
         if (status === 'dropped') {
           const old = getCommitment(id);
           if (!old) throw new Error(`No commitment with id ${id}. Call list_commitments to see the ids.`);
-          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?`, ctx))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
+          if (!reason?.trim()) throw new Error('Dropping deletes it: say why in reason, so the question shows it.');
+          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
         }
         const ms = due === undefined ? undefined : due === 'none' ? null : parseDue(due);
         if (ms === undefined && due !== undefined) throw new Error(`Couldn't read the time "${due}".`);
@@ -1174,12 +1204,13 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     {
-      name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory section of the <live-state> block.',
-      parameters: z.object({ id: z.string() }),
-      execute: async ({ id }, ctx) => {
+      name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory section of the <live-state> block. reason: why, in a few words (shown when asking).',
+      parameters: z.object({ id: z.string(), reason: z.string().min(1).max(500) }),
+      execute: async ({ id, reason }, ctx) => {
         const had = listFacts().find((x) => x.id === id);
         if (!had) throw new Error(`No fact with id ${id}.`);
-        if (!(await confirm(`Forget "${had.text}"?`, ctx))) throw new Error(`${userName} said no, so I still remember it.`);
+        if (!reason?.trim()) throw new Error('Say why in reason, so the question shows it.');
+        if (!(await confirm(`Forget "${had.text}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so I still remember it.`);
         const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text} (it can be put back from Recently deleted)`;
       },
     },
@@ -1196,14 +1227,27 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async ({ id }, ctx) => {
         const x = getBin(id);
         if (!x) throw new Error(`Nothing in Recently deleted has the id ${id}. Call list_deleted to see the ids.`);
+        // Each was deleted with the owner's yes (or by them), so putting one back asks too, every time, saying in full
+        // what comes back (ninth review V9-2, V9-3, V9-11). The rules it was made under are checked again first.
+        let question = `Put back the ${binKind(x.kind).toLowerCase()} "${x.title}"?`;
         if (x.kind === 'file') {
-          // Putting a file back writes it: the same rules as write_file, and over a file that's there it asks.
+          // Putting a file back writes it: the same rules as write_file (a file that's gone is a new file there).
           if (!allowActions()) throw new Error(actionsOff);
           const there = await fs.lstat(x.data.path).then(() => true, () => false);
           const v = checkWrite(x.data.path, HOME, { exists: there });
           allowed(v);
-          if (there && !(await confirm(`Put back ${v.path} as it was before it was changed? What's in it now goes to Recently deleted.`, ctx))) throw new Error(`${userName} said no, so ${v.path} stays as it is.`);
+          question = there ? `Put back ${v.path} as it was before it was changed? What's in it now goes to Recently deleted.` : `Put back ${v.path} as it was before it was changed? It isn't there now, so this makes it again.`;
         }
+        if (x.kind === 'connection') {
+          // Like add_connection: the same checks, and the whole command or address it runs or reaches.
+          const e = x.data?.entry ?? {};
+          const v = checkMcpServer({ name: x.data?.name, command: e.command, args: e.args ?? [], url: e.url });
+          if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
+          if (e.command && !allowActions()) throw new Error(`A server that runs on this computer is a command, and commands are switched off. Tell ${userName} to turn on "Allow File Edits & Commands" if they want it back.`);
+          question = `Put back the ${x.data.name} connection and connect it? ${v.reason}`;
+        }
+        if (x.kind === 'job') question = `Put back the scheduled job "${x.data?.title}" (paused)? Its brief: ${x.data?.brief ?? ''}`;
+        if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so it stays in Recently deleted.`);
         const said = await restoreFromBin(id);
         if (x.kind === 'commitment') onCommitments(null);
         if (x.kind === 'job') jobs?.changed(null);
@@ -1263,11 +1307,12 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     }, {
       name: 'update_job',
-      description: "Change a scheduled job (ids in the memory section's Scheduled jobs, or list_jobs). action: pause, resume, run_now (the schedule stays) or remove. due: a new next time. repeat: a new one, or \"none\" for a one-off.",
-      parameters: z.object({ id: z.string().max(12), action: z.enum(['pause', 'resume', 'run_now', 'remove']).optional(), due: z.string().max(40).optional(), repeat: z.string().max(60).optional() }),
-      execute: async ({ id, action, due, repeat }, ctx) => {
+      description: "Change a scheduled job (ids in the memory section's Scheduled jobs, or list_jobs). action: pause, resume, run_now (the schedule stays) or remove (with reason: why, in a few words, shown when asking). due: a new next time. repeat: a new one, or \"none\" for a one-off.",
+      parameters: z.object({ id: z.string().max(12), action: z.enum(['pause', 'resume', 'run_now', 'remove']).optional(), due: z.string().max(40).optional(), repeat: z.string().max(60).optional(), reason: z.string().max(500).optional() }),
+      execute: async ({ id, action, due, repeat, reason }, ctx) => {
         if (!getJob(id)) throw new Error(`No scheduled job with id ${id}. Call list_jobs to see the ids.`);
-        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?`, ctx))) throw new Error(`${userName} said no, so the job stays.`);
+        if (action === 'remove' && !reason?.trim()) throw new Error('Removing deletes it: say why in reason, so the question shows it.');
+        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so the job stays.`);
         if (action === 'remove') { const j = await removeJob(id); jobs.changed(null); return `Removed the job "${j.title}".`; }
         if (action === 'run_now') { const a = await jobs.run(id); return `Started ${a.id} for "${getJob(id).title}"; it reports back when it's done. The schedule is unchanged.`; }
         const j = await updateJob(id, { ...(action ? { paused: action === 'pause' } : {}), ...(due !== undefined ? { due } : {}), ...(repeat !== undefined ? { repeat } : {}) });
@@ -1333,11 +1378,12 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         return `${s.created ? 'Learned' : 'Updated'} the skill ${s.slug}. It shows on the Abilities page's Skills tab.`;
       },
     }, {
-      name: 'forget_skill', description: 'Delete a learned skill that is wrong or that the user asks you to forget.',
-      parameters: z.object({ name: z.string().min(1).max(60) }),
-      execute: async ({ name }, ctx) => {
+      name: 'forget_skill', description: 'Delete a learned skill that is wrong or that the user asks you to forget. reason: why, in a few words (shown when asking).',
+      parameters: z.object({ name: z.string().min(1).max(60), reason: z.string().min(1).max(500) }),
+      execute: async ({ name, reason }, ctx) => {
         if (!readSkill(name)) throw new Error(`No skill called "${name}".`);
-        if (!(await confirm(`Delete the skill "${name}"?`, ctx))) throw new Error(`${userName} said no, so the skill stays.`);
+        if (!reason?.trim()) throw new Error('Say why in reason, so the question shows it.');
+        if (!(await confirm(`Delete the skill "${name}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so the skill stays.`);
         const s = await deleteSkill(name); if (!s) throw new Error(`No skill called "${name}".`); skills.changed?.(null); return `Removed the skill ${s.slug}.`;
       },
     }] : []),

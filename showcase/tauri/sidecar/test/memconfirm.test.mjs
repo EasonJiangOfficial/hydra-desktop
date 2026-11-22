@@ -19,16 +19,16 @@ const { tools } = createTools({ allowActions: () => true, ui: () => {}, openUrl:
 const tool = (n) => tools.find((t) => t.name === n);
 
 const f = await addFact('likes green tea');
-await assert.rejects(tool('forget_fact').execute({ id: f.id }, undefined), /said no/);
+await assert.rejects(tool('forget_fact').execute({ id: f.id, reason: 'they asked' }, undefined), /said no/);
 assert.equal(asked.pop()?.always, true, 'forget_fact asks, always');
 assert.ok(listFacts().some((x) => x.id === f.id), 'a no keeps the fact');
 answer = 'Allow';
-await tool('forget_fact').execute({ id: f.id }, undefined);
+await tool('forget_fact').execute({ id: f.id, reason: 'they asked' }, undefined);
 assert.ok(!listFacts().some((x) => x.id === f.id), 'a yes forgets it');
 
 answer = null;
 const c = await addCommitment('call mum', null);
-await assert.rejects(tool('update_commitment').execute({ id: c.id, status: 'dropped' }, undefined), /said no/);
+await assert.rejects(tool('update_commitment').execute({ id: c.id, status: 'dropped', reason: 'they asked' }, undefined), /said no/);
 assert.equal(asked.pop()?.always, true, 'dropping a commitment asks, always');
 assert.equal(getCommitment(c.id).status, 'open', 'a no keeps it');
 asked.length = 0;
@@ -38,7 +38,7 @@ assert.equal(asked.length, 0, 'ticking one off needs no yes');
 // The job and skill tools: the asks are in place before anything is removed.
 const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
 assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx\)\)/);
-assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?`, ctx\)/);
+assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?\$\{why\(reason\)\}`, ctx\)/, 'with its reason (ninth review V9-12)');
 assert.match(src, /skillExists\(args\.name\) && !\(await confirm\(`Replace the skill/, 'saving over a skill asks (second review M8)');
 // Fourth review: a fact said again after it was replaced is current again, and replaced facts never reach the model.
 {

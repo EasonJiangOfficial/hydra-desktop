@@ -118,6 +118,9 @@ export function createMcp({ file = path.join(DIR, 'mcp.json'), secrets, manager 
   onRestore('connection', async ({ data }) => {
     const j = read();
     if (j.mcpServers[data.name]) throw new Error(`There's a connection called ${data.name} now. Remove it first.`);
+    // The rules may be stricter now than when it was added (V9-2).
+    const v = checkMcpServer({ name: data.name, command: data.entry?.command, args: data.entry?.args ?? [], url: data.entry?.url });
+    if (v.level === BLOCK) throw new Error(`It can't come back: ${v.reason}`);
     j.mcpServers[data.name] = data.entry;
     await write(j);
     if (data.entry.enabled !== false) { await ready(); await connect(data.name, data.entry).catch(() => {}); }
@@ -257,11 +260,12 @@ export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, ope
       },
     },
     {
-      name: 'remove_connection', description: `Remove a connection (and its saved keys) when ${userName} asks.`,
-      parameters: z.object({ name: z.string().max(32) }),
-      execute: async ({ name }, ctx) => {
+      name: 'remove_connection', description: `Remove a connection (and its saved keys) when ${userName} asks. reason: why, in a few words (shown when asking).`,
+      parameters: z.object({ name: z.string().max(32), reason: z.string().min(1).max(500) }),
+      execute: async ({ name, reason }, ctx) => {
         if (!mcp.has(name)) throw new Error(`There's no connection called ${name}.`);
-        if (!(await confirm(`Remove the ${name} connection and its keys? It stays in Recently deleted for 30 days, where it can be put back.`, ctx))) throw new Error(`${userName} said no; ${name} stays.`);
+        if (!String(reason ?? '').trim()) throw new Error('Say why in reason, so the question shows it.');
+        if (!(await confirm(`Remove the ${name} connection and its keys? It stays in Recently deleted for 30 days, where it can be put back.\n\nWhy: ${String(reason).trim()}`, ctx))) throw new Error(`${userName} said no; ${name} stays.`);
         await mcp.remove(name);
         return `Removed ${name}.`;
       },
