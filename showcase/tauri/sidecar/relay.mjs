@@ -20,6 +20,10 @@
 // - createLocalSync: the owner's own turns on this Mac (voice or typed) go to his shared thread (/relay/local).
 // - approve() turns a Mac-side ask into a server approval the owner answers on any surface (fixes 6); once the turn
 //   is closed (done, error, stopped) it asks nothing and answers 'expired'.
+// - Add-on while thinking (W5 contract 2): every events answer (batches and heartbeats) may carry inputs [{seq, text}]
+//   the owner added on the web or the phone while the turn runs. Each new one goes to the turn (onInput: the runner
+//   pushes it into the running Claude Code session), and the next post acknowledges it with inputsSeen (highest seq).
+//   A live turn beats every inputBeatMs (5 s) so an addition never waits long.
 // Offline or refused between turns: it backs off (1 s up to a minute), never a busy loop.
 import { delay, waitApproval } from './hydramcp.mjs';
 // The server's shapes and limits (src/lib/agent/relay-schema.ts, copied verbatim).
@@ -35,6 +39,15 @@ export const TEXT_MAX = LIMITS.textDelta;
 export const BAD_EVENT = { type: 'error', code: 'mac_bad_event', message: 'Hydra hit a problem on your Mac.' };
 export const MAC_FAILED = { type: 'error', code: 'mac_failed', message: 'Hydra could not finish this on your Mac.' };
 export const FAILED_MS = 10 * 60_000;
+export const INPUT_PREFIX = '(added while you were working) ';
+const INPUT_MAX = 8000;
+/** The new additions in an events answer: [{seq, text}] with seq above `after`, in order; anything malformed is left out. */
+export function newInputs(answer, after = 0) {
+  const list = Array.isArray(answer?.inputs) ? answer.inputs : [];
+  return list.filter((i) => Number.isInteger(i?.seq) && i.seq > after && typeof i.text === 'string' && i.text.trim())
+    .map((i) => ({ seq: i.seq, text: i.text.trim().slice(0, INPUT_MAX) })).sort((a, b) => a.seq - b.seq)
+    .filter((i, k, a) => k === 0 || i.seq !== a[k - 1].seq);
+}
 /** The key is revoked (401) or lacks a scope (403, a Mac paired before the relay): the pairing is stale. */
 export const authStale = (status) => status === 401 || status === 403;
 /** Worth another try: offline, a 5xx, or 429 (busy). */
@@ -153,7 +166,7 @@ function readFailed(file) {
   } catch { return []; }
 }
 
-export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitSecs = 25, heartbeatMs = 20_000, flushMs = 150, backoff = BACKOFF, retry = RETRY, minPollMs = 1000, slots = SLOTS, onAuth = () => {}, waitFor = (id, signal) => waitApproval(api, id, { signal }), liveCapMs = 280_000, capWindowMs = 40_000, capBeatMs = 5000, failedMs = FAILED_MS, now = Date.now, stateFile = null }) {
+export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitSecs = 25, heartbeatMs = 20_000, flushMs = 150, backoff = BACKOFF, retry = RETRY, minPollMs = 1000, slots = SLOTS, onAuth = () => {}, waitFor = (id, signal) => waitApproval(api, id, { signal }), liveCapMs = 280_000, capWindowMs = 40_000, capBeatMs = 5000, inputBeatMs = 5000, failedMs = FAILED_MS, now = Date.now, stateFile = null }) {
   let ctrl = null, loopP = null;
   const current = new Map(); // slot -> turn id
   // turn id -> when this Mac stopped it (unreachable or a bad event); kept in stateFile across restarts.
@@ -227,9 +240,23 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
     // sent: events this claim stored, so each batch carries its first event's number (seq) and a retried post is
     // stored once (the server skips what it has).
     let closed = false, posting = Promise.resolve(), timer = null, lost = null, sent = 0;
+    // Additions while the turn runs: seen is the highest seq handed to the runner (acknowledged in the next post);
+    // waiting holds the ones that came before the runner asked for them.
+    let seen = 0, onInput = null;
+    const waiting = [];
+    const deliver = (i) => {
+      seen = Math.max(seen, i.seq);
+      log('relay_input', { id: turn.id, seq: i.seq, chars: i.text.length });
+      try { onInput(i.text); } catch (e) { log('relay_input', { id: turn.id, error: String(e?.message ?? e).slice(0, 120) }); }
+    };
+    const takeInputs = (answer) => {
+      for (const i of newInputs(answer, Math.max(seen, waiting.at(-1)?.seq ?? 0))) {
+        if (onInput && !closed) deliver(i); else waiting.push(i);
+      }
+    };
     log('relay_turn', { id: turn.id, surface: turn.surface, slot });
     const send = (events) => api.req('/api/agent/relay/events', {
-      method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), ...(events.length ? { seq: sent + 1 } : {}), events }, timeout: 20_000,
+      method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), ...(events.length ? { seq: sent + 1 } : {}), events, ...(seen ? { inputsSeen: seen } : {}) }, timeout: 20_000,
     });
     const stop = (why, status) => {
       if (lost) return;
@@ -243,7 +270,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       for (let i = 0; !lost; i++) {
         let r = null;
         try { r = await send(events); } catch { /* offline: below */ }
-        if (r?.ok) { sent += events.length; return true; }
+        if (r?.ok) { sent += events.length; takeInputs(await r.json().catch(() => null)); return true; }
         if (r?.status === 409) { stop('stale_claim', 409); return false; }
         if (!again(r)) {
           stop('bad_event', r.status);
@@ -300,7 +327,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
     let beat = null;
     const nextBeat = () => {
       const toWindow = t0 + liveCapMs - capWindowMs - now();
-      const ms = !isLive ? heartbeatMs : toWindow > 0 ? Math.min(heartbeatMs, toWindow) : capBeatMs;
+      const ms = !isLive ? heartbeatMs : toWindow > 0 ? Math.min(heartbeatMs, inputBeatMs, toWindow) : capBeatMs;
       beat = setTimeout(() => {
         if (lost || closed) return;
         if (stateFile) remember(turn.id);
@@ -317,8 +344,10 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       posting = p;
       return (await p) === true && !lost;
     };
+    // The runner takes the additions: those that already came, then each as it comes.
+    const inputs = (fn) => { onInput = fn; while (waiting.length && !closed) deliver(waiting.shift()); };
     try {
-      await runTurn(turn, { emit, signal: turnCtrl.signal, approve, alive });
+      await runTurn(turn, { emit, signal: turnCtrl.signal, approve, alive, onInput: inputs });
       if (!closed) emit({ type: 'done' });
     } catch (e) {
       if (!closed) emit({ type: 'error', message: String(e?.message ?? e).slice(0, 500) || 'The Mac could not finish.', ...(e?.code ? { code: String(e.code) } : {}) });

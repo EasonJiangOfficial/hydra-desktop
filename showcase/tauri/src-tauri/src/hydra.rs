@@ -116,6 +116,8 @@ pub fn bridge_action(url: &Url, token: &str, on_hydra: bool) -> Option<BridgeAct
         }
         "claude" => req("signInClaude", json!({})),
         "unpair" => req("unpair", json!({})),
+        // W5 contract 1: the owner changed the agent settings in this window; the Mac reads them again now.
+        "settings" => Some(BridgeAct::Sidecar(json!({ "type": "hydra_settings_changed" }))),
         "wake" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": true, "from": "web" }))),
         "sleep" => Some(BridgeAct::Sidecar(json!({ "type": "agent_power", "on": false, "from": "web" }))),
         "detach" => Some(BridgeAct::Sidecar(json!({ "type": "orb_set", "detached": true, "from": "web" }))),
@@ -185,6 +187,7 @@ const BRIDGE_JS: &str = r#"(() => {
     signInClaude: () => ask('claude', '', 600000),
     requestPermission: (kind) => ask('perm', '&kind=' + encodeURIComponent(String(kind)), 150000),
     unpair: () => ask('unpair').then(() => undefined),
+    refreshSettings: () => call('settings'),
   }) });
   Object.defineProperty(window, '__hydraDesktopPush', { value: (m) => {
     if (m && m.ack !== undefined) { if (m.ack === sending) next(); return; }
@@ -310,6 +313,11 @@ pub fn clean_push(msg: &Value) -> Option<Value> {
     if let Some(w) = msg.get("wake").and_then(Value::as_str).filter(|w| ["phrase", "off"].contains(w)) { out.insert("wake".into(), json!(w)); }
     if let Some(v) = level("micLevel") { out.insert("micLevel".into(), json!(v)); }
     if let Some(v) = level("outputLevel") { out.insert("outputLevel".into(), json!(v)); }
+    // W5 contract 5: the orb's spectrum, 24 bands of 0..1 (output while speaking, the mic while listening).
+    if let Some(b) = msg.get("bands").and_then(Value::as_array).filter(|b| b.len() == 24) {
+        let v: Option<Vec<f64>> = b.iter().map(|x| x.as_f64().map(|f| (f.clamp(0.0, 1.0) * 1000.0).round() / 1000.0)).collect();
+        if let Some(v) = v { out.insert("bands".into(), json!(v)); }
+    }
     for k in ["detached", "muted", "paused"] {
         if let Some(d) = msg.get(k).and_then(Value::as_bool) { out.insert(k.into(), json!(d)); }
     }
@@ -460,6 +468,9 @@ mod tests {
         assert_eq!(b(&format!("pair?t={t}&code=AB12CD34")), None, "no id");
         assert_eq!(b(&format!("claude?t={t}&id=5")), sc(json!({ "type": "bridge_req", "id": 5, "cmd": "signInClaude" })));
         assert_eq!(b(&format!("unpair?t={t}&id=6")), sc(json!({ "type": "bridge_req", "id": 6, "cmd": "unpair" })));
+        assert_eq!(b(&format!("settings?t={t}")), sc(json!({ "type": "hydra_settings_changed" })), "the settings changed: read them again");
+        assert_eq!(bridge_action(&u(&format!("hydra-desktop://settings?t=guess")), t, true), None);
+        assert!(bridge_js(t).contains("refreshSettings: () => call('settings')"));
         // The secret and Hydra's own page, as for every call.
         for c in ["stop", "pause", "resume", "mute?on=1&", "setup?id=1&", "perm?id=1&kind=mic&", "pair?id=1&code=AB12CD34&", "claude?id=1&", "unpair?id=1&"] {
             let (host, q) = c.split_once('?').map(|(h, q)| (h, q.to_owned())).unwrap_or((c, String::new()));
@@ -513,6 +524,11 @@ mod tests {
         assert_eq!(p(json!({ "res": { "id": "9" } })), None);
         assert_eq!(p(json!({ "ack": 7, "state": "Asleep" })), Some(json!({ "ack": 7 })), "an ack goes alone");
         assert_eq!(p(json!({ "ack": "7" })), None);
+        let bands: Vec<f64> = (0..24).map(|i| i as f64 / 25.0).collect();
+        assert_eq!(p(json!({ "bands": bands.clone() })), Some(json!({ "bands": bands })), "the orb's 24 bands");
+        assert_eq!(p(json!({ "bands": vec![2.0; 24] })).unwrap()["bands"][0], json!(1.0), "clamped to 1");
+        assert_eq!(p(json!({ "bands": vec![0.5; 23] })), None, "only 24 bands");
+        assert_eq!(p(json!({ "bands": vec!["x"; 24] })), None);
     }
 
     #[test]

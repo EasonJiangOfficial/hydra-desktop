@@ -23,11 +23,12 @@ import { fileURLToPath } from 'node:url';
 import { ClaudeCodeAgent, NOT_CLAUDE_AI, connectorTool } from './claudecode.mjs';
 import { agentEvents } from './agentstream.mjs';
 import { HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
-import { askSummary, authStale, connectorGroup, connectorLevel, createRelay, toolFilter, turnPrompt } from './relay.mjs';
+import { INPUT_PREFIX, askSummary, authStale, connectorGroup, connectorLevel, createRelay, toolFilter, turnPrompt } from './relay.mjs';
 import { SAFE } from './safety.mjs';
+import { SETTINGS_DEFAULTS, brainFor, createSettingsWatch } from './agentsettings.mjs';
+import { FinalText } from './reply.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const BRAIN_MODEL = 'claude-opus-5-5';
 // Claude Code's own tools, every one disallowed (tools: [] already leaves them out; this is the second lock).
 export const BUILTIN_TOOLS = [
   'Agent', 'AskUserQuestion', 'Bash', 'BashOutput', 'Config', 'CronCreate', 'CronDelete', 'CronList', 'Edit', 'EnterPlanMode',
@@ -114,9 +115,13 @@ export function brainGate({ approve, alive = async () => true, may = null, log =
   };
 }
 
-/** One relay turn on the server: Hydra's tools, hydra_show and the owner's connectors, nothing else. */
-export function createBrainTurn({ hydraTools, executable, model = BRAIN_MODEL, cwd, env = process.env, log = () => {}, query, spawn }) {
-  return async function brainTurn(turn, { emit, signal, approve, alive = async () => true }) {
+/**
+ * One relay turn on the server: Hydra's tools, hydra_show and the owner's connectors, nothing else. The model and
+ * effort are Hydra's agent settings, read for every turn (settings(): GET /api/agent/state; the last good answer, or
+ * the contract's defaults, when it fails). Only the final answer is sent as text (FinalText).
+ */
+export function createBrainTurn({ hydraTools, executable, settings = async () => SETTINGS_DEFAULTS, cwd, env = process.env, log = () => {}, query, spawn }) {
+  return async function brainTurn(turn, { emit, signal, approve, alive = async () => true, onInput = () => {} }) {
     const p = turnPrompt(turn, SURFACES);
     if (!p.said) throw new Error('The turn had no words.');
     const may = toolFilter(turn.allowedTools);
@@ -124,22 +129,29 @@ export function createBrainTurn({ hydraTools, executable, model = BRAIN_MODEL, c
       ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive }).filter((t) => may('hydra', t.name)),
       showTool({ onUi: (action) => emit({ type: 'ui', action }) }),
     ];
+    const { model, thinking } = brainFor(await Promise.resolve().then(settings).catch(() => SETTINGS_DEFAULTS), turn.surface);
     const agent = new ClaudeCodeAgent({
-      model, system: BRAIN_SYSTEM, tools, maxTurns: 24, thinking: turn.surface === 'routine' ? 'medium' : 'low',
+      model, system: BRAIN_SYSTEM, tools, maxTurns: 24, thinking,
       executable, env, cwd, signal, connectors: true, disallowedTools: BUILTIN_TOOLS,
       gate: brainGate({ approve, alive, may, log }), onRateLimit: () => {}, query, spawn,
     });
     const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
     const names = new Map();
     let usage;
-    log('relay_request', { surface: turn.surface, chars: p.said.length, history: p.history, model });
-    for await (const e of agentEvents(agent.prompt(p.text))) {
-      if (e.type === 'text_delta') emit({ type: 'text', delta: e.text });
-      else if (e.type === 'tool_call_start') { names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
+    const reply = new FinalText((t) => emit({ type: 'text', delta: t }));
+    log('relay_request', { surface: turn.surface, chars: p.said.length, history: p.history, model, thinking });
+    const stream = agent.prompt(p.text);
+    // What the owner adds on the web or the phone while this runs goes into the same session.
+    onInput((text) => agent.addInput(`${INPUT_PREFIX}${text}`));
+    for await (const e of agentEvents(stream)) {
+      if (e.type === 'text_delta') reply.push(e.text);
+      else if (e.type === 'turn_end') reply.turnEnd(e.stopReason);
+      else if (e.type === 'tool_call_start') { reply.tool(); names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
       else if (e.type === 'tool_call_end') { const n = names.get(e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? String(e.result ?? '').slice(0, 160) : words(n) }); }
       else if (e.type === 'agent_done') usage = e.totalUsage;
     }
     if (signal.aborted) throw new Error('Stopped.');
+    reply.flush();
     emit({ type: 'done', ...(usage ? { usage } : {}) });
   };
 }
@@ -187,7 +199,9 @@ export async function main(argv, { env = process.env, out = (s) => console.log(s
     const api = hydraApi({ base: brainBase(env), getKey: async () => readKey(p) ?? key, ...(fetchImpl ? { fetchImpl } : {}) });
     const hydraTools = createHydraTools({ api, log: logLine });
     let toolsAt = 0;
-    const turnRun = createBrainTurn({ hydraTools, executable, cwd: p.work, env, log: logLine });
+    // Hydra's agent settings (model, effort), read again for every turn.
+    const agentSettings = createSettingsWatch({ api, log: logLine });
+    const turnRun = createBrainTurn({ hydraTools, executable, cwd: p.work, env, log: logLine, settings: () => agentSettings.refresh() });
     let lastWrite = 0;
     const relay = createRelay({
       api, log: logLine, stateFile: p.stopped,

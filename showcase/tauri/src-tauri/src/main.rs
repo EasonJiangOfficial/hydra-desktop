@@ -1849,6 +1849,12 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 to_overlays(app, m);
             }
         }
+        // Hydra's voice played by the voice helper (the same engine as the mic: the echo reference), W5 contract 6.
+        Some("voice_play") => {
+            if let Some(cmd) = msg.get("msg").and_then(voice::play_cmd) {
+                to_voice(app, &cmd);
+            }
+        }
         Some("panel") => {
             if let Some(m) = msg.get("msg") {
                 to_panel(app, m);
@@ -1957,6 +1963,10 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                     "asleep": msg.get("asleep").and_then(Value::as_bool).unwrap_or(false), "talk": msg.get("clapTalk").and_then(Value::as_bool).unwrap_or(false) }));
                 to_voice(app, &json!({ "cmd": "barge", "on": msg.get("barge").and_then(Value::as_bool).unwrap_or(true) }));
                 to_voice(app, &json!({ "cmd": "sleep_word", "phrase": msg.get("sleepWord").and_then(Value::as_str).unwrap_or("") }));
+                // Hydra's wake phrase (agent_settings.wake_phrase), after wake_name: it decides.
+                if let Some(p) = msg.get("wakePhrase").and_then(Value::as_str) {
+                    to_voice(app, &json!({ "cmd": "wake_phrase", "phrase": p }));
+                }
             } else {
                 stop_voice(app);
             }
