@@ -826,6 +826,15 @@
       if (b) b.tagSpot = g.spot;
       return g;
     };
+    // Hydra's pointer while it draws or works in another app (the orb stays docked): a small ring of ink dots, each with
+    // a thin white rim like the orb's, and a dot at the tip.
+    const drawPointer = (ctx, x, y) => {
+      ctx.save();
+      const dot = (dx, dy, r) => { ctx.beginPath(); ctx.arc(x + dx, y + dy, r + 1, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill(); ctx.beginPath(); ctx.arc(x + dx, y + dy, r, 0, Math.PI * 2); ctx.fillStyle = '#1D1D1F'; ctx.fill(); };
+      for (let i = 0; i < 12; i++) { const a = (i / 12) * Math.PI * 2 + now * 1.2; dot(Math.cos(a) * 8, Math.sin(a) * 8, 1.1); }
+      dot(0, 0, 2);
+      ctx.restore();
+    };
     const drawTag = (ctx, st) => {
       const g = tagBox(st), { verb, thing } = tagWords(st), fail = st.status === 'fail';
       const u = clamp(st.age / 0.2, 0, 1), alpha = u * (1 - (st.status ? clamp((st.out - 0.45) / 0.3, 0, 1) : 0));
@@ -881,7 +890,7 @@
           await api.pen.jump(x, y);
           if (tap && handHolds()) await api.pen.tap(x, y);
         } else if (!hand.want && handHolds()) {
-          const [hx, hy] = penHome(), [ox, oy] = tipOff();
+          const [hx, hy] = penHome(), [ox, oy] = DOCKED ? [0, 0] : tipOff();
           await api.pen.jump(hx - ox, hy - oy);
           if (handHolds()) await api.pen.release();
         } else return;
@@ -945,16 +954,19 @@
           // Coming on screen (it hides when idle): let it land first, so the tip starts where the body really is.
           for (let i = 0; i < 40 && k.presence !== 'shown'; i++) await new Promise((r) => setTimeout(r, 50));
           if (!pen.held) {
-            const [ox, oy] = tipOff();
+            const [ox, oy] = DOCKED ? [0, 0] : tipOff();
             pen.home = [station.x ?? m.x, station.y ?? m.y]; pen.follow = !!station.byCursor; pen.tip = [m.x - ox, m.y - oy]; pen.held = true;
-            presence.summoned = true; fol.on = false; station.moving = station.rush = false; m.drive = penDrive;
+            presence.summoned = true; fol.on = false; station.moving = station.rush = false;
+            // Hydra's orb never leaves its dock: a small separate pointer (drawn in over()) does the moving instead.
+            if (!DOCKED) m.drive = penDrive;
           }
-          if (k.form !== 'cursor') await k.morph?.('cursor');
+          if (!DOCKED && k.form !== 'cursor') await k.morph?.('cursor');
         },
         move: (x, y) => penFly(x, y),
         // A hop, not a glide: it blinks out and comes back on with its tip at (x, y).
         jump(x, y) {
           pen.idle = null;
+          if (DOCKED) { if (pen.held) pen.tip = [x, y]; return Promise.resolve(); }
           return k.blink?.(() => { if (pen.held) { pen.tip = [x, y]; penDrive(0); m.vx = m.vy = 0; } }) ?? Promise.resolve();
         },
         // Straight there this frame (it's dragging something: a card's corner, a part being moved).
@@ -977,10 +989,11 @@
         async release() {
           if (!pen.held) return;
           pen.idle = null;
-          const [hx, hy] = penHome(), [ox, oy] = tipOff();
+          const [hx, hy] = penHome(), [ox, oy] = DOCKED ? [0, 0] : tipOff();
           await penFly(hx - ox, hy - oy);
           if (!pen.held) return;
           penRelease();
+          if (DOCKED) return; // the orb stayed where it was
           api.place(hx, hy);
           // It was following the cursor before the drawing: carry on, or it treats the cursor as in its way and hops off.
           if (pen.follow && presence.ptr) station.byCursor = presence.ptr.slice();
@@ -1262,7 +1275,7 @@
             setStation(x, y); m.goTo(x, y); station.moving = true; station.flee = 0;
           }
           // Popped up beside the cursor: it goes where the cursor goes (until it's dragged somewhere).
-          if (pen.held) { fol.on = false; m.drive = held ? null : penDrive; station.flee = 0; }
+          if (pen.held) { fol.on = false; m.drive = held || DOCKED ? null : penDrive; station.flee = 0; }
           else if (!held && station.byCursor && presence.ptr) { follow(env, dt); station.flee = 0; }
           else { fol.on = false; m.drive = null; }
           nativeStep(dt, self);
@@ -1330,6 +1343,7 @@
         const add = (x0, y0, x1, y1) => { e = e ? [Math.min(e[0], x0), Math.min(e[1], y0), Math.max(e[2], x1), Math.max(e[3], y1)] : [x0, y0, x1, y1]; };
         for (const bb of [b, ...dying]) if (bb) { add(bb.x.x - 8, bb.y.x - 8, bb.x.x + bb.w.x * 1.08 + 8, bb.y.x + bb.h.x * 1.08 + 8); add(bb.tail.x.x - 8, bb.tail.y.x - 8, bb.tail.x.x + 8, bb.tail.y.x + 8); }
         if (tool) { const g = tagBox(tool); add(g.x, g.y - 10, g.x + g.w, g.y + g.h); }
+        if (DOCKED && pen.held) add(pen.tip[0] - 14, pen.tip[1] - 14, pen.tip[0] + 14, pen.tip[1] + 14);
         return e;
       },
       // The body is drawn snapped to its grid cell while it follows (10-dither.js): bubbles riding with it move too.
@@ -1342,9 +1356,10 @@
         }
       },
       // Nothing drawn outside the LED grid this frame, so the grid alone decides whether the picture changed.
-      quiet: () => !b && !dying.length && !tool,
+      quiet: () => !b && !dying.length && !tool && !(DOCKED && pen.held),
       over: (ctx, env) => {
         if (!stage()) return;
+        if (DOCKED && pen.held) drawPointer(ctx, pen.tip[0], pen.tip[1]);
         // The tag goes under every bubble, so it can never cover the words or the Allow and Don't allow buttons of the
         // open one, nor sit on one that's fading out (the tag takes its usual spot back as soon as a bubble closes).
         if (tool) drawTag(ctx, tool);
