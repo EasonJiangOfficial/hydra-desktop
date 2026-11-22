@@ -553,7 +553,7 @@
     if (m.kind === 'orb_mode') { Roamie.orbAttached = !m.detached; pushOrb(true); return; }
     if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
     // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
-    if (m.kind === 'listen_after') { waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
+    if (m.kind === 'listen_after') { Roamie.sfx?.play('hydra_wake'); waitThenListen({ speech: m.speech, turn: 'wake' }); return; }
     // The orb's size (outer edge, px). It never changes form: the size is the setting.
     if (m.kind === 'size') { Roamie.orbPx = ORB_PX[m.size] ?? 48; for (const t of Roamie.tiles ?? []) t.creature.refit?.(); return; }
     if (m.kind === 'look') {
