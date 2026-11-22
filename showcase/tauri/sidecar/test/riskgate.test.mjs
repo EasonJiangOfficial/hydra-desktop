@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyCommand, isRiskyClick, riskyKey } from '../safety.mjs';
+import { checkMcpCall, classifyCommand, isRiskyClick, riskyKey } from '../safety.mjs';
 
 const HOME = os.homedir();
 // Each of these asks and is marked `always`.
@@ -17,8 +17,21 @@ for (const c of ALWAYS) {
   assert.equal(v.level, 'ask', `${c} asks`);
   assert.equal(v.always, true, `${c} always asks, even with Skip Allow prompts on`);
 }
-// Ordinary asks stay skippable.
-for (const c of ['touch new-file.txt', 'cp a.txt b-new.txt', 'npm install']) assert.ok(!classifyCommand(c, HOME, { exists: () => false }).always, `${c} is not always`);
+// Review B1: every way round the first program, all of which used to come back skippable.
+const BYPASS = [`bash -lc "rm a"`, `zsh -ic "rm a"`, `( rm a )`, `{ rm a; }`, `if true; then rm a; fi`, `for f in a b; do rm $f; done`, `! rm a`,
+  `ls | xargs -I {} rm {}`, `xargs -n 1 rm`, `env -u FOO rm a`, `nice -n 10 rm a`, `timeout 5 rm a`, `watch rm a`, `r''m a`, `echo $(rm a)`,
+  `python3 -c "import os; os.remove('a')"`, `node -e "require('fs').rmSync('a')"`, `perl -e 'unlink("a")'`, `ruby -e "File.delete('a')"`, `git rm a`,
+  `defaults delete com.apple.dock`, `tmutil delete`, `rsync --del a b`, `tar --remove-files -cf x.tar a`, `zip -m x.zip a`, `docker rm x`,
+  `gh repo delete --yes`, `sqlite3 db "DELETE FROM t"`, `npx rimraf a`, `curl --request DELETE https://x.y/z`, `shortcuts run "Delete All"`,
+  `tee a.txt`, `cp /dev/null a.txt`, `ln -sf a b`, `unzip -o x.zip`];
+for (const c of BYPASS) {
+  const v = classifyCommand(c, HOME, { exists: () => false });
+  assert.equal(v.level, 'ask', `${c} asks`);
+  assert.equal(v.always, true, `${c} always asks, even with Skip Allow prompts on`);
+}
+// Only a few plain commands that make something new stay skippable.
+for (const c of ['touch brand-new-riskgate-file.txt', 'cp a.txt riskgate-new-copy.txt', 'npm install']) assert.ok(!classifyCommand(c, HOME, { exists: () => false }).always, `${c} is not always`);
+console.log(`skip allow bypass list: ${BYPASS.length} commands, every one always asks`);
 console.log('always-ask command tests: passed');
 
 const noop = async () => {};
@@ -32,7 +45,7 @@ const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitme
   const { createTools } = await import('../tools.mjs');
   const { tools } = createTools({ ...base, workdir, skipAllow: () => true, ask: async (o) => { asked.push(o); return null; } });
   const run = tools.find((t) => t.name === 'run_command'), write = tools.find((t) => t.name === 'write_file');
-  for (const c of ALWAYS.slice(0, 5)) {
+  for (const c of [...ALWAYS.slice(0, 5), ...BYPASS]) {
     asked.length = 0;
     await assert.rejects(run.execute({ command: c }, undefined), /said no/, `${c}: skip on still asks, and no refuses`);
     assert.equal(asked.length, 1, `${c}: asked once`);
@@ -60,10 +73,16 @@ const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitme
 }
 
 // Labels and chords.
-for (const l of ["Don't Save", 'Don’t Save', 'Move to Trash', 'Force Quit', 'Close Without Saving', 'Submit', 'Confirm', 'Overwrite']) assert.ok(isRiskyClick(l), `"${l}" needs a yes`);
-for (const l of ['Save', 'Keep Both', 'Cancel', 'OK']) assert.ok(!isRiskyClick(l), `"${l}" is a normal click`);
-for (const k of ['cmd+q', 'Command+Q', 'cmd+delete', 'cmd+backspace', 'cmd+opt+delete', 'cmd+option+delete', 'cmd+shift+delete']) assert.ok(riskyKey(k), `${k} needs a yes`);
-for (const k of ['cmd+s', 'cmd+w', 'delete', 'return', 'cmd+z', 'ctrl+cmd+q']) assert.equal(riskyKey(k), null, `${k} is a normal key`);
+for (const l of ["Don't Save", 'Don’t Save', 'Move to Trash', 'Force Quit', 'Close Without Saving', 'Submit', 'Confirm', 'Overwrite',
+  'Quit', 'Quit Anyway', 'Replace', 'Trash', 'Empty Bin', 'Shut Down', 'Restart', 'Post', 'Reply', 'Tweet']) assert.ok(isRiskyClick(l), `"${l}" needs a yes`);
+for (const l of ['Save', 'Keep Both', 'Cancel', 'OK', 'Close']) assert.ok(!isRiskyClick(l), `"${l}" is a normal click`);
+for (const k of ['cmd+q', 'Command+Q', 'cmd+delete', 'cmd+backspace', 'cmd+opt+delete', 'cmd+option+delete', 'cmd+shift+delete',
+  'cmd+back', 'cmd+opt+back', 'command+del', 'cmd+shift+q', 'cmd+opt+shift+q', 'ctrl+cmd+q', 'cmd+return', 'cmd+enter', 'cmd+shift+d']) assert.ok(riskyKey(k), `${k} needs a yes`);
+for (const k of ['cmd+s', 'cmd+w', 'delete', 'return', 'cmd+z', 'shift+return']) assert.equal(riskyKey(k), null, `${k} is a normal key`);
+// Review M4: connected apps' tools that change, send or delete ask every time.
+for (const name of ['trash_message', 'trash_file', 'create_payment', 'execute_sql', 'apply_migration', 'reset_branch', 'merge_branch', 'update_doc'])
+  assert.equal(checkMcpCall({ name }).always, true, `${name} always asks`);
+assert.equal(checkMcpCall({ name: 'list_files', annotations: { readOnlyHint: true } }).level, 'safe', 'a read-only tool runs');
 console.log('risky labels and chords: passed');
 
 // act_in_app against a fake helper that stops before a risky click_at or Return (needsConfirm), as the real one does.
@@ -75,8 +94,10 @@ const win = { id: 7, app: 'Finder', title: 'Desktop', bounds: [0, 0, 800, 600] }
 let o = { ok: true, window: win };
 if (a[0] === 'act') {
   const p = JSON.parse(a[1]); fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(p.steps) + '\\n');
-  const i = p.steps.findIndex((s) => (s.do === 'click_at' || (s.do === 'key' && s.key === 'return')) && !s.confirmed);
-  o = i >= 0 ? { ok: false, needsConfirm: true, step: i, why: 'That spot is "Move to Trash" in Finder.', done: p.steps.slice(0, i).map((s) => s.do) } : { ok: true, done: p.steps.map((s) => s.do), window: win };
+  // As the real helper: a risky step goes ahead only with a yes for exactly what it would hit.
+  const hit = (s) => s.do === 'click_at' ? 'Move to Trash' : s.do === 'key' && s.key === 'return' ? 'Delete' : s.do === 'click_text' ? s.text : null;
+  const i = p.steps.findIndex((s) => hit(s) && !(s.confirmed && s.confirmedLabel === hit(s)));
+  o = i >= 0 ? { ok: false, needsConfirm: true, step: i, label: hit(p.steps[i]), why: 'That step could delete.', done: p.steps.slice(0, i).map((s) => s.do) } : { ok: true, done: p.steps.map((s) => s.do), window: win };
 }
 if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1], window: win, pixels: [800, 600] }; }
 console.log(JSON.stringify(o));
@@ -111,11 +132,16 @@ console.log(JSON.stringify(o));
   assert.equal(c.length, 2, 'yes: run again from the risky step');
   assert.deepEqual(c[1].map((s) => s.do), ['click_at', 'type'], 'only the steps from there on');
   assert.equal(c[1][0].confirmed, true);
+  assert.equal(c[1][0].confirmedLabel, 'Move to Trash', 'the yes names what was asked about');
   assert.match(out, /type, click_at, type/, 'what was done before and after');
   // Return on a risky default button: same path.
   answer = null;
   await assert.rejects(act.execute({ target: 'Finder', steps: [{ do: 'key', key: 'return' }] }, { toolCallId: 'e1' }), /said no/);
   assert.equal(asked.pop()?.always, true, 'Return on a risky default button asks');
+  // Review m2: two Delete clicks in one plan ask twice, not once for both.
+  answer = 'Allow'; asked.length = 0;
+  await act.execute({ target: 'Finder', steps: [{ do: 'click_text', text: 'Delete' }, { do: 'click_text', text: 'Delete' }] }, { toolCallId: 'd2' });
+  assert.equal(asked.length, 2, 'each delete click asks on its own');
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('risky click_at, chords and Return ask: passed');
 }

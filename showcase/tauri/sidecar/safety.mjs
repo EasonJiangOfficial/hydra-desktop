@@ -77,7 +77,7 @@ const bothOf = (abs) => { const r = realOf(abs); return samePath(r, abs) ? [abs]
 
 // Buttons that delete, pay, send or sign out: Sidekick needs the user's yes before clicking one,
 // even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift.
-export const RISKY_CLICK = /(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃/iu;
+export const RISKY_CLICK = /(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|quit anyway|quit|replace|trash|empty (the )?bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃/iu;
 export const isRiskyClick = (label) => RISKY_CLICK.test(String(label ?? ''));
 // Which kind of risky click a label is ("Delete post" → "delete"), so one yes can cover the same kind and no other.
 export function riskyKind(label) {
@@ -85,16 +85,21 @@ export function riskyKind(label) {
   return m ? (m[1] ?? m[0]).toLowerCase().replace(/\s+/g, ' ') : null;
 }
 
-// Key chords that quit or delete: cmd+q, cmd+delete (Move to Trash in Finder), cmd+opt+delete (delete at once),
-// cmd+shift+delete (Empty Trash). Return/Enter is checked by the helper against the window's default button.
+// Key chords that quit, delete or send: any chord with cmd and q; cmd with delete, backspace or forward delete (Move
+// to Trash, delete at once, Empty Trash); cmd+return and cmd+enter (send in Mail, Slack, Messages and most chat and
+// web forms); Mail's cmd+shift+d (Send). Names go through the same aliases as the helper's pressKey ("back",
+// "del", "command", "⌘"…). Return alone is checked by the helper (the focused field and the default button).
 // Kept in sync with riskyKey in hands/main.swift. Says what it does, or null.
+const KEY_ALIAS = { command: 'cmd', '⌘': 'cmd', option: 'opt', alt: 'opt', '⌥': 'opt', control: 'ctrl', '⌃': 'ctrl', '⇧': 'shift',
+  backspace: 'delete', back: 'delete', '⌫': 'delete', del: 'delete', forwarddelete: 'delete', '⌦': 'delete', enter: 'return', '↩': 'return', '⏎': 'return' };
 export function riskyKey(combo) {
-  const alias = { command: 'cmd', '⌘': 'cmd', option: 'opt', alt: 'opt', '⌥': 'opt', control: 'ctrl', '⌃': 'ctrl', '⇧': 'shift', backspace: 'delete', '⌫': 'delete' };
-  const parts = String(combo ?? '').toLowerCase().replace(/\s+/g, '').split('+').filter(Boolean).map((p) => alias[p] ?? p);
+  const parts = String(combo ?? '').toLowerCase().replace(/\s+/g, '').split('+').filter(Boolean).map((p) => KEY_ALIAS[p] ?? p);
   const key = parts.pop(), mods = new Set(parts);
-  if (!mods.has('cmd') || mods.has('ctrl')) return null;
-  if (key === 'q' && mods.size === 1) return 'quits the app';
-  if (key === 'delete' && [...mods].every((m) => ['cmd', 'opt', 'shift'].includes(m))) return mods.has('shift') ? 'empties the Trash' : mods.has('opt') ? 'deletes at once' : 'moves to the Trash';
+  if (!mods.has('cmd')) return null;
+  if (key === 'q') return 'quits the app';
+  if (key === 'delete') return mods.has('shift') ? 'empties the Trash' : mods.has('opt') ? 'deletes at once' : 'moves to the Trash';
+  if (key === 'return') return 'can send a message or form';
+  if (key === 'd' && mods.has('shift')) return 'can send (Mail)';
   return null;
 }
 
@@ -452,8 +457,34 @@ export function classifyCommand(cmd, home, { exists, cwd: start = null, own = nu
   }
   // Command substitution and background jobs change things in ways the parts don't show.
   if (level === SAFE && (/\$\(|`/.test(s) || /(^|\s)&\s*$/.test(s))) level = ASK;
-  return always && level === ASK ? { ...verdict(level, reason), always } : verdict(level, reason);
+  // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ASK is `always`
+  // (Skip Allow prompts never answers it) unless the whole command is one of a few plain, known-harmless commands.
+  if (level === ASK && (always || !harmless(s, home, start ? norm(start, home) : home))) return { ...verdict(level, reason), always: true };
+  return verdict(level, reason);
 }
+
+// The only ASK commands "Skip Allow prompts" may answer: one simple command (no ; && || | & redirect, substitution,
+// brackets, quotes, variables, globs, shell keywords or script runner) from this list, with arguments that only make
+// something new or fetch packages. Anything else, or anything unsure, always asks.
+const HARMLESS_SUB = {
+  git: /^(add|commit|switch|checkout\s+-b|fetch|pull|init|clone|stash\s+push|tag\s+[\w.-]+)(\s|$)/,
+  npm: /^(install|i|ci|run|test|init)(\s|$)/, pnpm: /^(install|i|add|run|test)(\s|$)/, yarn: /^(install|add|run|test)(\s|$)/,
+  brew: /^install(\s|$)/, pip: /^install(\s|$)/, pip3: /^install(\s|$)/, cargo: /^(build|test|check|run)(\s|$)/,
+};
+function harmless(cmd, home, cwd) {
+  const t = String(cmd ?? '').trim();
+  if (!t || /[;&|<>()`{}$*?\[\]\\!'"\n#]/.test(t)) return false;
+  const ws = t.split(/\s+/), name = ws[0], args = ws.slice(1), rest = args.join(' ');
+  if (/^(if|then|for|while|until|do|done|case|function|select|time|exec|eval|source|env|nice|timeout|xargs|watch|nohup|sudo|command|builtin)$/.test(name)) return false;
+  if (HARMLESS_SUB[name]) return HARMLESS_SUB[name].test(rest) && !/(^|\s)(-f|--force|-D|--hard|--delete|-d)(\s|$)/.test(rest);
+  const fresh = (a) => { const p = norm(/^~/.test(a) || isAbs(slash(a)) ? a : path.join(cwd, slash(a)), home); try { fs.lstatSync(p); return false; } catch { return true; } };
+  const plain = args.filter((a) => !a.startsWith('-')), flags = args.filter((a) => a.startsWith('-'));
+  if (name === 'touch' || name === 'mkdir') return plain.length > 0 && plain.every(fresh);
+  // A copy to a new name, never onto a file or into a folder that's there.
+  if (name === 'cp' || name === 'ditto') return plain.length === 2 && flags.every((f) => /^-[rRpvn]+$/.test(f)) && plain[0] !== '/dev/null' && fresh(plain[1]);
+  return false;
+}
+
 
 // ---------- opening things and fetching pages ----------
 
@@ -619,7 +650,7 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
 }
 
 // Verbs that act on the world: a tool named like this always asks, whatever the server says about it.
-const MCP_RISKY = /(?:^|_)(send|delete|remove|destroy|erase|wipe|drop|purge|truncate|pay|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate)(?:_|$)/;
+const MCP_RISKY = /(?:^|_)(send|delete|remove|trash|destroy|erase|wipe|drop|purge|truncate|pay|payment|payments|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate|execute|exec|sql|migration|migrate|reset|merge|archive)(?:_|$)/;
 const snake = (s) => String(s ?? '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^a-z0-9]+/gi, '_').toLowerCase();
 
 /** A call to a connected server's tool: { name, annotations }. A read-only tool (readOnlyHint, not destructive, not
@@ -629,5 +660,6 @@ export function checkMcpCall({ name, annotations } = {}) {
   const a = annotations ?? {};
   if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true };
   if (a.readOnlyHint === true) return verdict(SAFE);
-  return { ...verdict(ASK, "The server doesn't say it only reads."), always: false };
+  // Owner: anything that might change, send or delete asks every time, Skip Allow prompts or not.
+  return { ...verdict(ASK, "The server doesn't say it only reads."), always: true };
 }

@@ -369,20 +369,35 @@ func pressText(_ e: AXUIElement) -> Bool {
 // Clicks that delete, pay, send or sign out (in English and other common languages) run only when the sidecar
 // has asked the user ("confirmed").
 // Kept in sync with RISKY_CLICK in sidecar/safety.mjs.
-let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃"#, options: .caseInsensitive)
+let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|quit anyway|quit|replace|trash|empty (the )?bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃"#, options: .caseInsensitive)
 func risky(_ s: String) -> Bool { RISKY.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
 
-/// Key chords that quit or delete (cmd+q, cmd+delete, cmd+opt+delete, cmd+shift+delete): what it does, or nil.
-/// Kept in sync with riskyKey in sidecar/safety.mjs. Return/Enter is checked against the window's default button.
+/// Key chords that quit, delete or send: what it does, or nil. Any chord with cmd and q; cmd with delete, backspace or
+/// forward delete; cmd+return and cmd+enter; cmd+shift+d (Mail's Send). Names go through the same aliases as pressKey.
+/// Kept in sync with riskyKey in sidecar/safety.mjs. Return alone: mightSend and the default button, in the act loop.
 func riskyKey(_ combo: String) -> String? {
-    let alias = ["command": "cmd", "⌘": "cmd", "option": "opt", "alt": "opt", "⌥": "opt", "control": "ctrl", "⌃": "ctrl", "⇧": "shift", "backspace": "delete", "⌫": "delete"]
+    let alias = ["command": "cmd", "⌘": "cmd", "option": "opt", "alt": "opt", "⌥": "opt", "control": "ctrl", "⌃": "ctrl", "⇧": "shift",
+                 "backspace": "delete", "back": "delete", "⌫": "delete", "del": "delete", "forwarddelete": "delete", "⌦": "delete",
+                 "enter": "return", "↩": "return", "⏎": "return"]
     var parts = combo.lowercased().replacingOccurrences(of: " ", with: "").split(separator: "+").map { alias[String($0)] ?? String($0) }
     guard let key = parts.popLast() else { return nil }
     let mods = Set(parts)
-    guard mods.contains("cmd"), !mods.contains("ctrl") else { return nil }
-    if key == "q" && mods.count == 1 { return "quits the app" }
-    if key == "delete" && mods.isSubset(of: ["cmd", "opt", "shift"]) { return mods.contains("shift") ? "empties the Trash" : mods.contains("opt") ? "deletes at once" : "moves to the Trash" }
+    guard mods.contains("cmd") else { return nil }
+    if key == "q" { return "quits the app" }
+    if key == "delete" { return mods.contains("shift") ? "empties the Trash" : mods.contains("opt") ? "deletes at once" : "moves to the Trash" }
+    if key == "return" { return "can send a message or form" }
+    if key == "d" && mods.contains("shift") { return "can send (Mail)" }
     return nil
+}
+/// Apps where Return (or a typed line break) in a text field sends: chat and mail apps, and web forms in browsers.
+let MESSENGERS: Set<String> = ["Messages", "Slack", "WhatsApp", "Mail", "Discord", "Telegram", "Signal", "Microsoft Teams", "Teams", "Messenger", "Microsoft Outlook", "Outlook", "Spark", "Superhuman", "Beeper"]
+func mightSend(app: String, focusRole: String?) -> Bool {
+    let texty = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains(focusRole ?? "")
+    return MESSENGERS.contains(app) ? (texty || focusRole == nil || focusRole == "AXWebArea") : BROWSERS.contains(app) && texty
+}
+/// A yes covers only what was asked about: the same words, compared without case or outer spaces.
+func sameYes(_ s: [String: Any], _ label: String) -> Bool {
+    (s["confirmed"] as? Bool) == true && ((s["confirmedLabel"] as? String) ?? "").lowercased().trimmingCharacters(in: .whitespaces) == label.lowercased().trimmingCharacters(in: .whitespaces)
 }
 /// The words on what sits under a screen point: its title, description or value, and its parent's when it is only the
 /// text or picture inside a button.
@@ -1709,7 +1724,20 @@ case "--self-test":
     for l in ["Don't Save", "Don’t Save", "Move to Trash", "Force Quit", "Close Without Saving", "Submit", "Confirm", "Overwrite"] { check("\"\(l)\" needs a yes", risky(l)) }
     for l in ["Save", "Cancel", "OK", "Keep Both", "Open"] { check("\"\(l)\" is a normal click", !risky(l)) }
     for k in ["cmd+q", "Command+Q", "cmd+delete", "cmd+backspace", "cmd+opt+delete", "cmd+shift+delete", "cmd+option+shift+delete"] { check("\(k) needs a yes", riskyKey(k) != nil) }
-    for k in ["cmd+s", "cmd+w", "delete", "return", "cmd+a", "ctrl+cmd+q", "cmd+z"] { check("\(k) is a normal key", riskyKey(k) == nil) }
+    for k in ["cmd+s", "cmd+w", "delete", "return", "cmd+a", "cmd+z", "cmd+shift+s", "shift+return"] { check("\(k) is a normal key", riskyKey(k) == nil) }
+    // Review M1/M2: the aliases pressKey reads, any cmd+q chord, and sending by keyboard.
+    for k in ["cmd+back", "cmd+opt+back", "command+del", "cmd+forwarddelete", "cmd+shift+q", "cmd+opt+shift+q", "ctrl+cmd+q", "cmd+return", "cmd+enter", "cmd+shift+d"] { check("\(k) needs a yes", riskyKey(k) != nil) }
+    check("Return in a Slack text box could send", mightSend(app: "Slack", focusRole: "AXTextArea"))
+    check("Return in a Messages field could send", mightSend(app: "Messages", focusRole: "AXTextField"))
+    check("Return in a web form could send", mightSend(app: "Google Chrome", focusRole: "AXTextField"))
+    check("Return in a TextEdit document is just a new line", !mightSend(app: "TextEdit", focusRole: "AXTextArea"))
+    check("Return on a web page outside a field isn't a send", !mightSend(app: "Safari", focusRole: "AXWebArea"))
+    // Review M6: a yes covers the words asked about, not what is there now.
+    check("a yes for Delete covers Delete", sameYes(["confirmed": true, "confirmedLabel": "Delete"], " delete "))
+    check("a yes for Delete draft doesn't cover Delete account", !sameYes(["confirmed": true, "confirmedLabel": "Delete draft"], "Delete account"))
+    check("no yes covers nothing", !sameYes([:], "Delete"))
+    for l in ["Quit", "Quit Anyway", "Replace", "Trash", "Empty Bin", "Shut Down", "Restart", "Post", "Reply", "Tweet"] { check("\"\(l)\" needs a yes", risky(l)) }
+    check("\"Close\" is a normal click", !risky("Close"))
     check("quit asks when no windows are listed", quitUnproved(name: "Notes", bundle: nil, listed: 0, unlisted: 0, editedCount: 0) != nil)
     check("quit asks when windows sit on another Space", quitUnproved(name: "Notes", bundle: nil, listed: 1, unlisted: 1, editedCount: 0) != nil)
     check("quit asks for a browser", quitUnproved(name: "Google Chrome", bundle: nil, listed: 2, unlisted: 0, editedCount: 0) != nil)
@@ -1997,8 +2025,11 @@ case "act":
         case "focus", "click", "set", "press_button":
             guard let (e, info) = el(s) else { out(["ok": false, "error": "Step \(i + 1): no control with id \(s["id"] ?? "?"). Call read_window again.", "done": done]) }
             emitStep(i, what, e, label: (info["label"] as? String) ?? "", text: what == "set" ? s["text"] as? String : nil)
-            if (what == "click" || what == "press_button"), risky((info["label"] as? String) ?? ""), (s["confirmed"] as? Bool) != true {
-                out(["ok": false, "error": "Stopped before clicking \"\(info["label"] ?? "")\": it could delete, pay, send or sign out, and the user hasn't said yes to that. Tell them, and let them click it themselves.", "done": done])
+            if (what == "click" || what == "press_button"), case let l = (info["label"] as? String) ?? "", risky(l), !sameYes(s, l) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
+            }
+            if what == "set", let text = s["text"] as? String, text.contains(where: { $0 == "\n" || $0 == "\r" }), MESSENGERS.contains(w.app) || BROWSERS.contains(w.app), !sameYes(s, "send") {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": "send", "why": "A line break in this \(w.app) field could send it.", "done": done])
             }
             if what == "set", let text = s["text"] as? String {
                 // Native fields take the value directly; web page fields need real keystrokes or the page never sees it.
@@ -2051,8 +2082,8 @@ case "act":
             guard !q.isEmpty, let (e, info) = hit else {
                 out(["ok": false, "error": "Step \(i + 1): no visible text \"\(s["text"] ?? "")\" in \(w.app). Check the exact words with a screenshot or read_window.", "done": done])
             }
-            if risky((info["text"] as? String) ?? q), (s["confirmed"] as? Bool) != true {
-                out(["ok": false, "error": "Stopped before clicking \"\(info["text"] ?? q)\": it could delete, pay, send or sign out, and the user hasn't said yes to that. Tell them, and let them click it themselves.", "done": done])
+            if case let l = (info["text"] as? String) ?? q, risky(l), !sameYes(s, l) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
             }
             emitStep(i, "click_text", e, label: (info["text"] as? String) ?? q)
             if !pressText(e) {
@@ -2075,6 +2106,10 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): the cursor isn't in a text field, so typing would go nowhere. \(tip)", "done": done])
             }
             let text = s["text"] as? String ?? "", into = focusedEl(app), before = into.flatMap { str($0, kAXValueAttribute) }
+            // A typed line break acts as Return: in a chat, mail or web form field that can send.
+            if text.contains(where: { $0 == "\n" || $0 == "\r" }), mightSend(app: w.app, focusRole: into.map { axRole($0) }), !sameYes(s, "send") {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": "send", "why": "Typing a line break in this \(w.app) field could send it.", "done": done])
+            }
             emitStep(i, "type", into, text: text)
             typeText(text)
             // Typing the app dropped (some ignore keys sent in the background) must stop here: a following
@@ -2090,6 +2125,9 @@ case "act":
         case "fill":
             // A form field by its label, placeholder or id: put the cursor in it, replace its text, check it took.
             let text = s["text"] as? String ?? ""
+            if text.contains(where: { $0 == "\n" || $0 == "\r" }), MESSENGERS.contains(w.app) || BROWSERS.contains(w.app), !sameYes(s, "send") {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": "send", "why": "A line break in this \(w.app) field could send it.", "done": done])
+            }
             var s = s
             if s["id"] == nil, let n = Int((s["field"] as? String ?? "").trimmingCharacters(in: .whitespaces)) { s["id"] = n }
             let name = (s["field"] as? String) ?? ""
@@ -2155,8 +2193,8 @@ case "act":
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
             emitStep(i, "choose", e, label: label, text: option)
-            if risky(option), (s["confirmed"] as? Bool) != true {
-                out(["ok": false, "error": "Stopped before choosing \"\(option)\": it could delete, pay, send or sign out, and the user hasn't said yes to that.", "done": done])
+            if risky(option), !sameYes(s, option) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": option, "why": "Choose \"\(option)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
             }
             activate(e)
             Thread.sleep(forTimeInterval: 0.35)
@@ -2236,10 +2274,16 @@ case "act":
             controls = walk(app, w)
         case "key":
             let combo = (s["key"] as? String ?? "").lowercased().replacingOccurrences(of: " ", with: "")
-            if (s["confirmed"] as? Bool) != true {
-                if let does = riskyKey(combo) { out(["ok": false, "needsConfirm": true, "step": i, "why": "Pressing \(s["key"] ?? "") \(does).", "done": done]) }
-                if ["return", "enter"].contains(combo), let b = defaultButtonTitle(app), risky(b) {
-                    out(["ok": false, "needsConfirm": true, "step": i, "why": "Return would press \"\(b)\" in \(w.app).", "done": done])
+            if let does = riskyKey(combo), !sameYes(s, s["key"] as? String ?? "") {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": s["key"] as? String ?? "", "why": "Pressing \(s["key"] ?? "") \(does).", "done": done])
+            }
+            if ["return", "enter", "kp_enter", "↩"].contains(combo) {
+                // The yes names the button (or "send" for a text field); if what Return would do changed, ask again.
+                if let b = defaultButtonTitle(app), risky(b), !sameYes(s, b) {
+                    out(["ok": false, "needsConfirm": true, "step": i, "label": b, "why": "Return would press \"\(b)\" in \(w.app).", "done": done])
+                }
+                if mightSend(app: w.app, focusRole: focusedEl(app).map { axRole($0) }), !sameYes(s, "send") {
+                    out(["ok": false, "needsConfirm": true, "step": i, "label": "send", "why": "Return in this \(w.app) field could send it.", "done": done])
                 }
             }
             emitStep(i, "key", nil, label: s["key"] as? String ?? "")
@@ -2268,8 +2312,9 @@ case "act":
             let spot = global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)
             // Clicking by position skips the label check, so look at what is under the spot.
             let under = wordsAt(spot)
-            if (s["confirmed"] as? Bool) != true, risky(under) {
-                out(["ok": false, "needsConfirm": true, "step": i, "why": "That spot is \"\(under.split(separator: "|").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? under)\" in \(w.app): it could delete, pay, send or sign out.", "done": done])
+            // A yes covers the words that were under the spot when it was asked; if they changed, ask again.
+            if risky(under), !sameYes(s, under) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": under, "why": "That spot is \"\(under.split(separator: "|").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? under)\" in \(w.app): it could delete, pay, send, quit or sign out.", "done": done])
             }
             emitStep(i, "click_at", nil, at: global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y))
             click(global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)); done.append("clicked at \(Int(x)),\(Int(y))")

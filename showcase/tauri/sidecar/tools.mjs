@@ -8,11 +8,11 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, riskyKey, isYes, riskyKind } from './safety.mjs';
+import { ASK, BLOCK, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, riskyKey, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
-import { addCommitment, forgetFact, getCommitment, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
+import { addCommitment, forgetFact, getCommitment, listFacts, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
 import { snoozeTarget, snoozeUntil } from './snooze.mjs';
 import { addJob, getJob, jobsText, removeJob, updateJob } from './jobs.mjs';
 import { deleteSkill, fetchSkills, installSkill, listSkills, readSkill, readSkillFile, saveSkill, screenSkill, skillFiles } from './skills.mjs';
@@ -258,8 +258,6 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   let lastRead = null; // { win, controls } from the latest read_window, to catch ids that went stale
   // Bumped for every new request: what was seen before it may be another page, tab or app by now.
   let turn = 0;
-  // Risky clicks the user allowed this request, as "app|kind": one Allow covers that kind in that app until the next request.
-  let allowedClicks = { turn: -1, keys: new Set() };
   async function shotPoint(x, y) {
     const problem = shotProblem(lastShot, turn);
     if (problem) throw new Error(problem);
@@ -832,30 +830,22 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             else mapped.push(s);
           }
           // Delete, pay, send, sign out: ask first, whatever the request was. The helper refuses these clicks without it.
-          if (allowedClicks.turn !== turn) allowedClicks = { turn, keys: new Set() };
           const appName = sameApp && lastRead.app ? lastRead.app : asked;
-          const inThisPlan = new Set(); // one plan acts in one window, so its own steps share an Allow even when the app isn't known yet
           for (const s of mapped) {
             const label = s.do === 'click_text' ? s.text : s.do === 'click' ? s.label : s.do === 'choose' ? s.option : null;
+            // Every risky click asks on its own (owner: delete, send, pay, trash and quit always ask). The yes is for this
+            // label: the helper checks what it really clicks against it and asks again if it differs.
             if (label && isRiskyClick(label)) {
-              const kind = riskyKind(label);
-              // "front" or "browser" could be a different app by the next call, so those aren't remembered past this plan.
-              const key = /^(front|browser)$/i.test(appName) ? null : `${appName.toLowerCase()}|${kind}`;
-              if (!inThisPlan.has(kind) && !(key && allowedClicks.keys.has(key))) {
-                const where = appName === 'front' ? '' : ` in ${appName}`;
-                const covers = key ? ` Allow covers every "${kind}" click there for the rest of this request.` : '';
-                if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send or sign out.${covers}`, ctx, true))) {
-                  throw new Error(`${userName} said no, so I didn't click "${label}" (nothing after it ran either).`);
-                }
-                inThisPlan.add(kind);
-                if (key) allowedClicks.keys.add(key);
+              const where = appName === 'front' ? '' : ` in ${appName}`;
+              if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send, quit or sign out.`, ctx, true))) {
+                throw new Error(`${userName} said no, so I didn't click "${label}" (nothing after it ran either).`);
               }
-              s.confirmed = true;
+              s.confirmed = true; s.confirmedLabel = label;
             }
             const keyDoes = s.do === 'key' ? riskyKey(s.key) : null;
             if (keyDoes) {
               if (!(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It ${keyDoes}.`, ctx, true))) throw new Error(`${userName} said no, so I didn't press ${s.key} (nothing after it ran either).`);
-              s.confirmed = true;
+              s.confirmed = true; s.confirmedLabel = s.key;
             }
             delete s.label;
           }
@@ -869,22 +859,25 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx, true))) {
                 throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
               }
-              plan.steps = [{ ...plan.steps[r.step], confirmed: true }, ...plan.steps.slice(r.step + 1)];
+              plan.steps = [{ ...plan.steps[r.step], confirmed: true, confirmedLabel: r.label ?? '' }, ...plan.steps.slice(r.step + 1)];
               r = await hands('act', JSON.stringify(plan));
             }
             if (r.needsConfirm) throw new Error(r.why || 'That step needs a yes first.');
             return before.length && Array.isArray(r.done) ? { ...r, done: [...before, ...r.done] } : r;
           };
+          // A retry acts somewhere else (the app just opened, or another window): no yes carries over to it.
+          const unconfirm = () => { plan.steps = plan.steps.map(({ confirmed, confirmedLabel, ...st }) => st); };
           let res;
           try {
             try { res = await act(); }
             catch (err) {
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
-              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { res = await act(); return finish(res); }
+              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { unconfirm(); res = await act(); return finish(res); }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
               if (!plan.window || !/No matching window/.test(String(err?.message ?? err))) throw err;
               delete plan.window;
               if (asked !== 'front' && lastRead?.app) plan.app = lastRead.app;
+              unconfirm();
               res = await act();
             }
           } finally {
@@ -1069,7 +1062,13 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       name: 'update_commitment',
       description: "Mark a commitment done or dropped, or change its due or repeat (as in remember_commitment; \"none\" clears either). Done on a repeating one moves it to the next time; dropped ends the whole series, so only when they want it gone.",
       parameters: z.object({ id: z.string(), status: z.enum(['open', 'done', 'dropped']).optional(), due: z.string().optional(), repeat: z.string().max(60).optional() }),
-      execute: async ({ id, status, due, repeat }) => {
+      execute: async ({ id, status, due, repeat }, ctx) => {
+        // Dropping one deletes it (its whole series): owner's rule, every deletion asks.
+        if (status === 'dropped') {
+          const old = getCommitment(id);
+          if (!old) throw new Error(`No commitment with id ${id}. Call list_commitments to see the ids.`);
+          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?`, ctx, true))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
+        }
         const ms = due === undefined ? undefined : due === 'none' ? null : parseDue(due);
         if (ms === undefined && due !== undefined) throw new Error(`Couldn't read the time "${due}".`);
         const r = repeat === undefined ? undefined : parseRepeat(repeat);
@@ -1084,7 +1083,12 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     {
       name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory section of the <live-state> block.',
       parameters: z.object({ id: z.string() }),
-      execute: async ({ id }) => { const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`; },
+      execute: async ({ id }, ctx) => {
+        const had = listFacts().find((x) => x.id === id);
+        if (!had) throw new Error(`No fact with id ${id}.`);
+        if (!(await confirm(`Forget "${had.text}"?`, ctx, true))) throw new Error(`${userName} said no, so I still remember it.`);
+        const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`;
+      },
     },
     {
       // The step trail on screen. Free to call: always alongside other tool calls, never in a turn of its own.
@@ -1140,8 +1144,9 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       name: 'update_job',
       description: "Change a scheduled job (ids in the memory section's Scheduled jobs, or list_jobs). action: pause, resume, run_now (the schedule stays) or remove. due: a new next time. repeat: a new one, or \"none\" for a one-off.",
       parameters: z.object({ id: z.string().max(12), action: z.enum(['pause', 'resume', 'run_now', 'remove']).optional(), due: z.string().max(40).optional(), repeat: z.string().max(60).optional() }),
-      execute: async ({ id, action, due, repeat }) => {
+      execute: async ({ id, action, due, repeat }, ctx) => {
         if (!getJob(id)) throw new Error(`No scheduled job with id ${id}. Call list_jobs to see the ids.`);
+        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?`, ctx, true))) throw new Error(`${userName} said no, so the job stays.`);
         if (action === 'remove') { const j = await removeJob(id); jobs.changed(null); return `Removed the job "${j.title}".`; }
         if (action === 'run_now') { const a = await jobs.run(id); return `Started ${a.id} for "${getJob(id).title}"; it reports back when it's done. The schedule is unchanged.`; }
         const j = await updateJob(id, { ...(action ? { paused: action === 'pause' } : {}), ...(due !== undefined ? { due } : {}), ...(repeat !== undefined ? { repeat } : {}) });
@@ -1206,7 +1211,11 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     }, {
       name: 'forget_skill', description: 'Delete a learned skill that is wrong or that the user asks you to forget.',
       parameters: z.object({ name: z.string().min(1).max(60) }),
-      execute: async ({ name }) => { const s = await deleteSkill(name); if (!s) throw new Error(`No skill called "${name}".`); skills.changed?.(null); return `Removed the skill ${s.slug}.`; },
+      execute: async ({ name }, ctx) => {
+        if (!readSkill(name)) throw new Error(`No skill called "${name}".`);
+        if (!(await confirm(`Delete the skill "${name}"?`, ctx, true))) throw new Error(`${userName} said no, so the skill stays.`);
+        const s = await deleteSkill(name); if (!s) throw new Error(`No skill called "${name}".`); skills.changed?.(null); return `Removed the skill ${s.slug}.`;
+      },
     }] : []),
     ...(focus ? [{
       name: 'start_focus',

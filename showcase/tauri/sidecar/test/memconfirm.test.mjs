@@ -1,0 +1,42 @@
+// Review M5: forgetting a fact, dropping a commitment, removing a scheduled job and deleting a skill ask first, every
+// time (owner: every deletion is confirmed), even with "Skip Allow prompts" on. Run: npm test
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-memconfirm-'));
+process.env.ROAMIES_DATA_DIR = TMP;
+process.on('exit', () => fs.rmSync(TMP, { recursive: true, force: true }));
+const { addFact, addCommitment, listFacts, getCommitment } = await import('../store.mjs');
+const { createTools } = await import('../tools.mjs');
+
+const asked = [];
+let answer = null;
+const noop = async () => {};
+const { tools } = createTools({ allowActions: () => true, skipAllow: () => true, ui: () => {}, openUrl: noop, onCommitments: () => {}, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
+  ask: async (o) => { asked.push(o); return answer; } });
+const tool = (n) => tools.find((t) => t.name === n);
+
+const f = await addFact('likes green tea');
+await assert.rejects(tool('forget_fact').execute({ id: f.id }, undefined), /said no/);
+assert.equal(asked.pop()?.always, true, 'forget_fact asks, always');
+assert.ok(listFacts().some((x) => x.id === f.id), 'a no keeps the fact');
+answer = 'Allow';
+await tool('forget_fact').execute({ id: f.id }, undefined);
+assert.ok(!listFacts().some((x) => x.id === f.id), 'a yes forgets it');
+
+answer = null;
+const c = await addCommitment('call mum', null);
+await assert.rejects(tool('update_commitment').execute({ id: c.id, status: 'dropped' }, undefined), /said no/);
+assert.equal(asked.pop()?.always, true, 'dropping a commitment asks, always');
+assert.equal(getCommitment(c.id).status, 'open', 'a no keeps it');
+asked.length = 0;
+await tool('update_commitment').execute({ id: c.id, status: 'done' }, undefined);
+assert.equal(asked.length, 0, 'ticking one off needs no yes');
+
+// The job and skill tools: the asks are in place before anything is removed.
+const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
+assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx, true\)\)/);
+assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?`, ctx, true\)/);
+console.log('memory deletes ask: passed');
