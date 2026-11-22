@@ -920,6 +920,7 @@
         el('div', { className: 'setting' },
           el('span', {}, h.asleep ? 'Asleep' : 'Listening'),
           h.asleep ? btn('Wake', () => act('power:wake'), { kind: 'primary', k: 'power:wake' }) : btn('Sleep', () => act('power:sleep'), { k: 'power:sleep' })),
+        toggle('Detached orb', 'Off: the orb lives in the Hydra window, and the menu bar icon shows its state while that window is hidden. On: it floats on the desktop, bottom right.', h.detached, () => act(h.detached ? 'orb:attach' : 'orb:detach'), 'orbmode'),
         state.sizes?.length > 1 ? [el('p', { className: 'sub', textContent: 'Size' }),
           picks('Size', state.sizes, state.size ?? 'default', (x) => act(`size:${x}`), 'size', { small: '40 px across.', default: '48 px across.', large: '64 px across.' })] : null,
         el('p', { className: 'sub', textContent: 'Clap sensitivity' }),
@@ -1184,7 +1185,7 @@
       name: 'Hydra', look: 'hydra', looks: [['hydra', 'Hydra']], size: 'default', sizes: [['small', 'Small'], ['default', 'Medium'], ['large', 'Large']],
       // ?fish: a Fish Audio key is saved (else Hydra speaks in the Mac's voice). ?asleep: the agent is asleep.
       replies: 'voice', fishKey: q.has('fish'), fishModel: 'drama-3', fishFree: false,
-      hydra: { asleep: q.has('asleep'), sleepWord: 'Hydra, sleep', clap: 0.5, wake: true, url: q.has('paired') ? 'https://hydra-olive-one.vercel.app' : '', link: q.has('paired') ? 'ready' : 'off', tools: 0 },
+      hydra: { detached: q.has('detached'), asleep: q.has('asleep'), sleepWord: 'Hydra, sleep', clap: 0.5, wake: true, url: q.has('paired') ? 'https://hydra-olive-one.vercel.app' : '', link: q.has('paired') ? 'ready' : 'off', tools: 0 },
       // ?tts=gemini: Gemini as the voice, its key saved.
       tts: new URLSearchParams(location.search).get('tts') === 'gemini' ? 'gemini' : 'fish', geminiKey: new URLSearchParams(location.search).get('tts') === 'gemini', geminiVoice: 'Kore',
       geminiVoices: [['Zephyr', 'Bright'], ['Puck', 'Upbeat'], ['Charon', 'Informative'], ['Kore', 'Firm']].map(([id, style]) => ({ id, style })),

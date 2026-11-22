@@ -327,6 +327,7 @@ fn to_sidekick_buddy(app: &AppHandle, msg: &Value) {
 fn orb_state(app: AppHandle, window: WebviewWindow, msg: Value) {
     if is_overlay(window.label()) {
         hydra::push(&app, &msg);
+        refresh_tray(&app, msg.get("state").and_then(Value::as_str).unwrap_or(""));
         // Speaking or not, for barge-in: the voice helper listens over Hydra's voice only while it plays.
         static SPEAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let now = msg.get("state").and_then(Value::as_str) == Some("Speaking");
@@ -716,22 +717,60 @@ fn intro_at_tray(app: &AppHandle, tray: Option<tauri::Rect>, text: &str) {
 /// The "Wave" icon: the Sidekick waving a floating mitt, as a 12×12 LED grid.
 /// The Hydra mark (three linked rings, design/logo/hydra-mark.svg) drawn with smooth edges at 36 px (18 pt at 2x).
 /// Black on transparent, used as a template image so macOS tints it for light, dark and highlighted menu bars.
-fn tray_image() -> tauri::image::Image<'static> {
+fn tray_image() -> tauri::image::Image<'static> { tray_image_for(TrayLook::Plain) }
+
+/// The menu bar icon's look. Attached (the orb lives in the Hydra window), while that window is hidden it shows the
+/// agent's state, in the template's one ink: asleep the rings go faint, thinking they break into dashes, speaking they
+/// thicken. Listening and every other case: the plain mark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TrayLook { Plain, Asleep, Thinking, Speaking }
+
+fn tray_look(state: &str, detached: bool, window_shown: bool) -> TrayLook {
+    if detached || window_shown { return TrayLook::Plain; }
+    match state {
+        "Asleep" => TrayLook::Asleep,
+        "Thinking" => TrayLook::Thinking,
+        "Speaking" => TrayLook::Speaking,
+        _ => TrayLook::Plain,
+    }
+}
+
+static DETACHED: AtomicBool = AtomicBool::new(false);
+static TRAY_LOOK: AtomicU8 = AtomicU8::new(0);
+
+/// Sets the menu bar icon for the agent's state (macOS; the other systems keep their app icon).
+fn refresh_tray(app: &AppHandle, state: &str) {
+    let shown = app.get_webview_window(hydra::MAIN_LABEL).is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false));
+    let look = tray_look(state, DETACHED.load(Ordering::Relaxed), shown);
+    if TRAY_LOOK.swap(look as u8, Ordering::Relaxed) == look as u8 { return; }
+    #[cfg(target_os = "macos")]
+    if let Some(t) = app.tray_by_id("roamies") {
+        let _ = t.set_icon(Some(tray_image_for(look)));
+        let _ = t.set_icon_as_template(true);
+        let _ = t.set_tooltip(Some(match look { TrayLook::Asleep => "Hydra: asleep", TrayLook::Thinking => "Hydra: thinking", TrayLook::Speaking => "Hydra: speaking", TrayLook::Plain => "Hydra" }));
+    }
+}
+
+fn tray_image_for(look: TrayLook) -> tauri::image::Image<'static> {
     const N: usize = 36;
     // The mark's box is 69.47 x 66; fit it in 32 px, centred.
     let k = 32.0 / 69.47;
     let (ox, oy) = ((N as f64 - 69.47 * k) / 2.0, (N as f64 - 66.0 * k) / 2.0);
     let rings = [(34.74, 21.71), (21.71, 44.29), (47.76, 44.29)];
-    let (r, half) = (19.21 * k, 2.9 * k);
+    let (r, half) = (19.21 * k, 2.9 * k * if look == TrayLook::Speaking { 1.7 } else { 1.0 });
+    let alpha = if look == TrayLook::Asleep { 0.4 } else { 1.0 };
     let mut rgba = vec![0u8; N * N * 4];
     for y in 0..N {
         for x in 0..N {
             let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
             let cover = rings.iter().map(|(cx, cy)| {
-                let d = ((px - (ox + cx * k)).powi(2) + (py - (oy + cy * k)).powi(2)).sqrt();
+                let (dx, dy) = (px - (ox + cx * k), py - (oy + cy * k));
+                // Thinking: each ring in 8 dashes.
+                if look == TrayLook::Thinking && (dy.atan2(dx) / std::f64::consts::PI * 8.0).rem_euclid(2.0) < 0.8 { return 0.0; }
+                let d = (dx * dx + dy * dy).sqrt();
                 (half + 0.5 - (d - r).abs()).clamp(0.0, 1.0)
             }).fold(0.0, f64::max);
-            rgba[(y * N + x) * 4 + 3] = (cover * 255.0).round() as u8;
+            rgba[(y * N + x) * 4 + 3] = (cover * alpha * 255.0).round() as u8;
         }
     }
     tauri::image::Image::new_owned(rgba, N as u32, N as u32)
@@ -1821,6 +1860,12 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         // The panel's mic picker: ask for the list, and pass on the pick (an id from it, or "" for automatic).
         Some("voice_mics") => to_voice(app, &json!({ "cmd": "mics" })),
         Some("voice_mic") => to_voice(app, &json!({ "cmd": "mic", "id": msg.get("id").and_then(Value::as_str).unwrap_or("") })),
+        // Where the orb lives: attached to the Hydra window (default) or detached on the desktop.
+        Some("orb_mode") => {
+            DETACHED.store(msg.get("detached").and_then(Value::as_bool).unwrap_or(false), Ordering::Relaxed);
+            TRAY_LOOK.store(u8::MAX, Ordering::Relaxed); // look again on the next state
+            hydra::push(app, &json!({ "detached": DETACHED.load(Ordering::Relaxed) }));
+        }
         Some("voice_config") => {
             if let Some(dir) = msg.get("model").and_then(Value::as_str) {
                 *app.state::<VoiceModel>().0.lock().unwrap() = Some(dir.to_owned());
@@ -1997,6 +2042,23 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_menu_bar_icon_shows_the_state_only_when_attached_and_the_window_is_hidden() {
+        use super::{tray_image_for, tray_look, TrayLook};
+        assert_eq!(tray_look("Asleep", false, false), TrayLook::Asleep);
+        assert_eq!(tray_look("Thinking", false, false), TrayLook::Thinking);
+        assert_eq!(tray_look("Speaking", false, false), TrayLook::Speaking);
+        assert_eq!(tray_look("Listening", false, false), TrayLook::Plain);
+        assert_eq!(tray_look("Asleep", false, true), TrayLook::Plain, "the window shows the orb itself");
+        assert_eq!(tray_look("Speaking", true, false), TrayLook::Plain, "detached: the desktop orb shows it");
+        let ink = |l| tray_image_for(l).rgba().chunks(4).map(|p| p[3] as u64).sum::<u64>();
+        let plain = ink(TrayLook::Plain);
+        assert!(ink(TrayLook::Asleep) < plain * 6 / 10, "asleep is faint");
+        assert!(ink(TrayLook::Thinking) < plain * 8 / 10, "thinking is dashed");
+        assert!(ink(TrayLook::Speaking) > plain * 12 / 10, "speaking is bolder");
+        assert!(tray_image_for(TrayLook::Asleep).rgba().chunks(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0), "one ink, no colour (a template image)");
+    }
+
     use super::*;
 
     #[test]

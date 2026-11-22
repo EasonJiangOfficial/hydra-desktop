@@ -566,7 +566,7 @@
 
     const hitAt = (x, y) => {
       for (let i = list.length - 1; i >= 0; i--) {
-        if (list[i].c.hidden || list[i].c.ghost?.()) continue;
+        if (list[i].c.hidden || list[i].c.ghost?.() || R.orbAttached) continue; // attached: no orb on the desktop to hit
         const m = list[i].c.mover;
         if (Math.hypot(x - m.x, y - m.y) < m.radius * 1.1) return list[i];
       }

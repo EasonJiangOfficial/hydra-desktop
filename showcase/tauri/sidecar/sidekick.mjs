@@ -202,6 +202,18 @@ const saveConfig = () => writeJson(CONFIG_PATH, routed && defaultPick ? { ...con
 const phraseOn = () => WAKE_OK && config.wakeWord !== false;
 const clapTalkOn = () => MAC && config.clapTalk !== false;
 const bargeOn = () => MAC && config.barge !== false;
+// Where the orb lives (owner: "the voice agent is completely separate from the app, which shouldn't be the case unless I
+// detatch it"). Attached, the default: in the Hydra window (the web app draws it from the bridge) and the menu bar icon
+// shows the state while that window is hidden. Detached: the docked desktop orb. The web app (bridge), the tray menu,
+// the panel and a right-click on the orb switch it.
+const orbDetached = () => !!config.orbDetached;
+function setOrbMode(detached, from = 'panel') {
+  config.orbDetached = !!detached; saveConfig();
+  logLine('orb_mode', { detached: !!detached, from });
+  ui({ kind: 'orb_mode', detached: !!detached });
+  send({ type: 'orb_mode', detached: !!detached });
+  menu(); if (panelOpen) panel();
+}
 const clapSensitivity = () => (Number.isFinite(Number(config.clapSensitivity)) ? Math.max(0, Math.min(1, Number(config.clapSensitivity))) : 0.5);
 const power = createPower({
   onChange: ({ asleep, why }) => {
@@ -2195,6 +2207,7 @@ function menu() {
     { id: 'open_main', label: 'Open Hydra' },
     { id: 'panel', label: 'Open Panel…' },
     { id: power.asleep ? 'power:wake' : 'power:sleep', label: power.asleep ? 'Wake Hydra' : 'Put Hydra to Sleep' },
+    { id: orbDetached() ? 'orb:attach' : 'orb:detach', label: orbDetached() ? 'Attach Orb' : 'Detach Orb' },
     { id: 'show', label: `Show ${lookName()}`, ...(HOTKEYS_OK ? { accel: keys().summon } : {}) },
     { id: 'ask', label: `Ask ${lookName()}…`, enabled: !busy },
     ...(SNAP_OK ? [{ id: 'snap', label: 'Ask About an Area…', accel: keys().snap }] : []),
@@ -2288,7 +2301,7 @@ function panelState() {
     update: { available: update.available, installing: update.installing, checking: update.checking, result: update.result, page: update.page, done: update.done },
     intro: !!intro,
     // Hydra: asleep or awake, the sleep word, the clap wake's sensitivity, and the link to Hydra's data.
-    hydra: { asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), wake: phraseOn(),
+    hydra: { detached: orbDetached(), asleep: power.asleep, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, clap: clapSensitivity(), wake: phraseOn(),
       url: hydraLink.url, link: hydraLink.status(), tools: hydraLink.toolCount },
     // The latest error anyone saw, for Copy last error.
     problem: lastProblem ? { code: lastProblem.code, at: lastProblem.at } : null,
@@ -2638,6 +2651,12 @@ async function onMenu(id, via) {
     config.wakeName = r.name; saveConfig(); agentStale = true; voiceConfig(); menu();
     say(phraseOn() ? `Got it. Say "Hey ${wakeName(config)}" and I'm listening.` : `Saved. Turn on the key phrase, then say "Hey ${wakeName(config)}".`, 'happy');
   }
+  else if (id === 'orb:detach') setOrbMode(true, 'menu');
+  else if (id === 'orb:attach') setOrbMode(false, 'menu');
+  else if (id === 'orb:offer' && orbDetached()) {
+    const a = await ask({ placeholder: 'The orb', choices: ['Attach to Hydra', 'Keep it here'] });
+    if (/^attach/i.test(String(a ?? ''))) setOrbMode(false, 'orb');
+  }
   else if (id === 'power:wake') power.wake('panel');
   else if (id === 'power:sleep') power.sleep('panel');
   else if (id === 'sleepword') {
@@ -2918,6 +2937,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     ui({ kind: 'volume', v: volumeNow() / 100 });
     notchUi();
     ui({ kind: 'size', size: sizeNow() });
+    ui({ kind: 'orb_mode', detached: orbDetached() }); send({ type: 'orb_mode', detached: orbDetached() });
     ui({ kind: 'look', look: config.look ?? 'hydra' });
     if (config.onboarded) ui({ kind: 'greet' });
     agents.sync();
@@ -2935,6 +2955,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'feedback') { if (m.good === true) onFeedback('good', '', 'button'); else wrongButton().catch((e) => console.error('feedback', e)); }
   else if (m.type === 'agent_power') { if (m.on) power.wake(String(m.from || 'asked')); else power.sleep(String(m.from || 'asked')); }
   else if (m.type === 'auto_listen' && m.turn === 'wake') { if (!power.asleep && !busy) send({ type: 'listen', wait: 8 }); }
+  // The web app's bridge (window.hydraDesktop.attach / detach), passed on by the shell from Hydra's own page only.
+  else if (m.type === 'orb_set') setOrbMode(!!m.detached, m.from ?? 'web');
   else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); power.talked(); }
   else if (m.type === 'reply_said') { power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on

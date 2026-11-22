@@ -433,14 +433,17 @@
   // ---------- voice (⌃⌥) ----------
   // ---------- the bridge to the main window: the web app's orb mirrors this one (hydra.rs, docs/BRIDGE.md) ----------
   const ORB_PX = { small: 40, default: 48, large: 64 };
+  // Attached (the default): the orb lives in the Hydra window (the web app draws it from the bridge), so none floats
+  // on the desktop. Detached: the docked desktop orb. The sidecar says which (orb_mode); drawings still use this layer.
+  if (Roamie.orbAttached == null) Roamie.orbAttached = true;
   let micLevel = 0, hearing2 = false, orbSent = '', orbAt = 0;
   function orbNow() {
     const out = Roamie.voiceOut?.playing() ? Roamie.voiceOut.level() : 0;
     const state = Roamie.asleep ? 'Asleep' : Roamie.voiceOut?.playing() ? 'Speaking' : hearing2 ? 'Listening' : responding ? 'Thinking' : 'Listening';
-    return { state, micLevel: hearing2 ? micLevel : 0, outputLevel: out };
+    return { state, micLevel: hearing2 ? micLevel : 0, outputLevel: out, detached: !Roamie.orbAttached };
   }
   function pushOrb(force = false) {
-    const o = orbNow(), key = `${o.state}|${o.micLevel.toFixed(2)}|${o.outputLevel.toFixed(2)}`, now = performance.now();
+    const o = orbNow(), key = `${o.state}|${o.micLevel.toFixed(2)}|${o.outputLevel.toFixed(2)}|${o.detached}`, now = performance.now();
     if (!force && key === orbSent && now - orbAt < 2000) return;
     orbSent = key; orbAt = now;
     invoke('orb_state', { msg: o }).catch(() => {});
@@ -449,8 +452,15 @@
   // Asleep: a click on the orb wakes Hydra (it greets, then listens).
   document.addEventListener('pointerdown', (e) => {
     const a = getAgent();
-    if (!Roamie.asleep || !a?.visible || !a.pos) return;
-    if (Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) < 90) send({ type: 'agent_power', on: true, from: 'orb' });
+    if (!Roamie.asleep || Roamie.orbAttached || !a?.visible || !a.pos) return;
+    if (Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) < a.pos.r * 1.2) send({ type: 'agent_power', on: true, from: 'orb' });
+  }, true);
+  // Right-click on the floating orb: offer to attach it to the Hydra window.
+  document.addEventListener('contextmenu', (e) => {
+    const a = getAgent();
+    if (Roamie.orbAttached || !a?.visible || !a.pos || Math.hypot(e.clientX - a.pos.x, e.clientY - a.pos.y) > a.pos.r * 1.2) return;
+    e.preventDefault();
+    send({ type: 'menu', id: 'orb:offer' });
   }, true);
 
   function onVoice(m) {
@@ -536,6 +546,7 @@
     if (m.kind === 'notch') { if (Roamie.notch) { Roamie.notch.enabled = !!m.on; if (m.style) Roamie.notch.style = m.style; if (!m.on) Roamie.notch.close(); } return; }
     if (m.kind === 'sound') { if (Roamie.sfx) Roamie.sfx.enabled = m.on; return; }
     // Hydra asleep (5 minutes without talk, or the sleep word) or awake: the orb holds still and pale while asleep.
+    if (m.kind === 'orb_mode') { Roamie.orbAttached = !m.detached; pushOrb(true); return; }
     if (m.kind === 'power') { Roamie.asleep = !!m.asleep; if (m.asleep && m.sound) Roamie.sfx?.play('sleep'); pushOrb(true); return; }
     // The wake greeting ("Hydra at your service, sir."): once it's said, the mic opens hands-free.
     if (m.kind === 'listen_after') { waitThenListen({ speech: m.speech, turn: 'wake' }); return; }

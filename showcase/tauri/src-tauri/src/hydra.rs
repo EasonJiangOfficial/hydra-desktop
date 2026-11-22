@@ -47,21 +47,34 @@ pub fn route(url: &Url) -> Nav {
     }
 }
 
+/// What a bridge call asks the sidecar to do, or None (an unknown call, or a page that isn't Hydra's own).
+pub fn bridge_message(cmd: &str, on_hydra: bool) -> Option<Value> {
+    if !on_hydra { return None; }
+    match cmd {
+        "wake" | "sleep" => Some(json!({ "type": "agent_power", "on": cmd == "wake", "from": "web" })),
+        "detach" | "attach" => Some(json!({ "type": "orb_set", "detached": cmd == "detach", "from": "web" })),
+        _ => None,
+    }
+}
+
 /// window.hydraDesktop, for the Hydra web app (only on Hydra's own origin). Documented in docs/BRIDGE.md.
 const BRIDGE_JS: &str = r#"(() => {
   if (location.origin !== 'https://hydra-olive-one.vercel.app' || window.hydraDesktop) return;
-  let snap = { state: 'Asleep', micLevel: 0, outputLevel: 0 };
+  let snap = { state: 'Asleep', micLevel: 0, outputLevel: 0, detached: false };
   const subs = new Set();
   const call = (cmd) => { location.href = 'hydra-desktop://' + cmd; };
   Object.defineProperty(window, 'hydraDesktop', { value: Object.freeze({
-    version: 1,
+    version: 2,
     get state() { return snap.state; },
+    get detached() { return snap.detached; },
     get micLevel() { return snap.micLevel; },
     get outputLevel() { return snap.outputLevel; },
     snapshot: () => ({ ...snap }),
     subscribe(fn) { subs.add(fn); try { fn({ ...snap }); } catch {} return () => subs.delete(fn); },
     wake: () => call('wake'),
     sleep: () => call('sleep'),
+    detach: () => call('detach'),
+    attach: () => call('attach'),
   }) });
   Object.defineProperty(window, '__hydraDesktopPush', { value: (m) => {
     snap = { ...snap, ...m };
@@ -92,10 +105,7 @@ pub fn open_main(app: &AppHandle) {
             Nav::Bridge(cmd) => {
                 // Only while the window shows Hydra itself: never for a page that got in some other way.
                 let on_hydra = nav_app.get_webview_window(MAIN_LABEL).and_then(|w| w.url().ok()).is_some_and(|u| is_hydra(&u));
-                match cmd.as_str() {
-                    "wake" | "sleep" if on_hydra => crate::to_sidecar(&nav_app, &json!({ "type": "agent_power", "on": cmd == "wake", "from": "web" })),
-                    _ => {}
-                }
+                if let Some(msg) = bridge_message(&cmd, on_hydra) { crate::to_sidecar(&nav_app, &msg); }
                 false
             }
             // Blocked, and not opened anywhere: this fires for every frame (an ad or embed loading), not just clicks.
@@ -153,6 +163,7 @@ pub fn push(app: &AppHandle, msg: &Value) {
     if let Some(s) = state { out.insert("state".into(), json!(s)); }
     if let Some(v) = level("micLevel") { out.insert("micLevel".into(), json!(v)); }
     if let Some(v) = level("outputLevel") { out.insert("outputLevel".into(), json!(v)); }
+    if let Some(d) = msg.get("detached").and_then(Value::as_bool) { out.insert("detached".into(), json!(d)); }
     if out.is_empty() { return; }
     let _ = w.eval(format!("window.__hydraDesktopPush&&__hydraDesktopPush({})", Value::Object(out)));
 }
@@ -183,6 +194,19 @@ mod tests {
         assert_eq!(r("javascript:alert(1)"), Nav::Block);
         assert_eq!(r("hydra-desktop://wake"), Nav::Bridge("wake".into()));
         assert_eq!(r("hydra-desktop://sleep"), Nav::Bridge("sleep".into()));
+    }
+
+    #[test]
+    fn bridge_calls_wake_sleep_detach_and_attach_only_from_hydra() {
+        assert_eq!(r("hydra-desktop://detach"), Nav::Bridge("detach".into()));
+        assert_eq!(r("hydra-desktop://attach"), Nav::Bridge("attach".into()));
+        assert_eq!(bridge_message("detach", true), Some(json!({ "type": "orb_set", "detached": true, "from": "web" })));
+        assert_eq!(bridge_message("attach", true), Some(json!({ "type": "orb_set", "detached": false, "from": "web" })));
+        assert_eq!(bridge_message("wake", true), Some(json!({ "type": "agent_power", "on": true, "from": "web" })));
+        assert_eq!(bridge_message("sleep", true), Some(json!({ "type": "agent_power", "on": false, "from": "web" })));
+        for c in ["wake", "sleep", "detach", "attach"] { assert_eq!(bridge_message(c, false), None, "{c} from a page that isn't Hydra"); }
+        assert_eq!(bridge_message("quit", true), None, "unknown calls do nothing");
+        assert!(BRIDGE_JS.contains("version: 2") && BRIDGE_JS.contains("detach: () => call('detach')") && BRIDGE_JS.contains("get detached()"));
     }
 
     #[test]

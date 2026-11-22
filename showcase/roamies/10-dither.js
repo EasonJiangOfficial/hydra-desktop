@@ -115,6 +115,7 @@
       const drawOrb = (ctx) => {
         if (!vdots.length || look !== 'hydra') return;
         ctx.save();
+        ctx.globalAlpha = 1 - (jst.attachK ?? 0); // fading into the Hydra window (attached)
         // No disc behind it (owner, 2026-11-22). Each dot gets a thin white rim instead, like the Mac cursor: lost on a
         // light page, it keeps the ink dots readable on a dark wallpaper. Rims first, so none covers a dot.
         const order = [];
@@ -503,6 +504,9 @@
       const drawLook = (bx, by, env) => {
         const J = drawn(look);
         if (!J) return;
+        // Attached to the Hydra window (the default): the orb is drawn there, not on the desktop. It fades out here.
+        jst.attachK = env.reduced || jst.attachK == null ? (Roamie.orbAttached ? 1 : 0) : clamp(jst.attachK + ((Roamie.orbAttached ? 1 : 0) - jst.attachK > 0 ? 1 : -1) * Math.min(Math.abs((Roamie.orbAttached ? 1 : 0) - jst.attachK), (jst.dt ?? 0.016) / 0.25), 0, 1);
+        if (jst.attachK >= 1) { vdots.length = 0; vreach = null; return; }
         const A = act?.name;
         Object.assign(jst, {
           t, mode: pose?.mode ?? null, heard: pose?.heard, voice: window.Roamie.voiceOut?.playing() ? window.Roamie.voiceOut.level() : null, act: A ?? null, actA: act?.a ?? 0,
