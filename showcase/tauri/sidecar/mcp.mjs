@@ -278,7 +278,7 @@ export function createMcpTools({ mcp, ask, isYes, allowActions = () => true, ope
         const t = await mcp.tool(server, tool);
         const v = checkCall({ name: tool, annotations: t.annotations });
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
-        if (v.level !== 'safe' && !(await confirm(`${server}: ${tool} ${clipText(JSON.stringify(parsed), 160)}`, ctx, v.always))) throw new Error(`${userName} said no, so ${tool} wasn't run.`);
+        if (v.level !== 'safe' && !(await confirm(`${server}: ${tool} ${JSON.stringify(parsed)}${v.reason ? ` ${v.reason}` : ''}`, ctx, v.always))) throw new Error(`${userName} said no, so ${tool} wasn't run.`);
         return t.execute(parsed, ctx);
       },
     },

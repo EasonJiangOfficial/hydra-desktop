@@ -74,7 +74,8 @@
   transition: grid-template-rows .18s var(--ease), opacity .2s var(--ease) .12s, visibility 0s; }
 .ah-ask-in { min-height: 0; overflow: hidden; }
 .ah-ask-pad { padding: 0 12px 10px 54px; }
-.ah-q { margin: 0 0 8px; font-size: 12px; line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+/* The whole question, never cut (owner): a long one scrolls. */
+.ah-q { margin: 0 0 8px; font-size: 12px; line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere; white-space: pre-wrap; max-height: 9.5em; overflow: hidden auto; overscroll-behavior: contain; }
 .ah-btns { display: flex; gap: 8px; }
 .ah-chip, .ahs-chip { all: unset; box-sizing: border-box; height: 26px; padding: 0 11px; display: inline-grid; place-items: center; cursor: pointer;
   font: 500 12px/1.25 system-ui, -apple-system, "Helvetica Neue", sans-serif; white-space: nowrap; border-radius: 8px;

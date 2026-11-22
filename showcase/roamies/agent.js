@@ -420,6 +420,9 @@
     const CHOICE_GAP = 8, CHOICE_TOP = 12;
     const choicesW = (bb) => bb.input.choices.labels.reduce((s, l, i) => s + G.chipW(l) + (i ? CHOICE_GAP : 0), 0);
     const footH = (bb) => (bb.input?.choices ? CHOICE_TOP + G.CHIP_H + 4 : hintH(bb));
+    // A yes/no question is shown whole (owner): its lines, which scroll with the wheel when they outgrow the bubble.
+    const asking = (bb) => !!bb.input?.choices && !bb.text;
+    const bodyLines = (bb) => (asking(bb) ? wrap(bb.input.placeholder || ' ', MAX_COLS) : bb.lines);
 
     const make = (kind) => ({
       kind, text: '', lines: [{ start: 0, s: '' }], shown: 0, at: [], ended: false, age: 0, wait: 0,
@@ -488,7 +491,7 @@
         // A live transcript arrives in jumps, so its bubble is full width from the start and only grows down.
         let cols = bb.input.listen ? MAX_COLS : 18;
         for (const l of src) cols = Math.max(cols, Math.min(l.s.length + 1, MAX_COLS));
-        const rows = clamp(src.length, 1, MAX_LINES);
+        const rows = clamp(src.length, 1, asking(bb) ? Math.max(MAX_LINES, Math.floor((H * 0.5) / (CH * t))) : MAX_LINES);
         const meter = bb.input.listen ? (METER + 1) * k.P : 0;
         const footW = bb.input.choices ? choicesW(bb) : hintH(bb) ? G.textW(HINT, HINT_F) : 0;
         return { cols, rows, maxRows: MAX_LINES, w: Math.max(cols * colW(t), footW), h: rows * CH * t + meter + footH(bb) };
@@ -545,9 +548,9 @@
       if (bb.follow) bb.scrollTarget = maxScroll;
       // Typing: keep the caret's line in view, wherever it's been moved to.
       if (bb.input && !bb.input.listen && bb.text) { const { li } = caretAt(bb.lines, bb.input.caret ?? bb.text.length); bb.scrollTarget = clamp(bb.scrollTarget ?? 0, li - inner.rows + 1, li); }
-      bb.scrollTarget = clamp(bb.scrollTarget ?? 0, 0, Math.max(0, bb.lines.length - inner.rows));
+      bb.scrollTarget = clamp(bb.scrollTarget ?? 0, 0, Math.max(0, bodyLines(bb).length - inner.rows));
       spring(bb.scroll, bb.scrollTarget, bb.input ? 300 : 120, bb.input ? 34 : 18, dt);
-      bb.overflow = bb.lines.length > inner.rows;
+      bb.overflow = bodyLines(bb).length > inner.rows;
       bb.rows = inner.rows; bb.cols = inner.cols;
       // Placement: above the head, else below, else beside; always fully inside the visible screen.
       // The thinking tag sits where the reply will open, so it turns into the reply without moving.
@@ -721,7 +724,7 @@
       tctx.clearRect(0, 0, iw + 2, ih + 2);
       const dim = bb.kind === 'thought' || (ph && !bb.input.choices);
       const lines = ph ? wrap(bb.input.placeholder || '', MAX_COLS) : bb.lines;
-      const s0 = ph ? 0 : bb.scroll.x, first = Math.max(0, Math.floor(s0)), last = Math.min(lines.length - 1, first + bb.rows);
+      const s0 = ph && !bb.input.choices ? 0 : bb.scroll.x, first = Math.max(0, Math.floor(s0)), last = Math.min(lines.length - 1, first + bb.rows);
       const shown = ph ? 1e9 : Math.floor(bb.shown);
       const shownLines = lines.filter((l) => l.start < shown).length;
       const fadeTop = s0 > 0.02, fadeBot = s0 + bb.rows < shownLines - 0.02;
@@ -1144,7 +1147,7 @@
         if (!b) return;
         b.follow = false; b.dwell = 0;
         b.scrollTarget = (b.scrollTarget ?? 0) + dy / 40;
-        if (b.scrollTarget >= b.lines.length - b.rows) b.follow = b.ended ? false : true;
+        if (!asking(b) && b.scrollTarget >= b.lines.length - b.rows) b.follow = b.ended ? false : true;
       },
       pose: (dt) => {
         lookAt = null;

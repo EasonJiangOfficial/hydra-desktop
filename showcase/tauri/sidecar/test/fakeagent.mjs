@@ -1,12 +1,14 @@
 // A stand-in model for test/agentrun.test.mjs (loaded by agentrun.mjs through ROAMIES_FAKE_AGENT): it calls the
 // worker's real tools in a fixed order, like a model would, and logs each result to FAKE_LOG.
 import fs from 'node:fs';
+import { unknownToolMessage } from '@kenkaiiii/gg-agent';
 
 const STEPS = [
   ['plan', { now: 'Writing the page' }],
   ['write_file', { path: 'files/index.html', content: '<h1>Woof</h1>' }],
   ['write_file', { path: 'files/index.html', content: '<h1>Woof Co</h1>' }], // overwriting its own file: no yes needed
-  ['run_command', { command: `node -e "require('fs').writeFileSync('work/scratch.txt', 'x')"` }], // runs code: asks once (and works in cmd too)
+  ['run_command', { command: 'id' }], // no shell tool any more: Unknown tool (sixth review)
+  ['write_file', { path: 'work/build.sh', content: 'echo hi' }], // a script, even in its own folder: asks once
   ['finish', { outcome: 'Made a one-page site for Woof Co.', files: [{ path: 'files/index.html', what: 'the page' }] }],
 ];
 // Asked for an answer (agentSystem says so): notes in work/, then a report and where it looked, no files. The first
@@ -31,7 +33,10 @@ export default class FakeAgent {
         const id = `t${++i}`;
         yield { type: 'tool_call_start', toolCallId: id, name, args };
         let isError = false, result;
-        try { result = await o.o.tools.find((t) => t.name === name).execute(args, { signal: o.o.signal }); } catch (e) { isError = true; result = e.message; }
+        // As the real loop does: a tool it doesn't have is an Unknown tool error.
+        const tool = o.o.tools.find((t) => t.name === name);
+        if (!tool) { isError = true; result = unknownToolMessage(name, o.o.tools.map((t) => t.name)); }
+        else try { result = await tool.execute(args, { signal: o.o.signal }); } catch (e) { isError = true; result = e.message; }
         fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ name, isError, result }) + '\n');
         yield { type: 'tool_call_end', toolCallId: id, isError, result };
         yield { type: 'turn_end', usage: { inputTokens: 100, outputTokens: 10 } };

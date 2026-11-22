@@ -20,7 +20,6 @@ export function describe(name, args = {}) {
     case 'list_files': return [`Looking in ${short(base(args.dir))}`, `Looked in ${short(base(args.dir))}`];
     case 'search_files': return ['Searching your files', 'Searched your files'];
     case 'write_file': return [`Saving ${short(base(args.path))}`, `Saved ${short(base(args.path))}`];
-    case 'run_command': return ['Running a command', 'Ran a command'];
     case 'web_fetch': return [`Opening ${host(args.url)}`, `Read ${host(args.url)}`];
     case 'web_search': return ['Searching the web', 'Searched the web'];
     case 'remember_commitment': return ['Adding a reminder', 'Added a reminder'];

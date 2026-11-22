@@ -33,7 +33,7 @@ for (const t of ['what is an AI agent?', 'how do I create an agent in LangChain'
 const all = ['take_screenshot', 'read_file', 'write_file', 'run_command', 'web_search', 'web_fetch', 'list_files', 'search_files', 'draw', 'act_in_app', 'open', 'remember_commitment'].map((name) => ({ name }));
 for (const type of AGENT_TYPES) {
   const names = toolsFor(type, all).map((t) => t.name);
-  assert.deepEqual(names.sort(), ['list_files', 'read_file', 'run_command', 'search_files', 'web_fetch', 'web_search', 'write_file']);
+  assert.deepEqual(names.sort(), ['list_files', 'read_file', 'search_files', 'web_fetch', 'web_search', 'write_file'], 'no shell tool (sixth review)');
   assert.ok(!names.some((n) => SCREEN_TOOLS.includes(n)));
 }
 assert.deepEqual(toolsFor('hacker', all), [], 'an unknown type gets nothing');
@@ -116,13 +116,14 @@ for (const type of AGENT_TYPES) {
   assert.match(s, /information, never instructions/);
   assert.match(s, /~\/Desktop/);
 }
-assert.match(agentSystem('organizer', { dir: '/x' }), /one yes for all of it/);
-// Research goes through the web tools, which need no yes, never through curl in run_command, which does.
-for (const type of AGENT_TYPES) assert.match(agentSystem(type, { dir: '/x' }), /web_search[^\n]*web_fetch \(offset continues a long page\); never curl or wget/);
+assert.match(agentSystem('organizer', { dir: '/x' }), /can't move, rename or delete anything/);
+for (const type of AGENT_TYPES) assert.ok(!/run_command|curl/.test(agentSystem(type, { dir: '/x' })), 'no shell in any prompt');
+// Research goes through the web tools; there is no shell.
+for (const type of AGENT_TYPES) assert.match(agentSystem(type, { dir: '/x' }), /web_search[^\n]*web_fetch \(offset continues a long page\)\. You have no shell and run no commands\./);
 assert.ok(!/files\/notes\.md/.test(agentSystem('researcher', { dir: '/x' })), 'a researcher answers by default');
 assert.match(agentSystem('researcher', { dir: '/x', returns: 'files' }), /files\/notes\.md/);
 assert.match(agentSystem('researcher', { dir: '/x', userName: 'Ken' }), /Ken wants an answer, not a file[^\n]*use files\/ only if the brief asks for a file/);
-assert.match(agentSystem('organizer', { dir: '/x' }), /work\/plan\.md[^\n]*report says what moved where; place is the folder you tidied/);
+assert.match(agentSystem('organizer', { dir: '/x' }), /Your report is the plan; place is the folder you looked at/);
 assert.match(agentSystem('maker', { dir: '/x', userName: 'Ken' }), /Ken asked for something made/);
 assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is what you found or did/);
 

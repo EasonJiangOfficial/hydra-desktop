@@ -2,7 +2,7 @@
 
 Hydra Desktop (a modified version of Roamies by Ken Kai, AGPL-3.0) reads your AI provider API keys and OAuth tokens from your machine (`~/.gg/auth.json`) and runs a
 local agent that can take screenshots, read windows and read files, and, if you turn
-them on, click and type in other apps, write files and run commands. Security reports are taken seriously.
+them on, click and type in other apps and write files. It runs no shell commands. Security reports are taken seriously.
 
 ## Supported versions
 

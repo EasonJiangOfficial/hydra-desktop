@@ -56,7 +56,7 @@ export function jobKinds(text, { agentCheck = wantsAgent } = {}) {
 // The tools that mean a job of that kind is under way (so a follow-up shortly after stays on the same model).
 const TOOL_KIND = {
   act_in_app: 'computer', read_window: 'computer', list_windows: 'computer', take_screenshot: 'computer',
-  write_file: 'code', run_command: 'code',
+  write_file: 'code',
   send_agent: 'agents', draw: 'draw', web_search: 'web', web_fetch: 'web',
 };
 export const kindOfTool = (name) => TOOL_KIND[name] ?? null;

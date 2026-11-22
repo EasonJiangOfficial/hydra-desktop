@@ -1,14 +1,13 @@
-// The agent's tools: screen capture, reading and working other apps (the "hands" helper), files, commands,
-// web pages and memory. Every file, command, URL and open goes through safety.mjs first.
+// The agent's tools: screen capture, reading and working other apps (the "hands" helper), files, web pages and
+// memory. Every file, URL and open goes through safety.mjs first. There is no shell: the agent runs no commands.
 import { execFile, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, strictPlan, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, riskyKey, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, isRiskyClick, riskyKey, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -31,23 +30,29 @@ export const run = (cmd, args, { onLine, ...opts } = {}) => new Promise((res) =>
     for (let k; (k = buf.indexOf('\n')) >= 0; buf = buf.slice(k + 1)) { try { onLine(buf.slice(0, k)); } catch { /* a listener's fault never fails the command */ } }
   });
 });
-/** Runs argv lists as a pipeline (a | b), no shell: each program by absolute path, stdout into the next one's stdin. */
-export const runPlan = (plan, { cwd, env, timeout = 60_000, max = 8 << 20 } = {}) => new Promise((res) => {
-  let stdout = '', stderr = '', done = false, left = plan.length, code = 0, signal = null;
-  const kids = plan.map(([bin, ...args], i) => spawn(bin, args, { cwd, env, windowsHide: true, stdio: [i === 0 ? 'ignore' : 'pipe', 'pipe', 'pipe'] }));
-  const finish = (err) => { if (done) return; done = true; clearTimeout(timer); for (const k of kids) { try { k.kill(); } catch { /* gone */ } } res({ err, stdout, stderr }); };
-  const timer = setTimeout(() => finish(Object.assign(new Error('timed out'), { signal: 'SIGTERM' })), timeout);
-  kids.forEach((k, i) => {
-    k.on('error', (e) => finish(Object.assign(e, { code: 127 })));
-    k.stderr.on('data', (d) => { if (stderr.length < max) stderr += d; });
-    if (i < kids.length - 1) { k.stdout.pipe(kids[i + 1].stdin); kids[i + 1].stdin.on('error', () => { /* reader quit early (head) */ }); }
-    else k.stdout.on('data', (d) => { stdout += d; if (stdout.length > max) finish(Object.assign(new Error('too much output'), { code: 'MAXBUFFER' })); });
-    k.on('close', (c, sig) => {
-      if (i === kids.length - 1) { code = c; signal = sig; }
-      if (--left === 0) finish(code === 0 ? null : Object.assign(new Error(`exit ${code}`), { code, signal }));
-    });
-  });
-});
+// search_files: every file under root it may read, walked here so it never goes into secrets, other apps' data or
+// symlinks (rg and grep -r would), then searched with rg or grep given those files by name. At most 20,000 files.
+const SKIP_DIRS = new Set(['node_modules', '.git']);
+export async function searchFiles(pattern, root, home, { max = 20_000 } = {}) {
+  const files = [], stack = [root];
+  while (stack.length && files.length < max) {
+    const dir = stack.pop();
+    for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const p = path.join(dir, e.name);
+      if (e.isSymbolicLink() || checkRead(p, home).level !== SAFE) continue;
+      if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) stack.push(p); } else if (e.isFile()) files.push(p);
+    }
+  }
+  let out = '', rg = true;
+  for (let i = 0; i < files.length && out.length < 12_000; i += 200) {
+    const batch = files.slice(i, i + 200);
+    // -e and -- keep a pattern like "--pre=cmd" from being read as an option (rg --pre runs programs).
+    let r = rg ? await run('rg', ['--no-config', '-n', '--with-filename', '--max-count', '5', '--max-columns', '200', '-e', pattern, '--', ...batch]) : null;
+    if (!r || r.err?.code === 'ENOENT') { rg = false; r = await run('grep', ['-nHI', '-m', '5', '-E', '-e', pattern, '--', ...batch]); }
+    out += r.stdout;
+  }
+  return out;
+}
 // Windows "open": Start-Process gets the target (and the app to open it in) through environment variables, so
 // nothing in them is ever parsed as a command (cmd's start split URLs at "&", and quotes in names broke it). A
 // failure says "Unable to find application", as macOS's open does.
@@ -55,11 +60,6 @@ export const runPlan = (plan, { cwd, env, timeout = 60_000, max = 8 << 20 } = {}
 // are found by their Start menu name and started through shell:AppsFolder.
 const WIN_OPEN = "try { if ($env:ROAMIES_OPEN_APP) { Start-Process -FilePath $env:ROAMIES_OPEN_APP -ArgumentList ('\"' + $env:ROAMIES_OPEN + '\"') -ErrorAction Stop } else { Start-Process -FilePath $env:ROAMIES_OPEN -ErrorAction Stop } } catch { $e = $_; $n = $env:ROAMIES_OPEN; $a = $null; if (-not $env:ROAMIES_OPEN_APP -and $n -notmatch '[\\\\/:]') { $w = [WildcardPattern]::Escape($n); $all = @(Get-StartApps -ErrorAction SilentlyContinue); $a = $all | Where-Object { $_.Name -eq $n } | Select-Object -First 1; if (-not $a) { $a = $all | Where-Object { $_.Name -like ($w + '*') } | Select-Object -First 1 }; if (-not $a) { $a = $all | Where-Object { $_.Name -like ('*' + $w + '*') } | Select-Object -First 1 } }; if ($a) { Start-Process -FilePath ('shell:AppsFolder\\' + $a.AppID) } else { [Console]::Error.WriteLine('Unable to find application: ' + $e.Exception.Message); exit 1 } }";
 export const winOpen = (target, app = '') => run('powershell', ['-NoProfile', '-NonInteractive', '-Command', WIN_OPEN], { env: { ...process.env, ROAMIES_OPEN: target, ROAMIES_OPEN_APP: app } });
-// run_command's shell. Windows: cmd /d /s /c "…" passed as is (what Node's shell: true does); handed over as a plain
-// argument, Node escaped its quotes as \" which cmd doesn't read, so any command with quotes in it broke.
-export const shellFor = (command, platform = process.platform, env = process.env) => (platform === 'win32'
-  ? ['cmd.exe', ['/d', '/s', '/c', `"${command}"`], { windowsVerbatimArguments: true }]
-  : [env.SHELL || (platform === 'linux' ? '/bin/bash' : '/bin/zsh'), ['-lc', command], {}]);
 const THIS_COMPUTER = process.platform === 'darwin' ? 'this Mac' : 'this computer';
 const LINUX = process.platform === 'linux';
 // A Wayland session hides the pointer and clicks in other apps, so a drawing can't wait for them (platform.mjs).
@@ -219,18 +219,6 @@ export function frontLine(f, who = 'The user') {
   return `- Right now ${who} is in ${f.app}${title}${url ? ` (${url})` : ''}. This was just checked and overrides any app or page from earlier messages; they can still ask about something elsewhere.`;
 }
 
-// Git settings a downloaded repo's own config could use to run a program from a "read-only" git status or log:
-// switched off for every command the agent runs (git reads GIT_CONFIG_COUNT/KEY/VALUE over every config file).
-const GIT_SAFE = {
-  // No system-wide git config or attributes either: only the user's own and these overrides.
-  GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1',
-  GIT_CONFIG_COUNT: '4',
-  GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: 'false',
-  GIT_CONFIG_KEY_1: 'core.pager', GIT_CONFIG_VALUE_1: 'cat',
-  GIT_CONFIG_KEY_2: 'diff.external', GIT_CONFIG_VALUE_2: '',
-  GIT_CONFIG_KEY_3: 'core.hooksPath', GIT_CONFIG_VALUE_3: '/dev/null',
-};
-
 /** Puts text on the clipboard; true when it got there. It goes in through stdin (Linux: through the app itself,
  *  askShell), so nothing in it is ever parsed as a command. */
 export const copyText = (text, askShell) => (LINUX ? askShell({ type: 'clipboard', text: String(text) }).then((r) => !!r?.ok) : new Promise((res) => {
@@ -269,9 +257,8 @@ export function oneYesNoAtATime(ask) {
 }
 
 export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null }) {
-  // Relative paths (and run_command) start in workdir: ~/Roamies for the chat, its own folder for an agent.
+  // Relative paths start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
-  const where = workdir === HOME ? "the user's home folder" : `its working folder (${workdir})`;
   let axNudged = 0;
   let lastShot = null; // how the latest screenshot's pixels map to screen points (see pointing.mjs)
   let lastRead = null; // { win, controls } from the latest read_window, to catch ids that went stale
@@ -986,49 +973,25 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     {
-      name: 'search_files', description: `Search file contents under a specific folder for a text pattern (regex). Not your whole home folder: that trips macOS privacy prompts. To find files by name anywhere, use run_command with ${process.platform === 'darwin' ? 'mdfind' : LINUX ? 'find or locate' : 'dir /s'}.`,
+      name: 'search_files', description: 'Search file contents under a specific folder for a text pattern (regex). Not your whole home folder: that trips macOS privacy prompts. Files with passwords or keys and other apps\' data are never searched.',
       parameters: z.object({ pattern: z.string(), dir: z.string() }),
-      execute: async ({ pattern, dir }) => {
-        const d = allowed(checkRead(at(dir), HOME, { recursive: true }));
-        // -e and -- keep a pattern like "--pre=cmd" from being read as an option (rg --pre runs programs).
-        let r = await run('rg', ['-n', '--max-count', '5', '--max-columns', '200', '-e', pattern, '--', d]);
-        if (r.err?.code === 'ENOENT') r = await run('grep', ['-rnI', '-m', '5', '-E', '-e', pattern, '--', d]);
-        return clip(r.stdout || 'No matches.', 12_000);
-      },
+      execute: async ({ pattern, dir }) => clip(await searchFiles(pattern, allowed(checkRead(at(dir), HOME, { recursive: true })), HOME) || 'No matches.', 12_000),
     },
     {
-      name: 'write_file', description: "Create or overwrite a text file (missing folders are made). Use this, not run_command, to create or change files: a new file needs no yes, overwriting asks. Several files: one call each, in the same turn (a shell loop that makes files has to ask).",
+      name: 'write_file', description: "Create or overwrite a text file (missing folders are made). A new file in ~/Desktop, ~/Documents or ~/Downloads needs no yes; anywhere else, overwriting, scripts and dotfiles ask the user first. Several files: one call each, in the same turn.",
       parameters: z.object({ path: z.string(), content: z.string() }), executionMode: 'sequential',
       execute: async ({ path: p, content }, ctx) => {
         if (!allowActions()) throw new Error(actionsOff);
         p = at(p);
-        const exists = await fs.stat(expand(p)).then(() => true, () => false);
+        // lstat: a link that is there counts as there, wherever it leads.
+        const exists = await fs.lstat(expand(p)).then(() => true, () => false);
         const v = checkWrite(p, HOME, { exists, own });
         const f = allowed(v);
-        if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't write ${p}.`);
+        if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
-        await fs.writeFile(f, content);
+        // Written where it was checked (the real path); a new file that appeared meanwhile isn't overwritten unasked.
+        await fs.writeFile(f, content, { flag: v.level === SAFE && !exists && !own ? 'wx' : 'w' });
         return `Wrote ${content.length} characters to ${f}.`;
-      },
-    },
-    {
-      name: 'run_command', description: `Run a shell command in ${where} and return its output, for what other tools can't do (counting, sorting, mdfind to find files by name, git, moving or copying). Open things with open, and make or edit files with write_file (several: one call each, in the same turn): never sed -i or tee, and never a shell loop that makes files, which always needs a yes. Only plain reads run without a yes: ls, cat, head, tail, wc, sort, uniq, cut, find, grep, file, du, df, stat, date, echo, pwd, whoami, uname -a, sw_vers, which and scutil --get, with plain words (letters, digits, . _ - / ~ = , : @ +), their common read flags, and | between them. Anything else (quotes, $, *, ;, &&, >, other programs or flags) asks the user first, which is slow.`,
-      parameters: z.object({ command: z.string() }), executionMode: 'sequential', timeoutMs: 190_000, // up to 2 min to answer, then the 60 s run
-      execute: async ({ command }, ctx) => {
-        if (!allowActions()) throw new Error(actionsOff);
-        const v = classifyCommand(command, HOME, { exists: existsSync, cwd: workdir, own });
-        if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason} Don't try to get around this; tell ${userName} what you wanted to do instead.`);
-        if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''}`, ctx))) {
-          throw new Error(`${userName} said no, so the command didn't run.`);
-        }
-        // A command that runs without a yes never touches a shell: its plain words go to fixed programs by absolute path.
-        const plan = v.level === SAFE ? strictPlan(command, HOME) : null;
-        if (v.level === SAFE && !plan) throw new Error('That command could not be read clearly, so it did not run.');
-        const r = plan ? await runPlan(plan, { cwd: workdir, env: { ...process.env, ...GIT_SAFE } })
-          : await run(...((([sh, a, o]) => [sh, a, { ...o, cwd: workdir, env: { ...process.env, ...GIT_SAFE } }])(shellFor(command))));
-        const out = clip((r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).trim() || '(no output)', 12_000);
-        if (r.err && r.err.code !== 0) throw new Error(`Exit ${r.err.code ?? r.err.signal}\n${out}`);
-        return out;
       },
     },
     // GG Coder's own web tools: search with a side search or keyless engines, pages as Markdown with offset to read on.

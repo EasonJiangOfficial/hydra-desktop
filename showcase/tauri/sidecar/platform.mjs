@@ -5,18 +5,18 @@
  *  same goes the other way on Windows (Cmd, ls, grep). */
 export function platformLine(platform, { macVersion = '', arch = '', release = '', session = '', desktop = '', distro = '' } = {}) {
   if (platform === 'darwin') {
-    return `Platform: macOS${macVersion ? ` ${macVersion}` : ''} on ${arch === 'arm64' ? 'Apple silicon' : 'Intel'}. Use Mac keys: Cmd, not Ctrl; the end and start of a document are Cmd+Down and Cmd+Up, of a line Cmd+Right and Cmd+Left (Home and End don't move the cursor in most Mac apps). Shell commands are the macOS (BSD) versions, not GNU: no cat -A, grep -P, date -d or sed -i without ''.`;
+    return `Platform: macOS${macVersion ? ` ${macVersion}` : ''} on ${arch === 'arm64' ? 'Apple silicon' : 'Intel'}. Use Mac keys: Cmd, not Ctrl; the end and start of a document are Cmd+Down and Cmd+Up, of a line Cmd+Right and Cmd+Left (Home and End don't move the cursor in most Mac apps).`;
   }
   if (platform === 'win32') {
     const build = +String(release).split('.')[2] || 0;
     const name = build ? `Windows ${build >= 22000 ? '11' : '10'}` : 'Windows';
-    return `Platform: ${name} on ${arch === 'arm64' ? 'Arm' : 'x64'}. Use Windows keys: Ctrl, not Cmd (in act_in_app steps cmd means Ctrl); the end and start of a document are Ctrl+End and Ctrl+Home, of a line End and Home. run_command runs in cmd.exe: use Windows commands (dir, type, where, findstr) or powershell -NoProfile -Command "…", not Unix ones like ls -la, cat, grep or sed. Paths look like C:\\Users\\name, and ~ is the user's folder.`;
+    return `Platform: ${name} on ${arch === 'arm64' ? 'Arm' : 'x64'}. Use Windows keys: Ctrl, not Cmd (in act_in_app steps cmd means Ctrl); the end and start of a document are Ctrl+End and Ctrl+Home, of a line End and Home. Paths look like C:\\Users\\name, and ~ is the user's folder.`;
   }
   if (platform === 'linux') {
     const wayland = session !== 'x11';
     // XDG_CURRENT_DESKTOP reads "ubuntu:GNOME": the last part is the desktop itself.
     const de = String(desktop).split(':').filter(Boolean).pop() ?? '';
-    return `Platform: Linux${distro ? ` (${distro})` : ''} on ${arch === 'arm64' ? 'Arm' : 'x64'}, ${de ? `the ${de} desktop` : 'a desktop'} on ${wayland ? 'Wayland' : 'X11'}. Use PC keys: Ctrl, not Cmd; the end and start of a document are Ctrl+End and Ctrl+Home, of a line End and Home. run_command runs in bash with the GNU tools (grep -P, sed -i with no '', date -d all work), not the macOS ones. Software comes from the distro's own package manager (apt, dnf, pacman, zypper) or Flatpak or Snap: check which is there before naming one, and installing needs the user's password, so give them the command instead of running sudo. Paths look like /home/name, and ~ is the user's folder.${wayland ? " Wayland keeps apps from seeing the pointer, clicks and keys in other apps: you can't tell where the user's cursor is or what they clicked, so a draw beat never waits for a click or hover (beats play one after another), and nothing follows their cursor." : ''}`;
+    return `Platform: Linux${distro ? ` (${distro})` : ''} on ${arch === 'arm64' ? 'Arm' : 'x64'}, ${de ? `the ${de} desktop` : 'a desktop'} on ${wayland ? 'Wayland' : 'X11'}. Use PC keys: Ctrl, not Cmd; the end and start of a document are Ctrl+End and Ctrl+Home, of a line End and Home. Software comes from the distro's own package manager (apt, dnf, pacman, zypper) or Flatpak or Snap: check which is there before naming one, and installing needs the user's password, so give them the command instead of running sudo. Paths look like /home/name, and ~ is the user's folder.${wayland ? " Wayland keeps apps from seeing the pointer, clicks and keys in other apps: you can't tell where the user's cursor is or what they clicked, so a draw beat never waits for a click or hover (beats play one after another), and nothing follows their cursor." : ''}`;
   }
   return `Platform: ${platform}.`;
 }

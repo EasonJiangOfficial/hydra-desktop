@@ -14,7 +14,7 @@ const verdict = (level, reason = '') => ({ level, reason });
 // Secrets: keys, tokens, passwords, browser cookies and the keychain. Never read, never sent anywhere.
 const SECRET = [
   /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gnupg(\/|$)/, /(^|\/)\.aws(\/|$)/, /(^|\/)\.azure(\/|$)/, /(^|\/)\.kube\/config$/,
-  /(^|\/)\.docker\/config\.json$/, /(^|\/)\.netrc$/, /(^|\/)\.npmrc$/, /(^|\/)\.pypirc$/, /(^|\/)\.git-credentials$/,
+  /(^|\/)\.docker\/config\.json$/, /(^|\/)\.netrc$/, /(^|\/)\.cargo\/credentials(\.toml)?$/, /(^|\/)\.npmrc$/, /(^|\/)\.pypirc$/, /(^|\/)\.git-credentials$/,
   /(^|\/)\.config\/gh(\/|$)/, /(^|\/)\.config\/gcloud(\/|$)/, /(^|\/)\.gg\/auth\.json$/, /(^|\/)(Roamies|HydraAgent)\/Data\/secrets\.json$/i, /(^|\/)\.tauri(\/|$)/,
   /(^|\/)Library\/Keychains(\/|$)/, /(^|\/)Library\/Cookies(\/|$)/, /\/(Cookies|Login Data|Web Data)(-journal)?$/,
   /(^|\/)\.env(\.[\w-]+)?$/, /\.(pem|p12|pfx|key|keystore|jks)$/i, /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/,
@@ -37,7 +37,7 @@ const NO_WRITE = [
   /(^|\/)\.git\/(.*\/)?(info\/attributes|objects\/info\/alternates|commondir)$/i,
   /(^|\/)\.(zshrc|zprofile|zshenv|zlogin|bashrc|bash_profile|profile|login|inputrc)$/, /(^|\/)\.config\/fish(\/|$)/,
   /(^|\/)Library\/(LaunchAgents|LaunchDaemons|StartupItems|Preferences|Keychains|Application Support\/com\.apple)(\/|$)/,
-  /(^|\/)\.gitconfig$/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gg(\/|$)/, /(^|\/)(Roamies|HydraAgent)\/(Skills|Data)(\/|$)/i, /(^|\/)\.tauri(\/|$)/, /\.app(\/|$)/, /(^|\/)Applications\/(.+\/)?[^/]+\.app(\/|$)/i, /(^|\/)crontab$/,
+  /(^|\/)\.gitconfig$/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gg(\/|$)/, /(^|\/)(Roamies|HydraAgent)\/(Skills|Data)(\/|$)/i, /(^|\/)\.tauri(\/|$)/, /\.app(\/|$)/i, /(^|\/)Applications\/(.+\/)?[^/]+\.app(\/|$)/i, /(^|\/)crontab$/,
   /\/Start Menu\/Programs\/Startup(\/|$)/i, /(^|\/)Documents\/(Windows)?PowerShell\/.*profile\.ps1$/i, /^[a-z]:\/(Windows|Program Files( \(x86\))?|ProgramData)(\/|$)/i,
   // Linux: what starts at login (autostart entries, systemd user units, session environment), app launchers and
   // D-Bus services (each names a program the desktop runs), and the X session's startup files.
@@ -50,15 +50,14 @@ const NO_WRITE = [
 // home folder down (anchored at ~): a project's own src/cookies or library/mail is not the Mac's.
 const homeCase = (list) => list.map((re) => new RegExp(`^(?:${re.source})`, re.flags.replace('i', '') + 'i'));
 const CI = new Map([[SECRET, homeCase(SECRET)], [PRIVATE, homeCase(PRIVATE)], [NO_WRITE, homeCase(NO_WRITE)]]);
+// Case folded the way APFS folds it (ſ is s, the Kelvin sign is k). Only ever compared one path part at a time, so a
+// letter whose lower case is longer (İ) can't shift where the home folder ends.
+const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase();
 /** Whether a path (absolute, normalized) meets a rule list: as written anywhere, or without case from ~ down. */
 const ruleHit = (list, a, home) => {
   const r = rel(a, home);
-  return list.some((re) => re.test(r) || re.test(a)) || (!isAbs(r) && CI.get(list).some((re) => re.test(r)));
+  return list.some((re) => re.test(r) || re.test(a)) || (!isAbs(r) && CI.get(list).some((re) => re.test(r) || re.test(fold(r))));
 };
-// A repo's own settings that make git run programs, or point it at others: asked for, whoever writes them.
-const GIT_ASK = [/(^|\/)\.git$/, /(^|\/)\.gitattributes$/i, /(^|\/)\.gitmodules$/i, /(^|\/)\.git\/HEAD$/i, /(^|\/)\.git\/worktrees\/[^/]+\/gitdir$/i,
-  // Files a tool runs on its own later: git hooks by husky, direnv's .envrc, VS Code tasks.
-  /(^|\/)\.husky\//i, /(^|\/)\.envrc$/i, /(^|\/)\.vscode\/(tasks|launch|settings)\.json$/i];
 const SYSTEM_ROOTS = ['/System', '/usr', '/bin', '/sbin', '/etc', '/private', '/Library', '/Applications', '/var', '/opt', '/cores'];
 
 const norm = (p, home) => {
@@ -68,14 +67,19 @@ const norm = (p, home) => {
 };
 // The home folder matched without case on a Mac (APFS): /USERS/ken/.ssh is ~/.ssh.
 const ciFs = process.platform === 'darwin' || process.platform === 'win32';
+const samePart = (a, b) => (ciFs ? fold(a) === fold(b) : a === b);
+/** The path below home ('' for home itself), or the path unchanged when it isn't inside home. Part by part. */
 const rel = (abs, home) => {
-  const h = slash(home), a = ciFs ? abs.toLowerCase() : abs, hh = ciFs ? h.toLowerCase() : h;
-  return a === hh ? '' : a.startsWith(hh + '/') ? abs.slice(h.length + 1) : abs;
+  const A = abs.split('/'), H = slash(home).split('/');
+  if (H.length > A.length || !H.every((h, i) => samePart(h, A[i]))) return abs;
+  return A.slice(H.length).join('/');
 };
+const within = (a, top) => rel(a, top) !== a || samePath(a, top);
 // Where a path really leads once symlinks are followed (also a dangling link, or a path not made yet): a link in a
 // harmless folder can point into ~/.ssh or a startup file.
 function realOf(abs, depth = 0) {
-  if (depth > 8) return abs;
+  // Only a path this system can look up (a C:/ path on a Mac is just text: never resolved against the working folder).
+  if (depth > 8 || (process.platform === 'win32' ? !isAbs(abs) : !abs.startsWith('/'))) return abs;
   try { return slash(fs.realpathSync.native(abs)); } catch {}
   const rest = [];
   let at = abs;
@@ -92,10 +96,20 @@ function realOf(abs, depth = 0) {
   }
   return abs;
 }
+// macOS shows the data volume twice: /System/Volumes/Data/Users/ken is /Users/ken (a firmlink).
+const DATA_VOL = /^\/System\/Volumes\/Data(?=\/|$)/i;
+const undata = (p) => (process.platform === 'win32' ? p : p.replace(DATA_VOL, '') || '/');
+/** The one path every check reads: realpath of the nearest part that exists plus the rest, the data volume's
+ *  second name taken off. */
+export const canonical = (abs) => undata(realOf(undata(slash(abs))));
 // The same path and where it really leads: every rule is checked against both.
 // Windows puts a drive on a /-path (/tmp → D:/tmp) and may change letter case: that's the same path, not a link.
 const samePath = (a, b) => { const k = (p) => (process.platform === 'win32' ? p.replace(/^[a-z]:(?=\/)/i, '').toLowerCase() : p); return k(a) === k(b); };
-const bothOf = (abs) => { const r = realOf(abs); return samePath(r, abs) ? [abs] : [abs, r]; };
+const both = (a, b) => (samePath(a, b) ? [a] : [a, b]);
+/** { abs, real, all }: the path as written, where it really leads, and both (once each). */
+const pathsOf = (p, home) => { const abs = undata(norm(p, home)), real = canonical(abs); return { abs, real, all: both(abs, real) }; };
+const homesOf = (home) => both(slash(home), canonical(slash(home)));
+const hits = (list, all, homes) => all.some((a) => homes.some((h) => ruleHit(list, a, h)));
 
 // Buttons that delete, pay, send or sign out: Sidekick needs the user's yes before clicking one,
 // even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift.
@@ -163,539 +177,59 @@ export function redactArgs(name, args = {}) {
   return args;
 }
 
-/** read_file / list_files / search_files. Returns { level, reason, path }. */
+/** read_file / list_files / search_files. Returns { level, reason, path }: path is where it really leads. */
 export function checkRead(p, home, { recursive = false } = {}) {
-  home = slash(home);
-  const abs = norm(p, home), all = bothOf(abs), hit = (list) => all.some((a) => list.some((re) => re.test(rel(a, home)) || re.test(a)));
-  if (all.some((a) => ruleHit(SECRET, a, home))) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: abs };
-  if (all.some((a) => ruleHit(PRIVATE, a, home))) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: abs };
-  if (recursive && (abs === home || abs === '/' || /^[a-z]:$/i.test(abs) || abs === path.join(home, 'Library') || abs === path.join(home, 'AppData') || /^(\/Users|\/Volumes|\/home|[a-z]:\/Users)$/i.test(abs))) {
-    return { ...verdict(BLOCK, `Searching all of ${p} reaches into other apps' data and sets off macOS privacy prompts. Pick a specific folder, or use Spotlight (mdfind) to find files by name.`), path: abs };
+  const { real, all } = pathsOf(p, home), homes = homesOf(home);
+  if (hits(SECRET, all, homes)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: real };
+  if (hits(PRIVATE, all, homes)) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: real };
+  // The whole home folder, a folder above it (/Users, /) or all of Library: never searched or listed down through.
+  const whole = (a) => a === '/' || /^[a-z]:$/i.test(a) || /^(\/Users|\/Volumes|\/home|[a-z]:\/Users)$/i.test(a)
+    || homes.some((h) => within(h, a) || ['library', 'appdata'].includes(fold(rel(a, h))));
+  if (recursive && all.some(whole)) {
+    return { ...verdict(BLOCK, `Searching all of ${p} reaches into other apps' data and sets off macOS privacy prompts. Pick a specific folder.`), path: real };
   }
-  return { ...verdict(SAFE), path: abs };
+  return { ...verdict(SAFE), path: real };
 }
 
-/** write_file. Existing files need a yes; secrets, startup files and system folders never. `own`: a folder that is
- *  the writer's own (an agent's folder), where overwriting needs no yes; only where the path really leads counts. */
+// Files other programs run or load later (scripts, app bundles, Python's .pth, property lists, workflows): a name
+// part ending in one of these, or starting with "." (dotfiles and dot folders: shell, git, editor and tool settings),
+// is never written without a yes.
+const LOADED = /\.(pth|plist)$/i;
+const riskyParts = (parts) => parts.some((x) => x.startsWith('.') || RUNNABLE.test(x) || LOADED.test(x));
+// The only places a new file is made without a yes.
+const WRITE_ZONES = ['desktop', 'documents', 'downloads'];
+
+/** write_file. Owner: a new file inside ~/Desktop, ~/Documents or ~/Downloads (and in `own`, an agent's own folder),
+ *  with no dot or runnable part, needs no yes; everything else asks every time with the whole real path (overwriting
+ *  too); secrets, startup files, apps and places outside the home folder never. Only where the path really leads
+ *  counts. */
 export function checkWrite(p, home, { exists = false, own = null } = {}) {
-  home = slash(home);
-  const abs = norm(p, home), r = rel(abs, home), all = bothOf(abs);
-  if (all.some((a) => ruleHit(SECRET, a, home) || ruleHit(NO_WRITE, a, home))) {
-    return { ...verdict(BLOCK, `${p} is a protected file (keys, settings, startup scripts or an app), so I won't write to it.`), path: abs };
+  const { real, all } = pathsOf(p, home), homes = homesOf(home);
+  if (hits(SECRET, all, homes) || hits(NO_WRITE, all, homes)) {
+    return { ...verdict(BLOCK, `${p} is a protected file (keys, settings, startup scripts or an app), so I won't write to it.`), path: real };
   }
-  const realHome = realOf(home), lc = (x) => (ciFs ? x.toLowerCase() : x), inside = (a) => [home, realHome].some((h) => lc(a).startsWith(lc(h) + '/')) || /^\/(private\/)?tmp\//i.test(a);
-  if (!all.every(inside)) {
-    return { ...verdict(BLOCK, `I only write files inside your home folder, not ${p}.`), path: abs };
+  const inside = (a) => homes.some((h) => within(a, h) && rel(a, h) !== '') || /^\/(private\/)?tmp\//i.test(a);
+  if (!inside(real)) { // where it really leads
+    return { ...verdict(BLOCK, `I only write files inside your home folder, not ${p}.`), path: real };
   }
-  if (exists && own) {
-    const o = norm(own, home), ro = realOf(o), within = (a) => [o, ro].some((d) => a === d || a.startsWith(d + '/'));
-    if (all.every(within)) return { ...verdict(SAFE), path: abs };
+  const there = exists || fs.existsSync(real);
+  const below = (top) => { const r = rel(real, top); return r !== real && r !== '' ? r.split('/') : null; };
+  if (own) {
+    const parts = below(canonical(norm(own, home)));
+    if (parts && !riskyParts(parts)) return { ...verdict(SAFE), path: real };
   }
-  if (exists) return { ...verdict(ASK, `Overwrite ${r || abs}?`), path: abs, always: true };
-  if (all.some((a) => GIT_ASK.some((re) => re.test(rel(a, home)) || re.test(a)))) return { ...verdict(ASK, `${r || abs} tells git or another tool where its settings are, or which programs to run: write it?`), path: abs, always: true };
-  return { ...verdict(SAFE), path: abs };
+  if (there) return { ...verdict(ASK, `Overwrite ${real}?`), path: real, always: true };
+  const parts = below(homes[homes.length - 1]);
+  if (parts && parts.length >= 2 && WRITE_ZONES.includes(fold(parts[0])) && !riskyParts(parts)) return { ...verdict(SAFE), path: real };
+  return { ...verdict(ASK, `Create ${real}?`), path: real, always: true };
 }
-
-// ---------- shell commands ----------
-
-// Split into simple commands on ; && || | & and newlines, outside quotes. Returns null if quoting is unbalanced.
-export function splitCommand(cmd) {
-  const parts = []; let cur = '', q = null;
-  for (let i = 0; i < cmd.length; i++) {
-    const c = cmd[i];
-    if (q) { cur += c; if (c === q) q = null; else if (c === '\\' && q === '"') cur += cmd[++i] ?? ''; continue; }
-    if (c === '\\') { cur += c + (cmd[++i] ?? ''); continue; }
-    if (c === '"' || c === "'") { q = c; cur += c; continue; }
-    // 2>&1, <&3 and &>file are redirects, not "run in the background".
-    if (c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || (cmd[i + 1] === '>' && cmd[i - 1] !== '&'))) { cur += c; continue; }
-    // >| (write even with noclobber) is a redirect too, not a pipe.
-    if (c === '|' && cmd[i - 1] === '>') { cur += c; continue; }
-    if (c === ';' || c === '\n' || c === '|' || c === '&') {
-      if (cur.trim()) parts.push({ text: cur.trim(), pipeIn: false });
-      cur = '';
-      if ((c === '|' || c === '&') && cmd[i + 1] === c) i++;
-      else if (c === '|') parts.push({ pipe: true });
-      continue;
-    }
-    cur += c;
-  }
-  if (q) return null;
-  if (cur.trim()) parts.push({ text: cur.trim() });
-  const out = [];
-  for (let i = 0; i < parts.length; i++) {
-    if (parts[i].pipe) { if (out.length && parts[i + 1] && !parts[i + 1].pipe) parts[i + 1].pipeIn = true; continue; }
-    out.push(parts[i]);
-  }
-  return out;
-}
-
-// The words a shell would pass on, quotes and backslashes applied: -e'xec' is -exec, ~/.a''ws is ~/.aws, \ls is ls.
-// Every rule reads these, so a spliced spelling meets the same checks as the plain one.
-// cmd.exe has no backslash escapes (C:\Users\ken is a path): set for the length of one classifyCommand call.
-let winSyntax = false;
-function words(s) {
-  const out = [];
-  let cur = '', inWord = false, q = null;
-  const t = String(s ?? '');
-  for (let i = 0; i < t.length; i++) {
-    const c = t[i];
-    if (q === "'") { if (c === "'") q = null; else cur += c; continue; }
-    if (q === '"') {
-      if (c === '"') q = null;
-      else if (c === '\\' && i + 1 < t.length && '"\\$`\n'.includes(t[i + 1])) { if (t[i + 1] !== '\n') cur += t[i + 1]; i++; }
-      else cur += c;
-      continue;
-    }
-    if (c === "'" || c === '"') { q = c; inWord = true; continue; }
-    if (c === '\\' && !winSyntax) { if (i + 1 < t.length) { if (t[i + 1] !== '\n') cur += t[i + 1]; i++; inWord = true; } continue; }
-    if (/\s/.test(c)) { if (inWord) { out.push(cur); cur = ''; inWord = false; } continue; }
-    cur += c; inWord = true;
-  }
-  if (inWord) out.push(cur);
-  return out;
-}
-// Skip env assignments and wrappers to find the program that really runs. `assigns`: it sets environment variables
-// for it (PAGER=, MANPAGER=, GIT_EXTERNAL_DIFF= and the like can make a read-only program run another one).
-function program(ws) {
-  let i = 0, assigns = false;
-  while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) { i++; assigns = true; }
-  while (i < ws.length && ['command', 'builtin', 'exec', 'nohup', 'time', 'nice', 'caffeinate', 'env', 'xargs', 'stdbuf'].includes(path.basename(ws[i]))) {
-    i++; while (i < ws.length && ws[i].startsWith('-')) i++;
-    while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) { i++; assigns = true; }
-  }
-  return { name: slash(ws[i] ?? '').split('/').pop().replace(/\.(exe|com|bat|cmd)$/i, ''), args: ws.slice(i + 1), assigns };
-}
-// "Read-only" programs that still write a file named in their arguments, or run another program they're given.
-// Said why, or null when the arguments are harmless.
-function sideEffect(name, args) {
-  const plain = args.filter((a) => !a.startsWith('-')), flag = (re) => args.some((a) => re.test(a));
-  if (name === 'sort' && flag(/^(-o.*|--output(=.*)?)$/)) return '`sort -o` writes a file.';
-  if (name === 'uniq' && plain.length >= 2) return '`uniq` with two files writes the second one.';
-  if (name === 'xxd' && (flag(/^-r/) || plain.length >= 2)) return '`xxd` here writes a file.';
-  if (name === 'tree' && flag(/^-o/)) return '`tree -o` writes a file.';
-  if (name === 'file' && flag(/^-C$/)) return '`file -C` writes a file.';
-  if ((name === 'less' || name === 'more') && flag(/^(-[oO].*|--log-file(=.*)?|--LOG-FILE(=.*)?)$/)) return '`less` here writes a log file.';
-  if ((name === 'less' || name === 'more') && flag(/^\+/)) return '`less +…` runs a command (+! runs a shell).';
-  if (name === 'man' && flag(/^(-[PHt].*|--pager(=.*)?|--html(=.*)?)$/)) return '`man` here runs another program.';
-  if ((name === 'rg' || name === 'ag') && flag(/^(--pre(-glob)?(=.*)?|--pager(=.*)?|--search-zip|-z)$/)) return `\`${name}\` here runs another program on each file.`;
-  if (name === 'fd' && flag(/^(-x|-X|--exec(-batch)?(=.*)?)$/)) return '`fd` here runs a command on each file.';
-  if (name === 'sysctl' && (flag(/^-w$/) || plain.some((a) => a.includes('=')))) return '`sysctl` here changes system settings.';
-  if (name === 'git' && flag(/^--(output|ext-diff|textconv)(=.*)?$/)) return '`git` here writes a file or runs a diff program.';
-  return null;
-}
-
-const BLOCKED_PROGRAMS = {
-  sudo: 'needs admin rights', doas: 'needs admin rights', su: 'switches user', mkfs: 'erases disks', newfs_apfs: 'erases disks',
-  newfs_hfs: 'erases disks', fdisk: 'edits disk partitions', gpt: 'edits disk partitions', csrutil: 'changes Mac security',
-  nvram: 'changes firmware settings', bless: 'changes how the Mac boots', shutdown: 'shuts the Mac down', reboot: 'restarts the Mac',
-  halt: 'shuts the Mac down', launchctl: 'installs or stops background services', crontab: 'schedules commands to run on their own',
-  tccutil: 'resets privacy permissions', systemsetup: 'changes system settings', dscl: 'edits user accounts', sysadminctl: 'edits user accounts',
-  passwd: 'changes passwords', chflags: 'changes protected file flags', kextload: 'loads kernel code', spctl: 'changes app security checks',
-  srm: 'shreds files', shred: 'shreds files', wipefs: 'erases disks', fsck: 'repairs disks', mount: 'mounts disks', umount: 'unmounts disks',
-  // Windows
-  format: 'erases disks', diskpart: 'edits disks', bcdedit: 'changes how Windows boots', vssadmin: 'deletes backups', wbadmin: 'deletes backups',
-  schtasks: 'schedules commands to run on their own', takeown: 'takes over protected files', runas: 'needs admin rights', cipher: 'can wipe disk space',
-  sc: 'installs or stops services', netsh: 'changes network and firewall settings', setx: 'changes system settings for good',
-  // Linux
-  pkexec: 'needs admin rights', 'systemd-run': 'starts programs as background services', at: 'schedules commands to run on their own',
-  batch: 'schedules commands to run on their own', 'kwallet-query': 'reads your saved passwords',
-};
-const SHELLS = new Set(['powershell', 'pwsh', 'cmd', 'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'python', 'python3', 'node', 'perl', 'ruby', 'php', 'osascript', 'swift', 'deno', 'bun', 'lua']);
-// Read-only programs that are fine to run without asking (paths still checked).
-const READ_ONLY = new Set([
-  'ls', 'cd', 'pwd', 'date', 'cal', 'whoami', 'id', 'uname', 'sw_vers', 'hostname', 'uptime', 'which', 'type', 'whereis', 'echo', 'printf',
-  'cat', 'head', 'tail', 'less', 'more', 'wc', 'file', 'stat', 'du', 'df', 'tree', 'basename', 'dirname', 'realpath', 'readlink',
-  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'find', 'fd', 'mdfind', 'mdls', 'locate', 'sort', 'uniq', 'cut', 'tr', 'column', 'jq', 'diff', 'cmp',
-  'ps', 'pgrep', 'top', 'vm_stat', 'sysctl', 'system_profiler', 'ioreg', 'pmset', 'defaults', 'networksetup', 'scutil', 'ifconfig',
-  'sw_vers', 'arch', 'nproc', 'env', 'printenv', 'true', 'false', 'test', 'seq', 'expr', 'bc', 'md5', 'shasum', 'cksum', 'xxd', 'od',
-  'man', 'tldr', 'git', 'npm', 'node', 'python3', 'python', 'brew', 'cargo', 'rustc', 'go', 'java', 'ruby', 'pip', 'pip3',
-]);
-// For tools that change things depending on the subcommand, these subcommands only look.
-const READ_ONLY_SUB = {
-  // Only the looking forms: `git branch -D`, `git tag -d`, `git remote add` change the repo. diff, show, blame and
-  // log -p can run a program a downloaded repo's own settings name (textconv), so they ask.
-  // Not status, ls-files or describe: they read the working files, and a repo's .gitattributes can name a filter
-  // program its .git/config runs on them (no setting turns every filter off), so those ask.
-  git: /^(rev-parse|shortlog|config\s+--get\b|stash\s+list|--version|-v)\b|^log\b(?!.*\s(-p|-u|--patch|-L|--ext-diff|--textconv)\b)|^branch(\s+(-a|-r|-v|-vv|--list|--all|--remotes|--show-current|--merged|--no-merged|--contains))*\s*$|^tag(\s+(-l|--list)(\s+[^-\s]\S*)?)?\s*$|^remote(\s+-v)?\s*$|^remote\s+(show|get-url)\s+\S+\s*$/,
-  // Exactly these, and never with fix (npm audit fix changes packages).
-  npm: /^(?!.*(^|\s)(--)?fix(\s|=|$))(ls|list|view|info|outdated|audit|--version|-v|-h|help|config\s+get|root|prefix|bin|search|explain|why)(\s|$)/,
-  // scutil only reads with these (scutil --set renames the Mac).
-  scutil: /^(--get|-r|--dns|--proxy|--nwi|--nc\s+list)(\s|$)/,
-  brew: /^(list|ls|info|search|outdated|deps|leaves|config|doctor|--version|--prefix|home)\b/,
-  cargo: /^(--version|-V|tree|metadata|search)\b/, pip: /^(list|show|freeze|--version|search)\b/, pip3: /^(list|show|freeze|--version)\b/,
-  defaults: /^(read|domains|find|read-type)\b/, networksetup: /^-(list|get)/, pmset: /^-g\b/,
-  node: /^(-v|--version)$/, python3: /^(-V|--version)$/, python: /^(-V|--version)$/, ruby: /^(-v|--version)$/, go: /^(version|env)\b/,
-  java: /^(-version|--version)$/, rustc: /^(-V|--version)$/, env: /^$/, printenv: /^$/,
-};
-
-function checkSimple(text, pipeIn, home, cwd = home, opts = {}) {
-  const ws = words(text);
-  const prog = program(ws), args = prog.args;
-  // Path checks see relative arguments from the folder a cd moved to.
-  const at = (a) => (cwd !== home && !a.startsWith('-') && !/^[~/$]/.test(a) && !/^[a-z]:[\\/]/i.test(a) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(a) ? path.join(cwd, slash(a)) : a);
-  const pathArgs = args.map(at);
-  const name = prog.name.replace(/^(mkfs|newfs|fsck)[._].*$/, '$1').toLowerCase();
-  const joined = args.join(' ');
-  if (!name) return verdict(SAFE);
-  if (BLOCKED_PROGRAMS[name]) return verdict(BLOCK, `\`${name}\` ${BLOCKED_PROGRAMS[name]}.`);
-  if (name === 'diskutil' && /\b(erase\w*|partition\w*|zero\w*|secureErase|reformat|apfs\s+(delete|erase)\w*|unmount\w*|eject)\b/i.test(joined)) return verdict(BLOCK, '`diskutil` would erase or change a disk.');
-  if (name === 'dd' && /\bof=/.test(joined)) return verdict(BLOCK, '`dd` writing to a file or disk can wipe it.');
-  if (name === 'security' && /\b(find-(generic|internet)-password|dump-keychain|export|delete-keychain|unlock-keychain|set-keychain|add-trusted-cert|authorizationdb)\b/.test(joined)) return verdict(BLOCK, '`security` would read or change your saved passwords and certificates.');
-  if (name === 'reg' && /^(delete|add|import|restore|load|copy)\b/i.test(joined)) return verdict(BLOCK, '`reg` would change the Windows registry.');
-  // Linux: the desktop's keyring, background services and the D-Bus calls that reach either.
-  if (name === 'secret-tool') return verdict(BLOCK, '`secret-tool` reads or changes your saved passwords.');
-  if (name === 'systemctl' && /\b(enable|disable|reenable|preset|start|stop|restart|reload|try-restart|kill|mask|unmask|link|edit|revert|set-default|isolate|daemon-reload|reboot|poweroff|halt|suspend|hibernate|set-environment|import-environment)\b/.test(joined)) return verdict(BLOCK, '`systemctl` here installs, starts or stops background services.');
-  if (['gdbus', 'dbus-send', 'busctl', 'qdbus', 'qdbus6'].includes(name) && /org\.freedesktop\.(secrets|impl\.portal\.Secret)|org\.kde\.kwalletd|org\.gnome\.keyring|org\.freedesktop\.systemd1/i.test(joined)) return verdict(BLOCK, `\`${name}\` here would reach your saved passwords or background services.`);
-  if ((name === 'powershell' || name === 'pwsh') && /(-e(nc(odedcommand)?)?\s|iex\b|invoke-expression|downloadstring|downloadfile|invoke-webrequest|\biwr\b|start-bitstransfer|set-executionpolicy|remove-item\b.*-recurse)/i.test(joined)) return verdict(BLOCK, 'that PowerShell command downloads and runs code, or deletes whole folders.');
-  if (['rd', 'rmdir', 'del', 'erase'].includes(name) && /\/s\b/i.test(joined)) {
-    const t = args.filter((a) => !a.startsWith('/'));
-    if (!t.length || t.some((x) => { const a = norm(x.replace(/[\\/]\*(\.\*)?$/, ''), home); return a === home || /^[a-z]:\/?$/i.test(a) || path.dirname(a) === path.dirname(home) || /\/(Desktop|Documents|Downloads)$/i.test(a); })) return verdict(BLOCK, 'that would delete a whole folder like your home, Desktop or Documents.');
-    return verdict(ASK, 'This deletes folders and everything inside them.');
-  }
-  if (pipeIn && SHELLS.has(name)) return verdict(BLOCK, `piping into \`${name}\` runs code that hasn't been checked (like a downloaded script).`);
-  if (SHELLS.has(name) && /(^|\s)-(c|e)\b/.test(joined) && !READ_ONLY_SUB[name]?.test(joined)) {
-    const inner = joined.replace(/^.*?-(c|e)\s+/, '');
-    const v = classifyCommand(inner, home, { cwd, own: opts.own });
-    return v.level === SAFE ? verdict(ASK) : v;
-  }
-  if (['eval', 'source', '.'].includes(name)) return verdict(ASK);
-  if ((name === 'killall' || name === 'pkill') && /\b(WindowServer|loginwindow|launchd|kernel_task|Finder|Dock|SystemUIServer|coreaudiod)\b/i.test(joined)) return verdict(BLOCK, `stopping ${joined} would break the Mac until a restart.`);
-  if (name === 'kill' && /(^|\s)(-\d+\s+)?(1|-1)$/.test(joined)) return verdict(BLOCK, '`kill` on every process would crash the Mac.');
-  if (name === 'rm' || name === 'rmdir' || name === 'unlink' || name === 'trash') {
-    const recursive = /(^|\s)-[a-zA-Z]*[rR]|--recursive/.test(joined);
-    const targets = args.filter((a) => !a.startsWith('-'));
-    const broad = targets.some((t) => {
-      const abs = /[*?]/.test(t) && path.dirname(t) === '.' ? home : norm(t.replace(/\/\*$/, ''), home);
-      return abs === '/' || abs === home || path.dirname(abs) === '/' || abs === path.join(home, 'Library') || abs === path.join(home, 'Desktop') || abs === path.join(home, 'Documents') || abs === path.join(home, 'Downloads') || /^\$(HOME|\{HOME\})\/?$/.test(t) || t === '..' || t === '../' || t === '~/' || t === '*';
-    });
-    if (broad || (recursive && targets.some((t) => t.includes('*')))) return verdict(BLOCK, '`rm` on a whole folder like your home, Desktop or Documents would delete too much.');
-    return verdict(ASK, recursive ? 'This deletes folders and everything inside them.' : 'This deletes files.');
-  }
-  if ((name === 'chmod' || name === 'chown') && /(^|\s)-[a-zA-Z]*R/.test(joined)) {
-    const t = args.filter((a) => !a.startsWith('-')).slice(1);
-    if (t.some((x) => { const a = norm(x, home); return a === '/' || a === home || path.dirname(a) === '/'; })) return verdict(BLOCK, `changing permissions on all of ${t.join(' ')} could lock you out of your files.`);
-  }
-  if (name === 'mv' && args.filter((a) => !a.startsWith('-')).some((t) => { const a = norm(t, home); return a === home || a === '/' || path.dirname(a) === '/'; })) return verdict(BLOCK, '`mv` of your whole home folder or a system folder would break the Mac.');
-  if (name === 'git' && /\bpush\b.*(\s--force\b|\s-f\b|\s\+)/.test(joined)) return verdict(ASK, 'Force-pushing can erase work on the remote.');
-  if (name === 'npm' && /\b(publish|unpublish|deprecate|owner|token|adduser|login)\b/.test(joined)) return verdict(ASK);
-  // Walking the whole home folder (find ~, grep -r ~, du ~) trips macOS privacy prompts for Music, Photos, iCloud and other apps.
-  if (['find', 'fd', 'grep', 'egrep', 'rg', 'ag', 'du', 'tree', 'ls'].includes(name)) {
-    const recursive = name === 'find' || name === 'fd' || name === 'rg' || name === 'ag' || name === 'tree' || name === 'du' || /(^|\s)-[a-zA-Z]*[rR]/.test(joined);
-    for (const a of pathArgs.filter((x) => !x.startsWith('-'))) {
-      if (/^\$(HOME|\{HOME\})/.test(a)) { const v = checkRead(a.replace(/^\$\{?HOME\}?/, '~'), home, { recursive }); if (v.level !== SAFE) return verdict(v.level, v.reason); continue; }
-      if (!/^[~/.]/.test(a)) continue;
-      const v = checkRead(a, home, { recursive });
-      if (v.level !== SAFE) return verdict(v.level, v.reason);
-    }
-    if (name === 'find' && /\s-(delete|exec|execdir|ok|okdir|fprint\w*|fls)\b/.test(' ' + joined)) return verdict(ASK, '`find` here also changes, writes or runs things.');
-  }
-  // Any path that looks like a secret, in any command, means no: also where a symlink leads, and every file a
-  // wildcard would match (~/.ss*/id_* matches no rule as written, but the shell turns it into ~/.ssh/id_rsa).
-  for (const a of pathArgs) {
-    if (!/[/~.]/.test(a) || a.startsWith('-') && !a.includes('=')) continue;
-    const t = a.includes('=') ? a.split('=').slice(1).join('=') : a;
-    if (/^[a-z]+:\/\//i.test(t)) continue;
-    const isSecret = (x) => bothOf(norm(x, home)).some((n) => ruleHit(SECRET, n, home)) || SECRET.some((re) => re.test(x));
-    if (isSecret(t)) return verdict(BLOCK, `${t} holds passwords or keys, so I never touch it.`);
-    if (/[*?[]/.test(t)) {
-      const hits = globHits(t, home, cwd);
-      if (hits === null) return verdict(ASK, `I can't tell which files ${t} would match.`);
-      if (hits.some(isSecret)) return verdict(BLOCK, `${t} matches files with passwords or keys, so I never touch it.`);
-    }
-  }
-  // Making folders is like write_file making a new file: fine where writing is, a yes elsewhere, never where it's blocked.
-  if (name === 'mkdir') {
-    for (const a of pathArgs.filter((x) => !x.startsWith('-'))) {
-      const w = checkWrite(a, home, { own: opts.own });
-      if (w.level === BLOCK) return w.path.startsWith(slash(home) + '/') || /^\/(private\/)?tmp\//.test(w.path) ? verdict(BLOCK, w.reason) : verdict(ASK, w.reason);
-    }
-    return verdict(SAFE);
-  }
-  // sed -n '120,140p' file (or /word/p) only prints lines: read-only. Any other sed script (s///, w, e, -i) still asks.
-  if (name === 'sed') {
-    const flags = args.filter((a) => a.startsWith('-')), rest = args.filter((a) => !a.startsWith('-'));
-    if (flags.length && flags.every((f) => f === '-n') && rest.length >= 1 && /^((\d+|\$)(,(\d+|\$))?|\/[^/;{}]*\/)p$/.test(rest[0])) return verdict(SAFE);
-    return verdict(ASK);
-  }
-  if (READ_ONLY.has(name)) {
-    const sub = READ_ONLY_SUB[name];
-    if (sub && !sub.test(joined.trim())) return verdict(ASK);
-    const side = sideEffect(name, args);
-    if (side) return verdict(ASK, side);
-    if (prog.assigns) return verdict(ASK, 'Setting environment variables can change what that program runs.');
-    return verdict(SAFE);
-  }
-  return verdict(ASK);
-}
-
-// The files a wildcard argument would match (at most a few thousand), or null when that can't be worked out
-// (** over whole trees, or no glob support): then it asks.
-function globHits(t, home, cwd) {
-  if (/\*\*/.test(t) || typeof fs.globSync !== 'function') return null;
-  const pattern = t.startsWith('~/') ? path.join(slash(home), t.slice(2)) : t;
-  try {
-    const hits = fs.globSync(pattern, { cwd: slash(cwd ?? home) }).slice(0, 5000).map((h) => (isAbs(slash(h)) ? slash(h) : path.join(slash(cwd ?? home), slash(h))));
-    return hits;
-  } catch { return null; }
-}
-
-// Files a command writes with > >> &>, quotes removed; /dev/null and 2>&1 style copies left out.
-// A whole shell word after > or >>: "$HOME"/.zshrc is one word (quotes glued to the rest), with its quotes taken off.
-// Backslashes are applied like quotes (~/.zsh\rc is ~/.zshrc), so a spliced spelling meets the protected-file rules.
-const redirectTargets = (text) => [...text.matchAll(/(?:^|[^>])>{1,2}\|?(?!&)\s*((?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^\s;&|<>"'\\])+)/g)]
-  .map((m) => words(m[1]).join(' ')).filter((t) => t && t !== '/dev/null');
-
-/** run_command. SAFE runs, ASK needs the user's yes, BLOCK never runs. `exists(path)`, if given, lets a redirect
- *  that makes a new file run like write_file making one; without it every redirect asks. */
-// "for i in 1 2 3; do echo $i > n$i.txt; done" (also with seq 1 N): a plain loop that only writes new files.
-// It's run like the same commands written out one by one (so each file is checked like write_file making a new
-// one); anything else in a loop still asks.
-function unrollLoop(s) {
-  const m = s.match(/^((?:(?:cd|mkdir(?:\s+-p)?)\s+[^;&|`$()]+?\s*&&\s*)*)for\s+([a-z_]\w*)\s+in\s+((?:[\w.-]+\s*)+|\$\(\s*seq\s+(\d+)\s+(\d+)\s*\))\s*;\s*do\s+([^;`$()]*?(?:\$\{?\2\}?[^;`$()]*?)*)\s*;?\s*done((?:\s*&&\s*[^;`$()|]+)?)$/);
-  if (!m) return null;
-  const [, pre, v, list, a, b, body, post] = m;
-  const vals = a != null ? (Number(b) - Number(a) >= 0 && Number(b) - Number(a) < 100 ? Array.from({ length: Number(b) - Number(a) + 1 }, (_, i) => String(Number(a) + i)) : null) : list.trim().split(/\s+/);
-  if (!vals || vals.length > 100 || !/^(echo|printf)\b/.test(body.trim()) || !/>/.test(body)) return null;
-  return pre + vals.map((x) => body.replace(new RegExp(`\\$\\{?${v}\\}?(?!\\w)`, 'g'), x)).join(' && ') + post;
-}
-
-// The files a copying or writing program writes to, checked like write_file: the reason it's refused, or null.
-// A destination as the shell will see it: quotes gone, $HOME and ${HOME} as ~, relative ones from the folder it runs in.
-const destPath = (d, cwd) => {
-  const t = String(d ?? '').replace(/["']/g, '').replace(/^\$\{?HOME\}?(?=\/|$)/, '~');
-  return /^~/.test(t) || isAbs(slash(t)) ? t : path.join(cwd, slash(t));
-};
-// Protected places in the home folder. A folder's contents copied or unpacked into the home folder itself, or into a
-// folder above one of these (~/Library above ~/Library/LaunchAgents), could drop something there: that is blocked.
-// Any other folder (a project, a backup) is an ordinary ask: startup-file names only matter in the home folder.
-const HOME_PLACES = ['.ssh', '.gnupg', '.aws', '.config/fish', '.config/autostart', '.config/gh', '.kube', '.docker', '.gg', '.tauri',
-  'Library/LaunchAgents', 'Library/LaunchDaemons', 'Library/StartupItems', 'Library/Preferences', 'Library/Keychains', 'Library/Cookies',
-  'Library/Application Support/com.apple', 'HydraAgent/Skills', 'HydraAgent/Data', 'Roamies/Skills', 'Roamies/Data', 'Applications'];
-function protectedTree(dir, home) {
-  const abs = norm(dir, home), r = rel(abs, home);
-  if (abs === slash(home) || r === '') return true; // into ~ itself: startup files, keys, everything
-  if (isAbs(r)) return false; // outside home: write_file's own rules (and an ask)
-  const lr = r.toLowerCase();
-  return HOME_PLACES.some((p) => { const lp = p.toLowerCase(); return lp === lr || lp.startsWith(lr + '/') || lr.startsWith(lp + '/'); });
-}
-
-/** The files a copying, unpacking or writing program writes to, checked like write_file: the reason it's refused, or
- *  null. One list of destinations per program, then one check. */
-function writeTargets(text, home, cwd) {
-  const prog = program(words(text)), name = prog.name.toLowerCase(), args = prog.args;
-  const plain = args.filter((a) => !a.startsWith('-'));
-  const opt = (short, long) => {
-    const out = [];
-    args.forEach((a, i) => {
-      if (short && a === short && args[i + 1]) out.push(args[i + 1]);
-      else if (short && a.startsWith(short) && a.length > short.length && !a.startsWith('--')) out.push(a.slice(short.length));
-      else if (long && a.startsWith(`${long}=`)) out.push(a.slice(long.length + 1));
-      else if (long && a === long && args[i + 1]) out.push(args[i + 1]);
-    });
-    return out;
-  };
-  let dests = [], trees = [];
-  const recursive = /(^|\s)-[a-zA-Z]*[rRa]|--recursive|--archive/.test(args.join(' '));
-  const inPlace = (a) => a.some((x) => /^--in-place(=|$)/.test(x) || /^-[a-zA-Z0-9]*i/.test(x));
-  if (['cp', 'ditto', 'mv', 'install', 'rsync', 'ln', 'scp'].includes(name)) {
-    const target = opt('-t', '--target-directory');
-    const srcs = target.length ? plain : plain.slice(0, -1);
-    const d = target[0] ?? (plain.length >= 2 ? plain[plain.length - 1] : null);
-    if (d) {
-      // The destination, and each source's name inside it (when it is a folder).
-      dests = [d, ...srcs.map((src) => path.join(d, path.basename(slash(src))))];
-      // A folder's contents (ditto, -R/-a, rsync, "src/." or "src/") land inside the destination's tree.
-      if (name === 'ditto' || recursive || srcs.some((x) => /\/\.?$/.test(x))) trees.push(d);
-    }
-  } else if (['tee', 'touch', 'truncate'].includes(name)) dests = plain;
-  else if (name === 'git' && /^clone\b/.test(args.join(' '))) { const rest = plain.slice(1); if (rest.length >= 2) { dests = [rest[rest.length - 1]]; trees = dests; } }
-  else if (name === 'git') dests = [...opt(null, '--output')];
-  else if (name === 'curl') { dests = [...opt('-o', '--output')]; trees = [...opt(null, '--output-dir')]; }
-  else if (name === 'wget') { dests = [...opt('-O', '--output-document')]; trees = [...opt('-P', '--directory-prefix')]; }
-  // Unpacking with no folder given unpacks where the command runs.
-  else if (['tar', 'bsdtar', 'gtar'].includes(name) && (/^-?[a-wyzA-Z]*x[a-zA-Z]*$/.test(args[0] ?? '') || args.some((x) => /^-[a-zA-Z]*x[a-zA-Z]*$|^--(extract|get)$/.test(x)))) { const c = opt('-C', '--directory'); trees = c.length ? c : [cwd]; }
-  else if (name === 'unzip' || name === 'ditto' && args.includes('-x')) { const d = opt('-d', null); trees = d.length ? d : [cwd]; }
-  else if (name === '7z' || name === '7za' || name === '7zz') { const o = opt('-o', null); trees = o.length ? o : [cwd]; }
-  else if (name === 'cpio') trees = [cwd];
-  else if (name === 'sed' || name === 'perl') { if (inPlace(args)) dests = args.some((a) => a === '-e' || /^-[a-zA-Z0-9]*e$/.test(a)) ? plain.filter((x, i2) => !/^-[a-zA-Z0-9]*e$/.test(args[args.indexOf(x) - 1] ?? '')) : plain.slice(1); }
-  else if (name === 'patch') dests = [...plain.slice(0, 1), ...opt('-o', '--output')];
-  for (const d of dests) {
-    const w = checkWrite(destPath(d, cwd), home, {});
-    if (w.level === BLOCK && w.reason && !/only write files inside your home/.test(w.reason)) return w.reason;
-  }
-  for (const d of trees) if (protectedTree(destPath(d, cwd), home)) return `${d} holds protected places (startup files, keys, apps or skills), so I won't copy or unpack a folder into it.`;
-  return null;
-}
-
-// Owner's rule: every deletion of anything is confirmed, no exceptions; kill, quit, force quit, send, pay, overwrite and
-// move to the Trash always ask too (with a reason that says so).
-// Says why, or null.
-const ALWAYS_PROGRAMS = {
-  rm: 'This deletes files.', rmdir: 'This deletes folders.', unlink: 'This deletes files.', trash: 'This moves files to the Trash.',
-  del: 'This deletes files.', erase: 'This deletes files.', rd: 'This deletes folders.', truncate: 'This empties files.',
-  kill: 'This stops a running program.', pkill: 'This stops running apps.', killall: 'This stops running apps.',
-  osascript: 'AppleScript can quit apps, send messages or delete things.', mail: 'This sends email.', mailx: 'This sends email.', sendmail: 'This sends email.',
-};
-function alwaysAsk(text, home, cwd) {
-  const prog = program(words(text)), args = prog.args, joined = args.join(' ');
-  const name = prog.name.toLowerCase();
-  if (ALWAYS_PROGRAMS[name]) return ALWAYS_PROGRAMS[name];
-  // A shell running a command line: what that line does.
-  if (SHELLS.has(name) && /(^|\s)-(c|e)\b/.test(joined)) {
-    for (const p of splitCommand(joined.replace(/^.*?-(c|e)\s+/, '')) ?? []) { const why = alwaysAsk(p.text, home, cwd); if (why) return why; }
-  }
-  const plain = args.filter((a) => !a.startsWith('-')), abs = (t) => norm(/^~/.test(t) || isAbs(slash(t)) ? t : path.join(cwd, slash(t)), home);
-  if (['mv', 'cp', 'ditto', 'rsync', 'install', 'ln'].includes(name)) {
-    if (plain.some((t) => /(^|\/)\.Trash(\/|$)/.test(slash(t)))) return 'This moves files to the Trash.';
-    if (name === 'rsync' && /--(delete|remove-source-files)/.test(joined)) return 'This deletes files.';
-    if (name === 'mv' && plain.length >= 2) {
-      // mv takes its sources away; onto a file that's there, it replaces it.
-      const dest = abs(plain[plain.length - 1]);
-      const there = (f) => { try { return fs.statSync(f); } catch { return null; } };
-      const d = there(dest);
-      if (d && !d.isDirectory()) return 'This replaces a file that is already there.';
-      if (d && plain.slice(0, -1).some((src) => there(path.join(dest, path.basename(slash(src)))))) return 'This replaces a file that is already there.';
-    }
-    if (name !== 'mv' && plain.length >= 2) {
-      const dest = abs(plain[plain.length - 1]);
-      try { if (!fs.statSync(dest).isDirectory()) return 'This overwrites a file that is already there.'; } catch {}
-    }
-  }
-  if (name === 'find' && /(^|\s)-(delete|exec|execdir|ok|okdir)\b/.test(joined) && /-delete|\brm\b|\bmv\b|\bunlink\b/.test(joined)) return 'This deletes files.';
-  if (name === 'git' && (/\bpush\b.*(\s--force\b|\s-f\b|\s\+)/.test(' ' + joined) || /^(reset\s+.*--hard|clean\b|checkout\s+(--\s|\.)|restore\b|branch\s+.*-D\b|stash\s+(drop|clear)\b)/.test(joined))) return 'This can erase work.';
-  if ((name === 'sed' || name === 'perl') && /(^|\s)-[a-zA-Z]*i/.test(joined)) return 'This overwrites files in place.';
-  if (['curl', 'wget'].includes(name) && /(^|\s)(-X\s*(POST|PUT|PATCH|DELETE)|-d|--data\S*|-F|--form\S*|-T|--upload-file|--json|--post-(data|file))\b/i.test(' ' + joined)) return 'This sends data.';
-  if (['npm', 'pnpm', 'yarn'].includes(name) && /^(publish|unpublish)\b/.test(joined)) return 'This publishes a package.';
-  if (['brew', 'npm', 'pnpm', 'yarn', 'pip', 'pip3'].includes(name) && /^(uninstall|remove|rm|un)\b/.test(joined)) return 'This deletes installed software.';
-  return null;
-}
-
-// ---------- the only commands that run without a yes ----------
-// They never touch a shell: the command is read by a strict lexer that takes only plain words (letters, digits and
-// . _ - / ~ = , : @ +), split into a pipeline on " | ", and each program is a bare name from this map, run by its
-// absolute path with execFile and its own argv (no PATH lookup, no zsh). Each has an allowlist of flags; grouped short
-// flags are split and each letter checked; long options must match exactly. Anything else asks.
-const PLAIN = /^[A-Za-z0-9._\-\/~=,:@+]+$/;
-const num = (x) => /^\d+$/.test(x);
-const flagsOnly = (letters) => (a) => a.startsWith('-') && a.length > 1 && !a.startsWith('--') && [...a.slice(1)].every((c) => letters.includes(c));
-// Checks a tool's arguments: options from an allowlist, then operands (paths or words).
-const SAFE_TOOLS = {
-  ls: { bin: '/bin/ls', args: (a) => a.every((x) => !x.startsWith('-') || flagsOnly('laAhR1tSr')(x)) },
-  cat: { bin: '/bin/cat', args: (a) => a.every((x) => !x.startsWith('-') || x === '-n') },
-  head: { bin: '/usr/bin/head', args: (a) => countArgs(a) },
-  tail: { bin: '/usr/bin/tail', args: (a) => countArgs(a) },
-  wc: { bin: '/usr/bin/wc', args: (a) => a.every((x) => !x.startsWith('-') || flagsOnly('lwcm')(x)) },
-  stat: { bin: '/usr/bin/stat', args: (a) => a.every((x) => !x.startsWith('-')) },
-  file: { bin: '/usr/bin/file', args: (a) => a.every((x) => !x.startsWith('-') || flagsOnly('bi')(x)) },
-  du: { bin: '/usr/bin/du', args: (a) => { for (let i = 0; i < a.length; i++) { if (a[i] === '-d') { if (!num(a[++i] ?? '')) return false; } else if (a[i].startsWith('-') && !flagsOnly('sh')(a[i])) return false; } return true; } },
-  df: { bin: '/bin/df', args: (a) => a.every((x) => !x.startsWith('-') || x === '-h') },
-  pwd: { bin: '/bin/pwd', args: (a) => a.length === 0 },
-  echo: { bin: '/bin/echo', args: (a) => a.every((x) => !x.startsWith('-')) },
-  date: { bin: '/bin/date', args: (a) => a.length === 0 || (a.length === 1 && a[0].startsWith('+')) },
-  which: { bin: '/usr/bin/which', args: (a) => a.length >= 1 && a.every((x) => !x.startsWith('-')) },
-  whoami: { bin: '/usr/bin/whoami', args: (a) => a.length === 0 },
-  uname: { bin: '/usr/bin/uname', args: (a) => a.length === 0 || (a.length === 1 && a[0] === '-a') },
-  sw_vers: { bin: '/usr/bin/sw_vers', args: (a) => a.length === 0 },
-  sort: { bin: '/usr/bin/sort', args: (a) => { for (let i = 0; i < a.length; i++) { if (a[i] === '-k' || a[i] === '-t') { if (!a[++i]) return false; } else if (/^-[kt]./.test(a[i])) continue; else if (a[i].startsWith('-') && !flagsOnly('rnuf')(a[i])) return false; } return true; } },
-  uniq: { bin: '/usr/bin/uniq', args: (a) => a.filter((x) => !x.startsWith('-')).length <= 1 && a.every((x) => !x.startsWith('-') || flagsOnly('cdui')(x)) },
-  cut: { bin: '/usr/bin/cut', args: (a) => { for (let i = 0; i < a.length; i++) { if (['-f', '-d', '-c'].includes(a[i])) { if (!a[++i]) return false; } else if (/^-[fdc]./.test(a[i])) continue; else if (a[i].startsWith('-')) return false; } return true; } },
-  find: { bin: '/usr/bin/find', args: (a) => {
-    let i = 0;
-    while (i < a.length && !a[i].startsWith('-')) i++; // the paths first
-    const withValue = new Set(['-name', '-iname', '-type', '-maxdepth', '-mindepth', '-size', '-mtime', '-newer', '-path']);
-    for (; i < a.length; i++) { if (withValue.has(a[i])) { if (!a[++i]) return false; } else if (a[i] !== '-print') return false; }
-    return true;
-  } },
-  grep: { bin: '/usr/bin/grep', args: (a) => { const ops = a.filter((x) => !x.startsWith('-')); return ops.length >= 1 && a.every((x) => !x.startsWith('-') || flagsOnly('inrlcvwEFHh')(x)); } },
-  scutil: { bin: '/usr/sbin/scutil', args: (a) => a.length === 2 && a[0] === '--get' && /^[A-Za-z]+$/.test(a[1]) },
-};
-function countArgs(a) {
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] === '-n' || a[i] === '-c') { if (!num(a[++i] ?? '')) return false; }
-    else if (/^-[nc]\d+$/.test(a[i]) || /^-\d+$/.test(a[i])) continue;
-    else if (a[i].startsWith('-')) return false;
-  }
-  return true;
-}
-/** The argv lists to run (absolute program paths, ~ expanded) when a command may run without a yes, else null. */
-export function strictPlan(cmd, home) {
-  const t = String(cmd ?? '').trim();
-  if (!t || /[^\x20-\x7e]/.test(t)) return null; // control characters, unicode lookalikes
-  const plan = [];
-  for (const seg of t.split(' | ')) {
-    const ws = seg.trim().split(/ +/);
-    const [name, ...args] = ws;
-    // date's +FORMAT may hold % (no shell reads it); every other word is plain.
-    if (ws.some((w, k) => !PLAIN.test(w) && !(name === 'date' && k === 1 && /^\+[A-Za-z0-9%._\-\/:,]+$/.test(w)))) return null;
-    const tool = Object.hasOwn(SAFE_TOOLS, name) ? SAFE_TOOLS[name] : null;
-    if (!tool || !tool.args(args) || !fs.existsSync(tool.bin)) return null;
-    // ~ and ~/x as a shell would expand them; ~user and ~+ forms aren't plain enough.
-    const argv = [];
-    for (const x of args) { if (x === '~' || x.startsWith('~/')) argv.push(path.join(slash(home), x.slice(1))); else if (x.includes('~')) return null; else argv.push(x); }
-    plan.push([tool.bin, ...argv]);
-  }
-  return plan;
-}
-
-/** `cwd`: the folder the command starts in (default home); `own`: the runner's own folder (see checkWrite). */
-export function classifyCommand(cmd, home, opts = {}) {
-  winSyntax = /^[a-z]:[\\/]/i.test(String(home ?? ''));
-  try { return classifyInner(cmd, home, opts); } finally { winSyntax = false; }
-}
-function classifyInner(cmd, home, { exists, cwd: start = null, own = null } = {}) {
-  home = slash(home);
-  const s0 = String(cmd ?? '').trim();
-  const s = unrollLoop(s0) ?? s0;
-  if (!s) return verdict(BLOCK, 'That command is empty.');
-  if (/:\s*\(\s*\)\s*\{.*:\s*\|\s*:.*\}/.test(s)) return verdict(BLOCK, 'That is a fork bomb.');
-  if (/\b(curl|wget|fetch)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da|k|fi)?sh\b/.test(s) || /\bbase64\s+(-d|--decode|-D)\b[^|]*\|\s*(ba|z)?sh\b/.test(s)) return verdict(BLOCK, 'Downloading a script and running it straight away skips every check.');
-  const parts = splitCommand(s);
-  if (!parts) return verdict(ASK, "I couldn't read that command clearly.");
-  let level = SAFE, reason = '', always = false;
-  // The folder each part runs in, so relative paths after a cd are checked where they really point. null: unknown.
-  let cwd = start ? norm(start, home) : home;
-  for (const p of parts) {
-    let v = checkSimple(p.text, p.pipeIn, home, cwd ?? home, { own });
-    if (cwd == null && v.level === SAFE) v = verdict(ASK, "I can't tell which folder that runs in.");
-    if (v.level !== BLOCK) { const why = alwaysAsk(p.text, home, cwd ?? home); if (why) { always = true; if (v.level === SAFE) v = verdict(ASK, why); } }
-    // Where a copy, move, link, clone or tee writes: a protected place (startup items, shell files, keys, Hydra's own
-    // skills and data, app bundles) is never written, whichever program does it.
-    if (v.level !== BLOCK) { const w = writeTargets(p.text, home, cwd ?? home); if (w) return verdict(BLOCK, w); }
-    for (const r of redirectTargets(p.text)) {
-      const t = destPath(r, cwd ?? home);
-      const w = checkWrite(t, home, { exists: !exists || !!exists(norm(t, home)), own });
-      if (w.level === BLOCK) return verdict(BLOCK, w.reason);
-      if (w.always) always = true; // into a file that's already there (>> too: it changes the file)
-      if ((w.level === ASK || cwd == null || /[$`*?{]/.test(r)) && v.level === SAFE) v = verdict(ASK, w.reason);
-    }
-    const ws = words(p.text);
-    if (ws[0] === 'cd') {
-      const t = ws[1];
-      if (!t || t === '~') cwd = home;
-      else if (cwd == null || /[$`*?]/.test(t) || t === '-') cwd = null;
-      else cwd = norm(/^~/.test(t) || isAbs(slash(t)) ? t : path.join(cwd, slash(t)), home);
-    }
-    if (v.level === BLOCK) return v;
-    if (v.level === ASK && level === SAFE) { level = ASK; reason = v.reason; }
-  }
-  // Command substitution and background jobs change things in ways the parts don't show.
-  if (level === SAFE && (/\$\(|`/.test(s) || /(^|\s)&\s*$/.test(s))) level = ASK;
-  // The last gate: only a few plain reading tools run without a yes, and only in forms that can't run other code,
-  // read a repo's or project's own settings, or write anything. Everything else asks (git, npm, brew, pip, cargo,
-  // make, interpreters, curl, open…), whatever the rules above made of it.
-  if (level === SAFE && !strictPlan(s0, home)) { level = ASK; reason = reason || 'Only plain reading runs without a yes.'; }
-  // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ASK asks the
-  // owner, every time (there is no setting that skips it); `always` stays on the verdict for the code that reads it.
-  if (level === ASK) return { ...verdict(level, reason), always: true };
-  return verdict(level, reason);
-}
-
 
 // ---------- opening things and fetching pages ----------
 
 const RUNNABLE = /\.(app|command|sh|bash|zsh|tool|terminal|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|jar|py|rb|pl|js|mjs|exe|bat|cmd|ps1|shortcut|mobileconfig|kext|plugin|prefPane|saver|desktop|appimage|deb|rpm|run|flatpakref|flatpak|snap)\/?$/i;
-// Where installed apps live: opening one there just starts it. Linux lists them as .desktop files.
-const APP_DIRS = ['/Applications/', '/System/Applications/', '/System/Library/CoreServices/', '/usr/share/applications/', '/usr/local/share/applications/', '/var/lib/flatpak/exports/share/applications/', '/var/lib/snapd/desktop/applications/'];
+// Where installed apps live: opening one there just starts it. Linux lists them as .desktop files. Safari and a few
+// other Apple apps really live in a cryptex (/Applications/Safari.app leads there).
+const APP_DIRS = ['/Applications/', '/System/Applications/', '/System/Volumes/Preboot/Cryptexes/App/System/Applications/', '/System/Library/CoreServices/', '/usr/share/applications/', '/usr/local/share/applications/', '/var/lib/flatpak/exports/share/applications/', '/var/lib/snapd/desktop/applications/'];
 
 /** open: websites and mail, documents and folders, and apps by name. Not scripts, installers or odd links. */
 export function checkOpen(target, home, { executable = false } = {}) {
@@ -712,9 +246,12 @@ export function checkOpen(target, home, { executable = false } = {}) {
     const abs = norm(t, home);
     const r = checkRead(abs, home);
     if (r.level === BLOCK) return verdict(BLOCK, r.reason);
-    const inApps = APP_DIRS.some((d) => abs.startsWith(d));
-    if ((RUNNABLE.test(abs) || executable) && !inApps) return verdict(BLOCK, `${t} is a script, installer or app that would run, so I won't open it. Open it yourself if you trust it.`);
-    if (!inApps && SYSTEM_ROOTS.some((d) => abs === d || abs.startsWith(d + '/'))) return verdict(BLOCK, `${t} is a system file, so I won't open it.`);
+    // Judged where it really leads: a link named notes.txt can lead to an app or a script.
+    const all = both(abs, r.path), homes = homesOf(home);
+    const inApps = all.every((a) => APP_DIRS.some((d) => a.startsWith(d)));
+    if ((all.some((a) => RUNNABLE.test(a)) || executable) && !inApps) return verdict(BLOCK, `${t} is a script, installer or app that would run, so I won't open it. Open it yourself if you trust it.`);
+    const mine = (a) => homes.some((h) => within(a, h)) || /^\/(private\/)?tmp\//i.test(a);
+    if (!inApps && all.some((a) => !mine(a) && SYSTEM_ROOTS.some((d) => a === d || a.startsWith(d + '/')))) return verdict(BLOCK, `${t} is a system file, so I won't open it.`);
     return verdict(SAFE);
   }
   if (/[/\\]|\.\./.test(t)) return verdict(BLOCK, `"${t}" isn't an app name.`);
@@ -826,6 +363,8 @@ export function checkSkill(text) {
 // ---------- MCP connections ----------
 
 export const MCP_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
+// Programs that run whatever code they're given: never a connection's command.
+const SHELLS = ['powershell', 'pwsh', 'cmd', 'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'python', 'python3', 'node', 'perl', 'ruby', 'php', 'osascript', 'swift', 'deno', 'bun', 'lua'];
 const MCP_NO_RUN = new Set([...SHELLS, 'curl', 'wget', 'sudo', 'su', 'doas', 'env', 'xargs', 'eval', 'exec', 'nohup', 'open', 'start', 'rm', 'osascript']);
 const INLINE_CODE = new Set(['-c', '-e', '--eval', '-p', '--print', '-command', '-encodedcommand', '/c', '/k']);
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[?::1\]?)$/i;
@@ -851,7 +390,7 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
   const prog = slash(command).split('/').pop().toLowerCase().replace(/\.(exe|cmd|bat|ps1)$/, '');
   if (MCP_NO_RUN.has(prog)) return verdict(BLOCK, `${prog} can run anything, so it can't start a connection. Use the server's own command (npx, uvx, docker or its program).`);
   if (all.slice(1).some((a) => INLINE_CODE.has(a.toLowerCase()))) return verdict(BLOCK, 'Inline code in the arguments is blocked; use the server\'s own package or program.');
-  return verdict(ASK, `Run ${all.join(' ').slice(0, 300)}`);
+  return verdict(ASK, `Run ${all.join(' ')}`);
 }
 
 // Verbs that act on the world: a tool named like this always asks, whatever the server says about it.

@@ -170,8 +170,10 @@ console.log('mcp ok');
   assert.equal(await T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '{"q":"a"}' }), 'ran search_notes {"q":"a"}');
   assert.equal(asked.length, 0, 'read-only: no ask');
   answers = [null];
-  await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'delete_note', args: '{}' }), /Ken said no/);
+  const long = JSON.stringify({ id: 'n1', note: 'x'.repeat(400), alsoDelete: 'everything' });
+  await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'delete_note', args: long }), /Ken said no/);
   assert.equal(asked.length, 1, 'destructive: asked');
+  assert.equal(asked[0].placeholder, `notes: delete_note ${long} It can change, send or delete things.`, 'the whole call and why it asks (sixth review: it was cut at 160)');
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: '[1]' }), /JSON object/);
   await assert.rejects(T.use_connection.execute({ server: 'notes', tool: 'search_notes', args: 'nope' }), /JSON object/);
 
