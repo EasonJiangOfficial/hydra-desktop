@@ -86,7 +86,7 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
 {
   assert.deepEqual(newInputs({ inputs: [{ seq: 3, text: ' c ' }, { seq: 1, text: 'a' }, { seq: 2, text: '' }, { seq: 'x', text: 'b' }, { seq: 3, text: 'dup' }] }, 1), [{ seq: 3, text: 'c' }]);
   assert.deepEqual(newInputs(null), []);
-  assert.ok(relayEventsAnswerSchema.safeParse({ inputs: [{ seq: 1, text: 'and Friday too' }] }).success);
+  assert.ok(relayEventsAnswerSchema.safeParse({ ok: true, status: 'claimed', inputs: [{ seq: 1, text: 'and Friday too' }] }).success, 'the web\'s answer shape');
   assert.ok(relayBatchSchema.safeParse({ turnId: randomUUID(), claimId: randomUUID(), events: [], inputsSeen: 2 }).success, 'inputsSeen is part of the batch');
   const turnId = randomUUID(), claimId = randomUUID();
   const posts = [];
@@ -335,7 +335,7 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.match(side, /state === 'listening' && busy && m\.mode === 'wake'\) \{ addOnTake = true;/, 'the phrase while thinking adds on');
   assert.match(side, /if \(addOnTake\) \{ addOnTake = false; if \(addOn\(text\)\) return; \}/);
   assert.match(side, /const into = addOnTo\(text, \{ busy, addInput: \(t\) => agent\?\.addInput\?\.\(t\), enqueue \}\);/, 'addOnTo (behavior in voiceturn.test.mjs)');
-  assert.match(side, /onInput\(\(text\) => agentRun\.addInput\(`\$\{INPUT_PREFIX\}\$\{text\}`\)\);/, 'relay additions into the session');
+  assert.match(side, /await relaySession\(\{\n\s+agent: agentRun, text: said\.text, h,/, 'relay additions into the session (relaySession: behavior in relayup.test.mjs)');
   assert.match(side, /if \(m\.via === 'barge'\) noteInterrupted\(\);/, 'barge-in notes what was heard');
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');
   assert.match(side, /const noFiller = startFiller\(\{ voice: !intro && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \}\);/, 'a filler after 1.1 s, never muted (startFiller: behavior in voiceturn.test.mjs)');

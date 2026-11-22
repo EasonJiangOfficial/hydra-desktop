@@ -8,7 +8,7 @@ import { CONFIG_PATH, DATA_DIR, OLDER_DATA, ROAMIES_DIR } from './datadir.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
 import { DANGER, HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
-import { INPUT_PREFIX, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, toolFilter, turnPrompt } from './relay.mjs';
+import { askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from './relay.mjs';
 import { brainFor, CLAP_LEVELS, cleanWakePhrase, createSettingsWatch, hydraModelPick, wakePhraseFor } from './agentsettings.mjs';
 import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
@@ -3183,8 +3183,12 @@ const resultText = (r) => {
 // The events go back to Hydra in the agent SSE contract's shapes. A gated Hydra call sends confirm and waits for his
 // answer on any surface; a Mac-side ask (a Mac tool, a risky click, a connector send) becomes a server approval the
 // same way. Never a local Allow bubble, never an auto-yes. A routine gets only its tool groups (hydra, mac, gmail,
-// calendar: routine.tools on the server).
-async function relayTurn(turn, { emit, signal, approve, alive = async () => true, onInput = () => {} }) {
+// calendar: routine.tools on the server). A sub-turn (the server brain asking this Mac for the owner on his phone, W5
+// contract 7) gets this Mac's tools only (allowedTools ["mac"]), under the same owner rule: every ask is a relay
+// approval he answers on the phone with the full target, one too long to show whole is refused. Its words go back to
+// the brain, never into the thread.
+async function relayTurn(turn, h) {
+  const { emit, signal, approve, alive = async () => true } = h;
   await refreshAuth({ cached: true });
   let cc = null;
   try { cc = await claudeCodeRoute('anthropic'); } catch (e) { throw Object.assign(new Error(String(e?.message ?? e)), { code: 'mac_claude' }); }
@@ -3200,7 +3204,8 @@ async function relayTurn(turn, { emit, signal, approve, alive = async () => true
       return inRelay(() => t.execute(a, ctx));
     } })),
     ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive }).filter((t) => may('hydra', t.name)),
-    showTool({ onUi: (action) => emit({ type: 'ui', action }) }),
+    // A sub-turn's events never reach a window (the brain tells the owner), so it moves none.
+    ...(isSubturn(turn) ? [] : [showTool({ onUi: (action) => emit({ type: 'ui', action }) })]),
   ];
   const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
   // Hydra's model and effort (agent_settings): effort_routine for a routine, effort_live for the rest.
@@ -3211,26 +3216,22 @@ async function relayTurn(turn, { emit, signal, approve, alive = async () => true
     gate: (name, input, s) => inRelay(() => connectorGate(name, input, s, may)),
   });
   const names = new Map();
-  let usage;
-  logLine('relay_request', { surface: turn.surface, chars: said.said.length, history: said.history, model, thinking });
+  logLine('relay_request', { surface: turn.surface, chars: said.said.length, history: said.history, model, thinking, sub: isSubturn(turn) });
   // Only the final answer is the reply, without emote tags (W5 contract 7).
   const reply = new FinalText((t) => emit({ type: 'text', delta: t }));
   try {
-    const stream = agentRun.prompt(said.text);
-    // What the owner adds on the web or the phone while this runs goes into the same session (W5 contract 2).
-    onInput((text) => agentRun.addInput(`${INPUT_PREFIX}${text}`));
-    for await (const e of agentEvents(stream)) {
-      if (e.type === 'text_delta') reply.push(e.text);
-      else if (e.type === 'turn_end') reply.turnEnd(e.stopReason);
-      else if (e.type === 'tool_call_start') { reply.tool(); names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
-      else if (e.type === 'tool_call_end') { const n = names.get(e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? resultText(e.result).slice(0, 160) : words(n) }); }
-      else if (e.type === 'agent_done') usage = e.totalUsage;
-    }
+    // What the owner adds on the web or the phone while this runs goes into the same session (W5 contract 2), and a
+    // done Hydra holds for his words is answered in it too (relaySession: relay.mjs, which sends the usage snake_case).
+    await relaySession({
+      agent: agentRun, text: said.text, h, onRound: () => reply.flush(),
+      onEvent: (e) => {
+        if (e.type === 'text_delta') reply.push(e.text);
+        else if (e.type === 'turn_end') reply.turnEnd(e.stopReason);
+        else if (e.type === 'tool_call_start') { reply.tool(); names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
+        else if (e.type === 'tool_call_end') { const n = names.get(e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? resultText(e.result).slice(0, 160) : words(n) }); }
+      },
+    });
   } finally { asking.live = false; }
-  if (signal.aborted) throw new Error('Stopped.');
-  reply.flush();
-  // relay.mjs sends the usage the way the server takes it (snake_case).
-  emit({ type: 'done', ...(usage ? { usage } : {}) });
 }
 // The bridge's promise calls (hydra.rs): setup, pair, signInClaude, unpair. The answer goes back through the push
 // channel with the call's id; it never carries the device key or the pairing code.

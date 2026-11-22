@@ -8,7 +8,7 @@
 //   that id. Never an auto-yes.
 // - showTool: the agent's way to move the Hydra window (the server's UiAction shape).
 import { z } from 'zod';
-import { LIMITS, PANEL_PARAMS, SCOPES, uiActionSchema } from './relayschema.mjs';
+import { LIMITS, PANEL_PARAMS, SCOPES, scopeSchema, uiActionSchema } from './relayschema.mjs';
 
 export const HYDRA_ORIGIN = 'https://hydra-olive-one.vercel.app';
 export const PREFIX = 'hydra_';
@@ -153,21 +153,21 @@ export function createHydraTools({ api, log = () => {} }) {
 
 // The shared limits on what the Mac may show (W3 contract-fixes 2): relayschema.mjs is the server's
 // src/lib/agent/relay-schema.ts, copied verbatim.
-export { PANEL_PARAMS, SCOPES, uiActionSchema };
+export { PANEL_PARAMS, SCOPES, scopeSchema, uiActionSchema };
 
 /** The agent moves the Hydra window: a page, a panel, the scope, or a highlight (the server's UiAction shape). */
 export function showTool({ onUi }) {
   return {
     name: 'hydra_show',
-    description: `Show something in the Hydra app window: navigate to a page (href is a path like /money or /planning?day=2026-11-21), open a panel (param one of ${PANEL_PARAMS.join(', ')}; value its id), switch the scope (all, personal or ugc), or highlight an element (a CSS selector).`,
+    description: `Show something in the Hydra app window: navigate to a page (href is a path like /money or /planning?day=2026-11-21), open a panel (param one of ${PANEL_PARAMS.join(', ')}; value its id), switch the scope (all, personal, ugc, or any business's slug like acme-llc), or highlight an element (a CSS selector).`,
     parameters: z.object({
       kind: z.enum(['navigate', 'openPanel', 'setScope', 'highlight']),
       href: z.string().max(LIMITS.href).optional(), param: z.enum(PANEL_PARAMS).optional(), value: z.string().max(LIMITS.panelValue).optional(),
-      scope: z.enum(SCOPES).optional(), selector: z.string().max(LIMITS.selector).optional(),
+      scope: scopeSchema.optional(), selector: z.string().max(LIMITS.selector).optional(),
     }),
     execute: async (a) => {
       const action = toUiAction(a);
-      if (!action) throw new Error('That is not something the Hydra window can show. navigate needs a path starting with / (no spaces), openPanel a param and an id of letters, digits, _ or -, setScope a scope, highlight a selector up to 200 characters.');
+      if (!action) throw new Error('That is not something the Hydra window can show. navigate needs a path starting with / (no spaces), openPanel a param and an id of letters, digits, _ or -, setScope all or an entity slug (lowercase letters, digits and -), highlight a selector up to 200 characters.');
       onUi(action);
       return 'Shown.';
     },

@@ -296,7 +296,9 @@ await assert.rejects(ui.execute({ kind: 'navigate', href: 'https://evil.com' }))
 await assert.rejects(ui.execute({ kind: 'openPanel', param: 'tx', value: 'a b' }));
 assert.deepEqual(shown, [{ kind: 'navigate', href: '/money?tx=1' }]);
 assert.deepEqual(toUiAction({ kind: 'setScope', scope: 'ugc' }), { kind: 'setScope', scope: 'ugc' });
-assert.equal(toUiAction({ kind: 'setScope', scope: 'work' }), null);
+// W6: the scope is all or any entity slug (businesses the owner adds); anything else is refused.
+assert.deepEqual(toUiAction({ kind: 'setScope', scope: 'work' }), { kind: 'setScope', scope: 'work' });
+for (const bad of ['Work Co', '-x', 'a'.repeat(41), '', 'ugc/../x']) assert.equal(toUiAction({ kind: 'setScope', scope: bad }), null, bad);
 assert.equal(toUiAction({ kind: 'openPanel', param: 'wallet', value: 'a' }), null);
 
 // The key is never logged.

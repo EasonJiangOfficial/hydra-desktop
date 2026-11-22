@@ -18,13 +18,17 @@ export const LIMITS = Object.freeze({
   selector: 200,
   href: 500,
   batch: 500,
+  instruction: 4000,
+  inputText: 8000,
 });
 
 /** The URL params the shared kit DetailDrawer reads (DESIGN.md section 7). */
 export const panelParamSchema = z.enum(["tx", "day", "account", "task", "goal", "deal", "category", "routine", "taxline"]);
 export const PANEL_PARAMS = panelParamSchema.options;
-export const scopeSchema = z.enum(["all", "personal", "ugc"]);
-export const SCOPES = scopeSchema.options;
+/** The scope: "all" or any entity slug (businesses the owner adds, 0170_businesses.sql). */
+export const scopeSchema = z.string().regex(/^(all|[a-z0-9][a-z0-9-]{0,39})$/, "all, or an entity slug");
+/** The seeded scopes. Any entity slug also passes scopeSchema. */
+export const SCOPES = Object.freeze(["all", "personal", "ugc"]);
 
 const PATH_BASE = "https://hydra.invalid";
 
@@ -87,15 +91,28 @@ export const relayEventSchema = z.discriminatedUnion("type", [
  * an empty list is the heartbeat that renews the 60 s lease.
  */
 export const relayBatchSchema = z
-  .object({ turnId: z.uuid(), claimId: z.uuid(), seq: z.number().int().min(1).optional(), events: z.array(relayEventSchema).max(LIMITS.batch), inputsSeen: z.number().int().min(0).optional() })
+  .object({
+    turnId: z.uuid(),
+    claimId: z.uuid(),
+    seq: z.number().int().min(1).optional(),
+    events: z.array(relayEventSchema).max(LIMITS.batch),
+    // 0191: the highest input seq the device pushed into its session (optional; older devices leave it out).
+    inputsSeen: z.number().int().min(0).optional(),
+  })
   .refine((b) => b.events.every((e, i) => (e.type !== "done" && e.type !== "error") || i === b.events.length - 1), { message: "done or error must be the last event" });
 
 /**
- * The POST /api/agent/relay/events answer (W5 contract 2, additive): inputs the owner added while the turn runs
- * (POST /api/agent/turn/append), the ones the device has not acknowledged yet (inputsSeen in its next post).
+ * 0191, add-on while thinking: what the owner said or typed while the turn ran. Every events answer (batches and
+ * heartbeats) carries `inputs` the device has not acknowledged; it pushes each into the running session as an
+ * extra user message prefixed ADDED_PREFIX, and sends `inputsSeen` (the highest seq) in its next post. A done sent
+ * while some wait past its inputsSeen is held: the answer says "claimed" with them; it answers them, then sends done again.
  */
-export const relayInputSchema = z.object({ seq: z.number().int().min(1), text: z.string().min(1).max(8000) });
-export const relayEventsAnswerSchema = z.object({ inputs: z.array(relayInputSchema).optional() });
+export const ADDED_PREFIX = "(added while you were working) ";
+export const relayInputSchema = z.object({ seq: z.number().int().min(1), text: z.string().min(1).max(LIMITS.inputText) });
+/** POST /api/agent/relay/events answer. `inputs` is new and optional: an older server leaves it out. */
+export const relayEventsAnswerSchema = z.object({ ok: z.literal(true), status: z.string(), inputs: z.array(relayInputSchema).optional() });
+/** POST /api/agent/turn/append body (owner session): words added to the turn in flight. */
+export const appendInputSchema = z.object({ turnId: z.uuid(), text: z.string().trim().min(1).max(LIMITS.inputText) });
 
 /** POST /api/agent/relay/approval body: an ask the Mac would show locally becomes the owner's approval. */
 export const relayApprovalSchema = z
@@ -116,3 +133,18 @@ export const localTurnSchema = z.object({
   threadId: z.uuid().optional(),
   at: z.iso.datetime({ offset: true }).optional(),
 });
+
+/**
+ * POST /api/agent/relay/subturn body (the server brain only; W5 contract section 7): the brain asks
+ * the Mac to act inside the turn it holds under claimId. Answers 201 {subTurnId}. Only a Mac claims a
+ * sub-turn: its /relay/next turn carries parentTurnId and allowedTools ["mac"]. No Mac online: it is
+ * closed at once and its result says "Your Mac is offline.".
+ */
+export const relaySubturnSchema = z.object({ turnId: z.uuid(), claimId: z.uuid(), instruction: z.string().trim().min(1).max(LIMITS.instruction) });
+
+/**
+ * GET /api/agent/relay/subturn?id= answer: the brain polls until status is done, error or expired and
+ * uses text as the tool result (the Mac's words; on error or expiry, its words so far and the reason).
+ */
+export const subturnStatusSchema = z.enum(["queued", "claimed", "done", "error", "expired"]);
+export const subturnResultSchema = z.object({ status: subturnStatusSchema, text: z.string() });
