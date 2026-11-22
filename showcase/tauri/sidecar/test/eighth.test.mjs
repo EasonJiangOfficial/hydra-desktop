@@ -157,14 +157,20 @@ console.log(JSON.stringify(o));
   reset(); set({ whole: 'panel', step: 1 }); nextTurn();
   const long = `com.example.agent-${'x'.repeat(200)}.plist`;
   const plan = { target: 'TextEdit', steps: [{ do: 'click_text', text: 'Save…' }, { do: 'key', key: 'cmd+shift+g' }, { do: 'type', text: '~/Lib' }, { do: 'key', key: 'tab' }, { do: 'fill', field: 'Save As:', text: long }, { do: 'click_text', text: 'Save' }] };
+  // Owner's rule: the whole plan is asked first, every step in full; a no runs nothing.
   await assert.rejects(T('act_in_app').execute(plan, {}), /Test said no/);
-  assert.ok(asks[0].startsWith('A Save or Open panel is up in TextEdit'), asks[0]);
-  for (const line of ['1. press cmd+shift+g', '2. type "~/Lib"', '3. press tab', `4. fill "Save As:" with "${long}"`, '5. click "Save"']) assert.ok(asks[0].includes(line), `the question shows ${line}`);
-  assert.ok(!asks[0].includes('Save…"\n'), 'the step already done is not in it');
+  assert.ok(asks[0].startsWith('In TextEdit, every step'), asks[0]);
+  for (const line of ['1. click "Save…"', '2. press cmd+shift+g', '3. type "~/Lib"', '4. press tab', `5. fill "Save As:" with "${long}"`, '6. click "Save"']) assert.ok(asks[0].includes(line), `the question shows ${line}`);
+  assert.equal(calls().filter((c) => c[0] === 'act').length, 0, 'nothing ran');
   reset(); answer = 'Allow';
   assert.match(await T('act_in_app').execute(plan, {}), /In TextEdit/);
+  assert.equal(asks.length, 2);
+  assert.ok(asks[1].startsWith('A Save or Open panel is up in TextEdit'), asks[1]);
+  for (const line of ['1. press cmd+shift+g', '2. type "~/Lib"', '3. press tab', `4. fill "Save As:" with "${long}"`, '5. click "Save"']) assert.ok(asks[1].includes(line), `the panel question shows ${line}`);
+  assert.ok(!asks[1].includes('Save…"\n'), 'the step already done is not in it');
   const sent = JSON.parse(calls().filter((c) => c[0] === 'act').at(-1)[1]);
-  assert.deepEqual(sent.wholeOk, ['panel']);
+  assert.deepEqual(sent.wholeOk, ['plan', 'panel']);
+  assert.equal(sent.planApp, 'TextEdit');
   assert.equal(sent.steps.length, 5, 'from the step the panel was found at');
   assert.equal(stepsText([{ do: 'type', text: 'a"b' }]), '1. type "a\\"b"');
 

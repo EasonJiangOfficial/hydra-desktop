@@ -299,7 +299,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   let lastRead = null; // { win, controls } from the latest read_window, to catch ids that went stale
   // Bumped for every new request: what was seen before it may be another page, tab or app by now.
   let turn = 0;
-  let typedSoFar = { turn: -1, text: '', ok: new Set() }; // what act_in_app typed in this request, joined (V8-4)
+  let typedSoFar = { turn: -1, text: '' }; // what act_in_app typed in this request, joined (V8-4)
   async function shotPoint(x, y) {
     const problem = shotProblem(lastShot, turn);
     if (problem) throw new Error(problem);
@@ -354,7 +354,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const t = String(target || 'front');
     const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
     const [res, all] = await read().catch(async (err) => {
-      if (t === 'front' || !/No matching window/.test(String(err?.message ?? err)) || !(await launchApp(t, hands))) throw err;
+      if (t === 'front' || !/No matching window/.test(String(err?.message ?? err))) throw err;
+      // Opening an app isn't a plain read: it asks first (owner's rule, DESIGN.md "Mac actions").
+      if (!(await confirm(`Open ${t} to read its window? It isn't open now.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+      if (!(await launchApp(t, hands))) throw err;
       return read();
     });
     await windowShows(res.window, ctx);
@@ -687,7 +690,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         const steps = src.text != null ? [{ do: 'fill', field: src.text, text: m.text }]
           : src.id != null ? [{ do: 'click', id: m.at.live }, { do: 'type', text: m.text }]
             : [{ do: 'click_at', x: m.at.rect[0] + m.at.rect[2] / 2, y: m.at.rect[1] + m.at.rect[3] / 2, global: true }, { do: 'type', text: m.text }];
-        await hands('act', JSON.stringify({ steps, ...app }));
+        // Typing is a Mac action: asked every time, with the real app and the whole text (owner's rule).
+        const where = await hands('locate', app.app ? `app:${app.app}` : 'front').then((r) => r?.window?.app ?? null, () => null);
+        if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`))) throw new Error(`${userName} said no, so nothing was typed.`);
+        const r = await hands('act', JSON.stringify({ steps, ...app, wholeOk: ['plan'], planApp: where ?? app.app ?? '' }));
+        if (r?.needsConfirm) throw new Error(`${r.why} Nothing more was typed; use act_in_app for that.`);
         if (lastShot) lastShot.used = true;
       }
     }
@@ -858,7 +865,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       },
       {
         name: 'act_in_app',
-        description: "Do things in another app: click, fill forms, pick from dropdowns and date pickers, scroll, press keys. Steps run in order: put a whole task in one call. {do:'click_text', text}: a link, button or tab by its visible words (no read_window needed). {do:'fill', field, text}: one text field by its label, placeholder or id; replaces its text and checks it took (never click a label and type). {do:'choose', field, option}: an option in a dropdown, menu, type-to-search box or picker, however long the list (never scroll a list yourself). {do:'hover', text, near} (or id, or x, y): rests the pointer to show hidden controls (a ⋯ menu), then click_text what appears, in the same call. {do:'scroll', direction, amount, text or id}: only for content that loads as you scroll; to_end: true keeps going until a feed stops loading (things already on the page need no scrolling: click_text, fill and draw find them). {do:'click', id}; {do:'key', key} ('return', 'tab', 'escape'); {do:'type', text} only with the cursor already in a field; {do:'click_at', x, y} screenshot pixels, last resort; {do:'wait', seconds}. near: words from one item (its author, a post's first words) when many controls look alike (a Reply under every post). Dates: fill them as the page writes them (10/30/2026); if a calendar opens, choose the month and year, then click_text the day. Web addresses: use open, not the address bar; to search a site, open its search URL (youtube.com/results?search_query=…) unless asked to use its box (then fill it and press return). The result shows the window after the steps, with fresh ids and values: check it there, not with read_window. Every item on a long page: to_end if it loads more, one read_window, then one call doing every item with near; never survey a page by scrolling and screenshots. Never pay, send or delete unless asked for exactly that; pointing at a button isn't a request to click it. Delete, pay, send and sign-out clicks ask the user themselves, so when asked to click one, call this straight away instead of asking.",
+        description: "Do things in another app: click, fill forms, pick from dropdowns and date pickers, scroll, press keys. Steps run in order: put a whole task in one call. {do:'click_text', text}: a link, button or tab by its visible words (no read_window needed). {do:'fill', field, text}: one text field by its label, placeholder or id; replaces its text and checks it took (never click a label and type). {do:'choose', field, option}: an option in a dropdown, menu, type-to-search box or picker, however long the list (never scroll a list yourself). {do:'hover', text, near} (or id, or x, y): rests the pointer to show hidden controls (a ⋯ menu), then click_text what appears, in the same call. {do:'scroll', direction, amount, text or id}: only for content that loads as you scroll; to_end: true keeps going until a feed stops loading (things already on the page need no scrolling: click_text, fill and draw find them). {do:'click', id}; {do:'key', key} ('return', 'tab', 'escape'); {do:'type', text} only with the cursor already in a field; {do:'click_at', x, y} screenshot pixels, last resort; {do:'wait', seconds}. near: words from one item (its author, a post's first words) when many controls look alike (a Reply under every post). Dates: fill them as the page writes them (10/30/2026); if a calendar opens, choose the month and year, then click_text the day. Web addresses: use open, not the address bar; to search a site, open its search URL (youtube.com/results?search_query=…) unless asked to use its box (then fill it and press return). The result shows the window after the steps, with fresh ids and values: check it there, not with read_window. Every item on a long page: to_end if it loads more, one read_window, then one call doing every item with near; never survey a page by scrolling and screenshots. Never pay, send or delete unless asked for exactly that; pointing at a button isn't a request to click it. Every call asks the user first, showing them every step in full, so put the whole task in one call and call it straight away instead of asking.",
         parameters: z.object({
           target: z.string().optional(),
           steps: z.array(z.object({
@@ -899,17 +906,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             else if (live && i < upTo && s.id != null) { const c = live(s.id); mapped.push({ ...s, id: c.id, label: c.label }); }
             else mapped.push(s);
           }
-          // Delete, pay, send, sign out: ask first, whatever the request was. The helper refuses these clicks without it.
           const appName = sameApp && lastRead.app ? lastRead.app : asked;
-          // A paste puts in the clipboard's text: checked like typing, and shown in a whole-plan question (V9-6).
+          // A paste puts in the clipboard's text: checked like typing, and shown in the question (V9-6).
           const clipboard = mapped.some((s) => s.do === 'key' && isPasteKey(s.key)) ? await Promise.resolve().then(readClipboard).catch(() => null) : undefined;
+          // What each step needs said in the question: a click that could delete, pay, send or sign out, a key that quits,
+          // deletes or sends, a hidden path typed, a paste of what can't be read.
+          const notes = [];
           for (const s of mapped) {
-            // What it types is checked first: no file: or other odd links, no secret paths, hidden ones with a yes (F2).
-            // Key steps type too: characters pressed one by one, and cmd+v pastes the clipboard (V9-6).
+            // What it types is checked first: no file: or other odd links, no secret paths (F2). Key steps type too:
+            // characters pressed one by one, and cmd+v pastes the clipboard (V9-6).
             let typed = ['type', 'fill', 'set'].includes(s.do) ? s.text : s.do === 'choose' ? s.option : null;
             if (s.do === 'key') {
               if (isPasteKey(s.key)) {
-                if (clipboard == null && !(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It pastes what is on the clipboard, which I can't read.`, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+                if (clipboard == null) notes.push(`Step ${mapped.indexOf(s) + 1} pastes what is on the clipboard, which I can't read.`);
                 typed = clipboard ?? '';
               } else {
                 const ch = keyChar(s.key);
@@ -920,38 +929,32 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             }
             if (typed != null) {
               // What this request typed so far is checked joined with it too: "~/" then ".ssh/id_rsa" is one path
-              // (eighth review V8-4). A path said yes to isn't asked about again in this request; the join goes on.
-              if (typedSoFar.turn !== turn) typedSoFar = { turn, text: '', ok: new Set() };
+              // (eighth review V8-4).
+              if (typedSoFar.turn !== turn) typedSoFar = { turn, text: '' };
               const joined = typedSoFar.text + typed;
               let tv = checkTyped(typed, HOME);
               const jv = checkTyped(joined, HOME);
               if (jv.level === BLOCK || (jv.level === ASK && tv.level === SAFE)) tv = jv;
               if (tv.level === BLOCK) throw new Error(`Blocked for safety: ${tv.reason} Nothing ran.`);
-              if (tv.level === ASK && !typedSoFar.ok.has(tv.reason)) {
-                if (!(await confirm(tv.reason, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
-                typedSoFar.ok.add(tv.reason);
-              }
+              if (tv.level === ASK && !notes.includes(tv.reason)) notes.push(tv.reason);
               typedSoFar.text = joined.slice(-4096);
             }
             const label = s.do === 'click_text' ? s.text : s.do === 'click' ? s.label : s.do === 'choose' ? s.option : null;
-            // Every risky click asks on its own (owner: delete, send, pay, trash and quit always ask). The yes is for this
-            // label: the helper checks what it really clicks against it and asks again if it differs.
-            if (label && isRiskyClick(label)) {
-              const where = appName === 'front' ? '' : ` in ${appName}`;
-              if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send, quit or sign out.`, ctx))) {
-                throw new Error(`${userName} said no, so I didn't click "${label}" (nothing after it ran either).`);
-              }
-              s.confirmed = true; s.confirmedLabel = label;
-            }
+            // Named in the question too; the helper still stops at each one and asks again with what it really hits.
+            if (label && isRiskyClick(label)) notes.push(`"${label}" could delete, pay, send, quit or sign out.`);
             const keyDoes = s.do === 'key' ? riskyKey(s.key) : null;
-            if (keyDoes) {
-              if (!(await confirm(`Press ${s.key}${appName === 'front' ? '' : ` in ${appName}`}? It ${keyDoes}.`, ctx))) throw new Error(`${userName} said no, so I didn't press ${s.key} (nothing after it ran either).`);
-              s.confirmed = true; s.confirmedLabel = s.key;
-            }
-            if (label && s.do === 'click') s.shown = label; // named in a whole-plan question; the helper ignores it
+            if (keyDoes) notes.push(`${s.key} ${keyDoes}.`);
+            if (label && s.do === 'click') s.shown = label; // named in the question; the helper ignores it
             delete s.label;
           }
-          const plan = { steps: mapped, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
+          // Owner's rule (DESIGN.md "Mac actions"): every plan asks, every time, with the real app and every step in
+          // full (typed text whole, what a paste puts in). One yes covers exactly these steps in that app; the helper
+          // refuses a plan without it, or in another app, and still stops at each risky step for its own yes.
+          const where = await hands('locate', spec).then((r) => r?.window?.app ?? null, () => null);
+          const inWhat = where ?? (appName === 'front' ? 'the app in front' : appName);
+          const question = `In ${inWhat}, every step I'd take:\n${stepsText(mapped, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`;
+          if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+          const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
           const act = async () => {
@@ -969,6 +972,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 }
                 plan.docOk = [...(plan.docOk ?? []), String(r.document)];
                 plan.steps = plan.steps.slice(r.step);
+                r = await hands('act', JSON.stringify(plan));
+                continue;
+              }
+              // The helper's own backstop: no yes for the whole plan in this app yet (a retry in an app just opened, or
+              // another one came forward). Asked again with that app's real name.
+              if (r.whole === 'plan') {
+                const left = plan.steps.slice(r.step);
+                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}`, ctx))) {
+                  throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${before.join(', ')})` : ''}. Nothing after it ran.`);
+                }
+                plan.wholeOk = [...(plan.wholeOk ?? []).filter((x) => x !== 'plan'), 'plan'];
+                plan.planApp = r.app;
+                plan.steps = left;
                 r = await hands('act', JSON.stringify(plan));
                 continue;
               }
@@ -998,13 +1014,16 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             return before.length && Array.isArray(r.done) ? { ...r, done: [...before, ...r.done] } : r;
           };
           // A retry acts somewhere else (the app just opened, or another window): no yes carries over to it.
-          const unconfirm = () => { plan.steps = plan.steps.map(({ confirmed, confirmedLabel, ...st }) => st); delete plan.wholeOk; };
+          const unconfirm = () => { plan.steps = plan.steps.map(({ confirmed, confirmedLabel, ...st }) => st); delete plan.wholeOk; delete plan.planApp; };
           let res;
           try {
             try { res = await act(); }
             catch (err) {
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
-              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { unconfirm(); res = await act(); await windowShows(res.window, ctx); return finish(res); }
+              if (plan.app && /No matching window/.test(String(err?.message ?? err))) {
+                if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
+                if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); await windowShows(res.window, ctx); return finish(res); }
+              }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
               if (!plan.window || !/No matching window/.test(String(err?.message ?? err))) throw err;
               delete plan.window;
@@ -1040,6 +1059,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         if (what !== 'switch' && !allowActions()) throw new Error(actionsOff);
         if (what === 'arrange' && !layout) throw new Error('arrange needs a layout: left, right, top, bottom, full or center.');
         const spec = { do: what === 'switch' ? 'activate' : what, ...(app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
+        // Owner's rule (DESIGN.md "Mac actions"): every app action asks, naming the real app.
+        const name = app ?? (await hands('front').catch(() => null))?.app ?? 'the app in front';
+        const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
+        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
         agentChangesScreen();
         let res = await hands('manage', JSON.stringify(spec));
         if (res.needsConfirm) {
@@ -1110,7 +1133,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     {
-      name: 'write_file', description: "Create or overwrite a text file (missing folders are made). A new file in ~/Desktop, ~/Documents or ~/Downloads needs no yes; anywhere else, overwriting, scripts and dotfiles ask the user first. Several files: one call each, in the same turn.",
+      name: 'write_file', description: "Create or overwrite a text file (missing folders are made). It asks the user first, every time, naming the file. Several files: one call each, in the same turn.",
       parameters: z.object({ path: z.string(), content: z.string() }), executionMode: 'sequential',
       execute: async ({ path: p, content }, ctx) => {
         if (!allowActions()) throw new Error(actionsOff);
@@ -1119,7 +1142,8 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const exists = await fs.lstat(expand(p)).then(() => true, () => false);
         const v = checkWrite(p, HOME, { exists, own });
         const f = allowed(v);
-        if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
+        // Owner's rule (DESIGN.md "Mac actions"): every write asks, new file or overwrite, with the real path.
+        if (!(await confirm(v.level === ASK ? v.reason : `${exists ? 'Overwrite' : 'Create'} ${f}?`, ctx))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
         // A file that's there is kept in Recently deleted as it was, so the change can be undone (restore_deleted).
         if (exists) await keepOldFile(f).catch(() => null);
@@ -1146,7 +1170,11 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         // The app is checked too: never a shell, script host or interpreter; an unknown one asks (F5).
         const ov = checkOpen(t, HOME, { executable: isFile, app: app ?? null });
         allowed(ov);
-        if (ov.level === ASK && !(await confirm(ov.reason, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+        // Owner's rule (DESIGN.md "Mac actions"): every open asks, naming the real target and the app.
+        const isLink = /^[a-z][a-z0-9+.-]*:/i.test(t) && !/^[a-z]:\\/i.test(t);
+        const shown = isLink ? t : /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t) ? checkRead(expand(t), HOME).path : `the app ${t}`;
+        const question = ov.level === ASK ? ov.reason : `Open ${shown}${app ? ` in ${app}` : ''}?`;
+        if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
         agentChangesScreen();
         // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
         const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);
@@ -1371,8 +1399,9 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       description: `Save how to do something as a skill: when ${userName} says "remember how to do this" or "save that as a skill", or a skill you used had a wrong or missing step (save it again under the same name). name: 2 to 5 words (the same name replaces it). description: one line on when to use it. steps: short numbered steps that worked, with exact app, menu, site or command names; no passwords, keys or personal details.`,
       parameters: z.object({ name: z.string().min(1).max(60), description: z.string().min(1).max(200), steps: z.string().min(1).max(6000) }),
       execute: async (args, ctx) => {
-        // Saving under a name that's taken replaces that skill: it asks first, like overwriting a file.
-        if (skillExists(args.name) && !(await confirm(`Replace the skill "${args.name}" with new steps?`, ctx))) throw new Error(`${userName} said no, so the skill stays as it was.`);
+        // Owner's rule (DESIGN.md "Mac actions"): a skill change asks, every time, showing the whole skill.
+        const replacing = skillExists(args.name);
+        if (!(await confirm(`${replacing ? 'Replace' : 'Save'} the skill "${args.name}"${replacing ? ' with new steps' : ''}? ${args.description}\n\nIts steps:\n${args.steps}`, ctx))) throw new Error(`${userName} said no, so ${replacing ? 'the skill stays as it was' : 'nothing was saved'}.`);
         const s = await saveSkill(args);
         skills.changed?.(s);
         return `${s.created ? 'Learned' : 'Updated'} the skill ${s.slug}. It shows on the Abilities page's Skills tab.`;

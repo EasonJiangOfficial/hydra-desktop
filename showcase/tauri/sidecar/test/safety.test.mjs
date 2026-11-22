@@ -15,18 +15,22 @@ const cases = (label, fn, table) => {
   }
 };
 cases('read', (p) => checkRead(p, HOME), [
-  ['~/notes.txt', SAFE], ['~/Documents/report.md', SAFE], ['/tmp/x.log', SAFE], ['~/projects/app/src/index.js', SAFE],
+  // Owner's rule (DESIGN.md "Mac actions"): free only inside Documents, Desktop and Downloads; anywhere else asks.
+  ['~/notes.txt', ASK], ['~/Documents/report.md', SAFE], ['~/Desktop/a.txt', SAFE], ['~/downloads/b.pdf', SAFE], ['/tmp/x.log', ASK], ['~/projects/app/src/index.js', ASK],
+  ['~/Documents/.hidden/x.md', ASK], ['~/Documents/proj/.git/config', ASK], ['~/Documents2/x.md', ASK], ['/Users/ken', ASK],
   ['~/.ssh/id_ed25519', BLOCK], ['~/.ssh/config', BLOCK], ['~/.gg/auth.json', BLOCK], ['~/projects/app/.env', BLOCK],
   ['~/projects/app/.env.local', BLOCK], ['~/.aws/credentials', BLOCK], ['~/certs/server.key', BLOCK], ['~/.config/gh/hosts.yml', BLOCK],
   ['~/Library/Containers/com.apple.mail/Data', BLOCK], ['~/Library/Messages/chat.db', BLOCK], ['~/../ken/.ssh/id_rsa', BLOCK],
   ['/Users/ken/.ssh/id_rsa', BLOCK], ['~/Library/Application Support/Google/Chrome/Default/Cookies', BLOCK], ['~/.tauri/roamies-updater.key', BLOCK],
   // Seventh review F3: a hidden file in the home folder (any tool's settings or sign-in) is read only with a yes.
-  ['~/.env.example.md', ASK], ['~/environment.txt', SAFE],
+  ['~/.env.example.md', ASK], ['~/environment.txt', ASK], ['~/Documents/environment.txt', SAFE],
 ]);
 assert.equal(checkRead('~', HOME, { recursive: true }).level, BLOCK, 'searching all of home is blocked');
 assert.equal(checkRead('/', HOME, { recursive: true }).level, BLOCK, 'searching the whole disk is blocked');
-assert.equal(checkRead('~/projects', HOME, { recursive: true }).level, SAFE, 'searching a project folder is fine');
-assert.equal(checkRead('~', HOME).level, SAFE, 'listing home (not recursing) is fine');
+assert.equal(checkRead('~/projects', HOME, { recursive: true }).level, ASK, 'searching a project folder outside the three asks');
+assert.equal(checkRead('~/Documents/projects', HOME, { recursive: true }).level, SAFE, 'searching inside Documents is free');
+assert.equal(checkRead('~', HOME).level, ASK, 'listing home asks');
+assert.ok(checkRead('~/projects/app/src/index.js', HOME).reason.includes('/Users/ken/projects/app/src/index.js'), 'the question names the whole real path');
 
 cases('write', (p) => checkWrite(p, HOME), [
   // Owner decision (sixth review): a new file is made unasked only in Desktop, Documents or Downloads; elsewhere it asks.
@@ -197,7 +201,7 @@ console.log('safety tests: passed');
     fs.mkdirSync(nodePath.join(home, 'proj')); fs.symlinkSync(nodePath.join(home, '.ssh'), nodePath.join(home, 'proj', 'keys'), 'dir');
   } catch (e) { if (process.platform !== 'win32') throw e; links = false; console.log('symlink cases skipped:', e.code); }
   if (links) {
-    cases('symlinked reads', (p) => checkRead(p, home), [['~/harmless.txt', BLOCK], ['~/proj/keys', BLOCK], ['~/notes.txt', SAFE]]);
+    cases('symlinked reads', (p) => checkRead(p, home), [['~/harmless.txt', BLOCK], ['~/proj/keys', BLOCK], ['~/notes.txt', ASK]]);
     cases('symlinked writes', (p) => checkWrite(p, home), [['~/later.txt', BLOCK], ['~/proj/keys/new', BLOCK], ['~/fresh.txt', ASK], ['~/Documents/fresh.txt', SAFE]]);
   }
   // An agent's own folder: overwriting inside it is fine without a yes; outside it, or through a link that leads out
@@ -374,7 +378,7 @@ console.log('safety loophole tests: passed');
   assert.equal(checkWrite('C:\\Users\\ken\\Roamies\\Data\\settings.json', WH).level, BLOCK, 'on Windows too');
   assert.equal(checkRead('~/Roamies/Data/secrets.json', H).level, BLOCK, 'the Windows key store');
   assert.equal(checkRead('C:\\Users\\ken\\Roamies\\Data\\secrets.json', WH).level, BLOCK);
-  assert.equal(checkRead('~/Roamies/Data/logs/2026-11-18.log', H).level, SAFE, 'reading its own logs is fine');
+  assert.equal(checkRead('~/Roamies/Data/logs/2026-11-18.log', H).level, ASK, 'its own logs read with a yes (outside the three folders)');
   assert.equal(checkWrite('~/Roamies/Database/x.md', H).level, ASK, 'only the Data folder itself is blocked (elsewhere asks)');
   assert.equal(checkWrite('~/Roamies/Agents/a/files/Data/x.md', H, { own: '~/Roamies/Agents/a' }).level, SAFE, 'an agent folder named Data is theirs');
   console.log('safety (data folder) tests: passed');

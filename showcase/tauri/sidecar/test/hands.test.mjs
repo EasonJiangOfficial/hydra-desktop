@@ -31,7 +31,8 @@ console.log(JSON.stringify(o));
 process.env.ROAMIES_HANDS = fake;
 const { createTools } = await import('../tools.mjs');
 const noop = async () => {};
-const { tools } = createTools({ allowActions: () => true, ui: () => {}, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' });
+// The owner says yes to every plan here (owner's rule: each one asks); what the questions say is tested elsewhere.
+const { tools } = createTools({ allowActions: () => true, ui: () => {}, ask: async () => 'Allow', openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' });
 const tool = (n) => tools.find((t) => t.name === n);
 const calls = () => fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 const ctx = { toolCallId: 't1' };
@@ -101,8 +102,9 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   fs.writeFileSync(log, '');
   const sent = [], spoken = [], other = [];
   let clicks = 0, hold = false;
+  const drawAsks = [];
   const made = createTools({
-    allowActions: () => true, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
+    allowActions: () => true, ask: async (o) => { drawAsks.push(o.placeholder); return 'Allow'; }, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
     speak: (t) => { spoken.push(t); return true; },
     ui: (m) => {
       if (m.e?.type?.startsWith('ink_')) other.push(m.e);
@@ -163,10 +165,14 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   assert.ok(!other.some((e) => e.type === 'ink_stale'), 'the showcase stays when another window comes to the front');
   assert.match(made.ink.describe(), /note “a showcase card”/);
   fs.rmSync(path.join(dir, 'front.json'));
-  // Typing goes through the helper's fill (the same path as act_in_app).
-  fs.writeFileSync(log, '');
+  // Typing goes through the helper's fill (the same path as act_in_app), and asks first with the app and the text
+  // (owner's rule); the helper gets the yes for that plan in that app.
+  fs.writeFileSync(log, ''); drawAsks.length = 0;
   await draw.execute({ beats: [{ say: 'Your email goes here.', marks: [{ kind: 'type', at: { text: 'Email' }, text: 'a@b.com' }] }] }, { toolCallId: 'd4' });
-  assert.deepEqual(JSON.parse(calls().find((c) => c[0] === 'act')[1]).steps, [{ do: 'fill', field: 'Email', text: 'a@b.com' }]);
+  const typedPlan = JSON.parse(calls().find((c) => c[0] === 'act')[1]);
+  assert.deepEqual(typedPlan.steps, [{ do: 'fill', field: 'Email', text: 'a@b.com' }]);
+  assert.deepEqual([typedPlan.wholeOk, typedPlan.planApp], [['plan'], 'TextEdit']);
+  assert.deepEqual(drawAsks, ['In TextEdit, every step I\'d take:\n1. fill "Email" with "a@b.com"']);
   // Regression: talking over a walkthrough that waits for a click left its caption up, still waiting.
   made.nextTurn(); hold = true;
   const talk = new AbortController();
@@ -249,7 +255,7 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
 {
   fs.writeFileSync(log, '');
   const seen = [];
-  const t = createTools({ allowActions: () => true, ui: (m) => { if (m.kind === 'hands') seen.push({ on: m.on, acted: fs.readFileSync(log, 'utf8').includes('["act"') }); }, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' }).tools;
+  const t = createTools({ allowActions: () => true, ui: (m) => { if (m.kind === 'hands') seen.push({ on: m.on, acted: fs.readFileSync(log, 'utf8').includes('["act"') }); }, ask: async () => 'Allow', openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' }).tools;
   await t.find((x) => x.name === 'act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'key', key: 'return' }] }, ctx);
   assert.deepEqual(seen, [{ on: true, acted: false }, { on: false, acted: true }], 'click-through on before acting, off after');
   seen.length = 0;
@@ -264,7 +270,7 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   const events = [], watching = [];
   let hold = false;
   const made = createTools({
-    allowActions: () => true, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', speak: () => true,
+    allowActions: () => true, ask: async () => 'Allow', openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', speak: () => true,
     watchClicks: (on) => watching.push(on),
     ui: (m) => {
       if (m.e?.type?.startsWith('ink_')) events.push(m.e.type);

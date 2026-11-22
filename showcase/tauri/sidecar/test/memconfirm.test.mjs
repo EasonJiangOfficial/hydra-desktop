@@ -39,7 +39,7 @@ assert.equal(asked.length, 0, 'ticking one off needs no yes');
 const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
 assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx\)\)/);
 assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?\$\{why\(reason\)\}`, ctx\)/, 'with its reason (ninth review V9-12)');
-assert.match(src, /skillExists\(args\.name\) && !\(await confirm\(`Replace the skill/, 'saving over a skill asks (second review M8)');
+assert.match(src, /const replacing = skillExists\(args\.name\);\s*if \(!\(await confirm\(`\$\{replacing \? 'Replace' : 'Save'\} the skill/, 'saving a skill asks every time, over one too (second review M8, owner\'s rule)');
 // Fourth review: a fact said again after it was replaced is current again, and replaced facts never reach the model.
 {
   const { supersedeFact, liveFacts, pickFacts } = await import('../store.mjs');

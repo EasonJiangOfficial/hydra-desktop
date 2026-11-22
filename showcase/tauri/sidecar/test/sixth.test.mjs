@@ -92,13 +92,19 @@ assert.equal(lv(checkRead('~/.cargo/credentials.toml', HOME)), 'block', 'cargo\'
   assert.ok(!(await yes.find((t) => t.name === 'search_files').execute({ pattern: 'SECRET', dir: '~/.gg' }, undefined)).includes('GG_SECRET'), 'a folder with a key file in it: searched, the key file never');
   await assert.rejects(tools.find((t) => t.name === 'read_file').execute({ path: '~/Documents/proj/sub/keys/id_rsa' }, undefined), /Blocked for safety/, 'read through a link');
 }
-// write_file writes where it checked, and a new file in Documents needs no yes; a dotfile asks with its full path.
+// write_file writes where it checked; every write asks with its full path (owner's rule), a new file in Documents too.
 {
   const asked = [];
-  const { tools } = createTools({ allowActions: () => true, ui: () => {}, ask: async (o) => { asked.push(o); return null; }, openUrl: async () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME });
+  let answer = null;
+  const { tools } = createTools({ allowActions: () => true, ui: () => {}, ask: async (o) => { asked.push(o); return answer; }, openUrl: async () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: HOME });
   const write = tools.find((t) => t.name === 'write_file');
+  await assert.rejects(write.execute({ path: '~/Documents/new.md', content: 'hi' }, undefined), /said no/, 'a new file in Documents asks');
+  assert.equal(asked.at(-1).placeholder, `Create ${path.join(HOME, 'Documents', 'new.md')}?`);
+  assert.ok(!fs.existsSync(path.join(HOME, 'Documents', 'new.md')), 'nothing written on a no');
+  answer = 'Allow';
   await write.execute({ path: '~/Documents/new.md', content: 'hi' }, undefined);
   assert.equal(fs.readFileSync(path.join(HOME, 'Documents', 'new.md'), 'utf8'), 'hi');
+  answer = null;
   await assert.rejects(write.execute({ path: '~/.config/git/config', content: '[core]\n\tfsmonitor = /tmp/x' }, undefined), /said no/);
   assert.equal(asked.at(-1).placeholder, `Create ${path.join(HOME, '.config/git/config')}?`);
   assert.ok(!fs.existsSync(path.join(HOME, '.config/git/config')), 'nothing written on a no');

@@ -214,8 +214,9 @@ export function redactArgs(name, args = {}) {
   return args;
 }
 
-/** read_file / list_files / search_files. Returns { level, reason, path }: path is where it really leads. */
-export function checkRead(p, home, { recursive = false } = {}) {
+/** A path's read verdict by the deny rules alone (secrets, Hydra's data, other apps' data, hidden files): what typed
+ *  text, a connection's non-path values and open are judged by. Returns { level, reason, path }. */
+function readCheck(p, home, { recursive = false } = {}) {
   const { real, all } = pathsOf(p, home), homes = homesOf(home);
   if (rootDot(all)) return { ...verdict(BLOCK, `${p} names a file by a hidden name at the top of the disk, so I don't read it. Use its usual path.`), path: real };
   if (hits(SECRET, all, homes)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: real };
@@ -234,6 +235,27 @@ export function checkRead(p, home, { recursive = false } = {}) {
   const hidden = (a) => homes.some((h) => { const r = rel(a, h); return r !== a && r.split('/').some((x) => x.startsWith('.')); });
   if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true };
   return { ...verdict(SAFE), path: real };
+}
+
+// Owner's rule (DESIGN.md decision "Mac actions"): only plain reads run without asking, and only inside these three
+// folders. Everything else asks, every time, naming the real target; there is no setting that skips it.
+const FREE_ZONES = ['desktop', 'documents', 'downloads'];
+/** Inside ~/Desktop, ~/Documents or ~/Downloads (the folder itself too), with no dot-named part on the way. */
+const inFreeZone = (a, homes) => homes.some((h) => {
+  const r = rel(a, h);
+  if (r === a || r === '') return false;
+  const parts = r.split('/');
+  return FREE_ZONES.includes(fold(parts[0])) && !parts.some((x) => x.startsWith('.'));
+});
+/** read_file / list_files / search_files and what a screenshot or read_window shows. SAFE only when the path, as
+ *  written and where it really leads, is inside ~/Documents, ~/Desktop or ~/Downloads with no dot part and isn't a
+ *  secret; BLOCK by the deny rules; anything else ASKs with the real path. Returns { level, reason, path }. */
+export function checkRead(p, home, opts = {}) {
+  const v = readCheck(p, home, opts);
+  if (v.level !== SAFE) return v;
+  const { all } = pathsOf(p, home), homes = homesOf(home);
+  if (all.every((a) => inFreeZone(a, homes))) return v;
+  return { ...verdict(ASK, `Read ${v.path}? It's outside your Documents, Desktop and Downloads folders.`), path: v.path, always: true };
 }
 
 // Files other programs run or load later (scripts, app bundles, Python's .pth, property lists, workflows): a name
@@ -327,7 +349,7 @@ export function checkOpen(target, home, { executable = false, app = null } = {})
   }
   if (/^[~/.]/.test(t) || /^[a-z]:\\/i.test(t)) {
     const abs = norm(t, home);
-    const r = checkRead(abs, home);
+    const r = readCheck(abs, home);
     if (r.level === BLOCK) return verdict(BLOCK, r.reason);
     // Judged where it really leads: a link named notes.txt can lead to an app or a script.
     const all = both(abs, r.path), homes = homesOf(home);
@@ -371,7 +393,7 @@ export function checkTyped(text, home) {
   for (const tok of t.split(/[\s"'`<>|;,()=]+/)) {
     if (!tok || /^[a-z][a-z0-9+.-]*:\/\//i.test(tok)) continue;
     if (!/^(~|\/|[a-z]:[\\/]|\$\{?HOME)/i.test(tok) && !/[\\/]/.test(tok)) continue;
-    const v = checkRead(tok, home);
+    const v = readCheck(tok, home);
     if (v.level === BLOCK) return verdict(BLOCK, `I won't type ${tok}: ${v.reason}`);
     if (v.level === ASK) worst = { ...verdict(ASK, `Type the path ${v.path}? It's a hidden or app-data file, which can hold sign-ins.`), always: true };
   }
@@ -567,11 +589,15 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
     // Checked after the server would normalize it (a/../ undone), so length alone never hides one (4663 chars of a/../).
     const n = path.normalize(slash(p).replace(/^~(?=\/|$)/, slash(home)));
     if (n.length > MAX_ARG) { tooBig = 'One of its values is too long to check.'; continue; }
-    const v = checkRead(p, home, { recursive });
-    const v2 = u && u.host ? checkRead(decodeURIComponent(u.pathname), home, { recursive }) : null;
+    // A value that names a file (from / or ~, a drive, $HOME, or a file-like link) is read like read_file: outside
+    // Documents, Desktop and Downloads it asks. Other words are only checked against the deny rules.
+    const named = !!u || /^(~|\/|[a-z]:[\\/]|\$\{?HOME)/i.test(p);
+    const read = named ? checkRead : readCheck;
+    const v = read(p, home, { recursive });
+    const v2 = u && u.host ? read(decodeURIComponent(u.pathname), home, { recursive }) : null;
     if (v2?.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v2.reason}`);
     if (v.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v.reason}`);
-    if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}, a hidden or app-data file that can hold sign-ins.`), always: true };
+    if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}${named && v.reason.includes('outside') ? ', outside your Documents, Desktop and Downloads folders' : ', a hidden or app-data file that can hold sign-ins'}.`), always: true };
   }
   if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true };
   // An allowlist: readOnlyHint (the server's own claim) makes a call SAFE only when its name reads (a read verb in it)

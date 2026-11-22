@@ -29,8 +29,8 @@ assert.equal(lv(checkRead('~/Documents/n.txt', HOME)), 'safe', 'the usual path s
 for (const p of ['~/HydraAgent/Data/bin/d1234abcd/old', '~/HydraAgent/Data/settings.json', '~/hydraagent/data/bin.json', '~/Roamies/Data/mcp.json', '~/HydraAgent/Data'])
   assert.equal(lv(checkRead(p, HOME)), 'block', `read ${p}`);
 assert.equal(lv(checkRead('~/HydraAgent/Data', HOME, { recursive: true })), 'block');
-assert.equal(lv(checkRead('~/HydraAgent/Agents/a1/files/x.md', HOME)), 'safe', "an agent's own files still read");
-assert.equal(lv(checkRead('~/HydraAgent/Data/logs/2026-11-22.log', HOME)), 'safe', 'its own logs still read');
+assert.equal(lv(checkRead('~/HydraAgent/Agents/a1/files/x.md', HOME)), 'ask', "an agent's own files read with a yes (outside the three folders)");
+assert.equal(lv(checkRead('~/HydraAgent/Data/logs/2026-11-22.log', HOME)), 'ask', 'its own logs read with a yes');
 
 // V9-5: archives and disk images unpack what they hold: never made unasked, never opened.
 for (const ext of ['tar', 'tgz', 'tbz', 'tbz2', 'txz', 'cpio', 'xar', 'zip', 'aar', 'gz', 'bz2', 'xz', '7z', 'rar', 'iso', 'img', 'sparseimage']) {
@@ -119,9 +119,11 @@ console.log(JSON.stringify(o));
   await assert.rejects(T('read_file').execute({ path: `~/HydraAgent/Data/bin/${hid}/old` }, {}), /Blocked for safety/);
   await assert.rejects(T('search_files').execute({ pattern: 'SECRET', dir: '~/HydraAgent/Data' }, {}), /Blocked for safety/);
   mk('HydraAgent/Agents/a1/notes.md');
+  assert.equal(asks.length, 0);
+  answer = 'Allow'; // outside the three folders, listing and searching ask (owner's rule); even with a yes Data stays out
   assert.ok(!/Data/.test(await T('list_files').execute({ dir: '~/HydraAgent' }, {})), 'not even listed');
   assert.ok(!/SECRET/.test(await T('search_files').execute({ pattern: 'SECRET', dir: '~/HydraAgent' }, {})), 'nor searched');
-  assert.equal(asks.length, 0);
+  assert.equal(asks.length, 2); assert.ok(asks.every((q) => q.includes(path.join(HOME, 'HydraAgent'))), 'each names the real folder');
 
   // V9-3 (probe p2): putting back a file that's gone writes it anew: it asks with the whole path, and a no writes nothing.
   reset(); answer = 'Allow';
@@ -212,7 +214,7 @@ console.log(JSON.stringify(o));
   // In a file panel, a step whose target can't be named isn't taken.
   nextTurn(); reset(); answer = 'Allow';
   await assert.rejects(T('act_in_app').execute({ target: 'Google Chrome', steps: [{ do: 'hover' }, { do: 'key', key: 'return' }] }, {}), /only click things by their name/);
-  assert.equal(asks.length, 0);
+  assert.equal(asks.length, 1, 'only the whole-plan question: the panel shows up after it, and the blind step is refused there');
   nextTurn(); reset(); set({}); answer = "Don't allow";
   await assert.rejects(T('act_in_app').execute({ target: 'Google Chrome', steps: [{ do: 'key', key: 'cmd+space' }] }, {}), /said no/);
   assert.ok(asks[0].includes('Spotlight'), 'cmd+space asks');

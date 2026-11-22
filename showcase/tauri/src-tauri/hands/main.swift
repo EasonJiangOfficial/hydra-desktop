@@ -205,6 +205,33 @@ func filePanelShown(_ app: AXUIElement) -> Bool {
     }
     return false
 }
+/// The user's yes covers this plan only in the app it was asked about (wholeOk "plan" and planApp, any case).
+func planApproved(_ plan: [String: Any], app: String) -> Bool {
+    guard ((plan["wholeOk"] as? [String]) ?? []).contains("plan"), let asked = plan["planApp"] as? String else { return false }
+    return asked.trimmingCharacters(in: .whitespaces).lowercased() == app.trimmingCharacters(in: .whitespaces).lowercased()
+}
+/// A plan as the user reads it before saying yes: the app and every step, with all the text it types (never cut).
+func planText(_ app: String, _ steps: [[String: Any]]) -> String {
+    func q(_ v: Any?) -> String { "\"\((v as? String) ?? "")\"" }
+    func n(_ v: Any?) -> String { (v as? NSNumber).map { "\($0)" } ?? "?" }
+    let lines = steps.enumerated().map { (i, s) -> String in
+        let d = s["do"] as? String ?? ""
+        let t: String
+        switch d {
+        case "click_text": t = "click \(q(s["text"]))" + ((s["near"] as? String).map { " near \(q($0))" } ?? "")
+        case "click", "focus": t = "\(d) control \(n(s["id"]))" + ((s["shown"] as? String).map { " (\(q($0)))" } ?? "")
+        case "fill": t = "fill \(q(s["field"])) with \(q(s["text"]))"
+        case "set": t = "set control \(n(s["id"])) to \(q(s["text"]))"
+        case "type": t = "type \(q(s["text"]))"
+        case "choose": t = "choose \(q(s["option"]))"
+        case "key": t = "press \((s["key"] as? String) ?? "")"
+        case "click_at": t = "click at \(n(s["x"])), \(n(s["y"]))"
+        default: t = d
+        }
+        return "\(i + 1). \(t)"
+    }
+    return "In \(app), every step I'd take:\n" + lines.joined(separator: "\n")
+}
 /// Finder: clicks and keys there rename, move, open and delete files, so a plan in it is asked about as a whole.
 let FINDER = "com.apple.finder"
 func isFinder(_ pid: pid_t?) -> Bool { pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier } == FINDER }
@@ -1954,6 +1981,14 @@ case "--self-test":
     check("the menu route reads q from cmd+q", parseKey("cmd+q").map { KEY_CHARS[$0.key] } == "q")
     // Review M6: a yes covers the words asked about, not what is there now.
     check("a yes for Delete covers Delete", sameYes(["confirmed": true, "confirmedLabel": "Delete"], " delete "))
+    // Owner's rule: a plan runs only with a yes for it, in the app that was named; the question holds every step whole.
+    check("a plan with no yes doesn't run", !planApproved(["steps": []], app: "TextEdit"))
+    check("a yes for the plan in TextEdit covers TextEdit", planApproved(["wholeOk": ["plan"], "planApp": "textedit"], app: "TextEdit"))
+    check("a yes in Safari doesn't cover TextEdit", !planApproved(["wholeOk": ["plan"], "planApp": "Safari"], app: "TextEdit"))
+    check("a yes for a file panel isn't a yes for the plan", !planApproved(["wholeOk": ["panel"], "planApp": "TextEdit"], app: "TextEdit"))
+    let longText = String(repeating: "word ", count: 400) + "END"
+    let pt = planText("TextEdit", [["do": "type", "text": longText], ["do": "key", "key": "cmd+s"], ["do": "click_text", "text": "Save"]])
+    check("the plan question names the app and every step, typed text whole", pt.hasPrefix("In TextEdit") && pt.contains(longText) && pt.contains("2. press cmd+s") && pt.contains("3. click \"Save\""))
     check("a yes for Delete draft doesn't cover Delete account", !sameYes(["confirmed": true, "confirmedLabel": "Delete draft"], "Delete account"))
     check("no yes covers nothing", !sameYes([:], "Delete"))
     for l in ["Quit", "Quit Anyway", "Replace", "Trash", "Empty Bin", "Shut Down", "Restart", "Post", "Reply", "Tweet"] { check("\"\(l)\" needs a yes", risky(l)) }
@@ -2138,6 +2173,12 @@ case "act":
     var switched = false
     if let name = handsOff(w.pid) {
         fail("Blocked for safety: I can point at things in \(name), but I never type or click in it. Show the user where to click instead.")
+    }
+    // Owner's rule (DESIGN.md "Mac actions"): nothing is clicked, typed or pressed, and the app isn't even brought
+    // forward, until the user said yes to the whole plan (every step shown in full) in this very app. The sidecar asks;
+    // this is the backstop for any caller that didn't, or for a plan that would now land in another app.
+    if !planApproved(plan, app: w.app) {
+        out(["ok": false, "needsConfirm": true, "step": 0, "whole": "plan", "app": w.app, "label": "plan", "why": planText(w.app, steps), "done": [String]()])
     }
     // Bring the target app forward so keystrokes land there, not in Roamies (in background mode it stays behind).
     let app = axApp(w)

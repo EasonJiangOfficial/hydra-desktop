@@ -254,8 +254,11 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const until = async (ok, ms = 5000) => { for (const t0 = Date.now(); !ok() && Date.now() - t0 < ms;) await new Promise((r) => setTimeout(r, 50)); };
 
   // Starting: its folder, its process, its row.
-  fs.writeFileSync(path.join(home, 'logo.png'), 'img');
-  const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.', inputs: ['snap', '~/logo.png'] });
+  fs.mkdirSync(path.join(home, 'Documents'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Documents', 'logo.png'), 'img'); fs.writeFileSync(path.join(home, 'logo.png'), 'img');
+  // Owner's rule: only a file read_file reads with no yes is handed over unasked; one in the home folder isn't.
+  await assert.rejects(mgr.start({ type: 'maker', title: 'X', brief: 'x', inputs: ['~/logo.png'] }), /outside your Documents, Desktop and Downloads/);
+  const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.', inputs: ['snap', '~/Documents/logo.png'] });
   assert.equal(a.folder, '2026-11-13 Dog brand landing page');
   for (const sub of ['files', 'work', 'inputs']) assert.ok(fs.statSync(path.join(a.dir, sub)).isDirectory(), sub);
   assert.ok(fs.existsSync(path.join(a.dir, 'inputs', 'logo.png')), 'its inputs are copied in');
@@ -524,8 +527,8 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   };
   const openRule = (p, h, o) => checkOpen(String(p).replace(home, '/Users/ken'), '/Users/ken', o);
   const mgr = createAgents({ fork, ui: () => {}, config, root: path.join(home, 'Roamies'), userName: 'Ken', runner: '/x/agentrun.mjs', safety: { checkRead, checkWrite, checkOpen: openRule, checkLink }, home, now: () => 1 });
-  fs.writeFileSync(path.join(home, 'logo.png'), 'img');
-  const a = await mgr.start({ type: 'maker', title: 'Page', brief: 'Make a page.', inputs: ['snap', '~/logo.png'] });
+  fs.mkdirSync(path.join(home, 'Desktop')); fs.writeFileSync(path.join(home, 'Desktop', 'logo.png'), 'img');
+  const a = await mgr.start({ type: 'maker', title: 'Page', brief: 'Make a page.', inputs: ['snap', '~/Desktop/logo.png'] });
   const content = children[0].sent[0].content;
   assert.equal(typeof content, 'string', 'no pictures in its message');
   assert.match(content, /inputs\/snap-\d+\.png \(the picture Ken sent; your model can't see pictures\)/);

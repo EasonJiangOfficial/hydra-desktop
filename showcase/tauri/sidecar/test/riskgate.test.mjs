@@ -63,10 +63,12 @@ const base = { allowActions: () => true, ui: () => {}, openUrl: noop, onCommitme
   assert.equal(fs.readFileSync(f, 'utf8'), 'old', 'and the file is untouched');
   assert.equal(asked.length, 1);
   assert.equal(asked[0].always, true, 'the ask says always, so an agent job can\'t auto-answer it');
-  // A new file in Documents needs no yes.
+  // A new file in Documents asks too (owner's rule), naming it.
   asked.length = 0;
-  await write.execute({ path: path.join(docs, 'new.txt'), content: 'hi' }, undefined);
-  assert.equal(asked.length, 0, 'a new file needs no yes');
+  await assert.rejects(write.execute({ path: path.join(docs, 'new.txt'), content: 'hi' }, undefined), /said no/);
+  assert.equal(asked.length, 1, 'a new file asks');
+  assert.equal(asked[0].placeholder, `Create ${path.join(fs.realpathSync.native(docs), 'new.txt')}?`);
+  assert.ok(!fs.existsSync(path.join(docs, 'new.txt')));
   fs.rmSync(docs, { recursive: true, force: true });
   console.log('skip allow never answers overwrites: passed');
 }
@@ -123,7 +125,9 @@ console.log(JSON.stringify(o));
   const { createTools } = await import(`../tools.mjs?riskgate`);
   let answer = null;
   const asked = [];
-  const { tools } = createTools({ ...base, skipAllow: () => true, ask: async (o) => { asked.push(o); return answer; } });
+  const { tools } = createTools({ ...base, skipAllow: () => true, ask: async (o) => { asked.push(o); return typeof answer === 'function' ? answer(o.placeholder) : answer; } });
+  // Owner's rule: every plan is asked first as a whole ("In Finder, every step…"); these cases say yes to that.
+  const planYes = (q) => (q.startsWith('In Finder, every step') ? 'Allow' : null);
   const act = tools.find((t) => t.name === 'act_in_app'), shot = () => tools.find((t) => t.name === 'take_screenshot').execute({ target: 'Finder' }, { toolCallId: 's' });
   const calls = () => fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
   // A risky label: asks with skip on.
@@ -139,8 +143,14 @@ console.log(JSON.stringify(o));
   // click_at on a risky spot: the helper stops there; a no stops the plan, a yes goes on from that step.
   fs.writeFileSync(log, '');
   await shot();
+  answer = planYes;
   await assert.rejects(act.execute({ target: 'Finder', steps: [{ do: 'type', text: 'a' }, { do: 'click_at', x: 10, y: 10 }, { do: 'type', text: 'b' }] }, { toolCallId: 'c1' }), /said no/);
   assert.equal(calls().length, 1, 'no: the plan stops at the risky spot');
+  // A no to the whole plan: nothing reaches the helper.
+  answer = null; fs.writeFileSync(log, ''); await shot();
+  await assert.rejects(act.execute({ target: 'Finder', steps: [{ do: 'type', text: 'a' }] }, { toolCallId: 'c0' }), /said no/);
+  assert.equal(calls().length, 0, 'no to the plan: nothing ran');
+  assert.ok(asked.at(-1).placeholder.includes('1. type "a"'), 'the plan question shows the step');
   answer = 'Allow';
   fs.writeFileSync(log, '');
   await shot();
@@ -152,13 +162,14 @@ console.log(JSON.stringify(o));
   assert.equal(c[1][0].confirmedLabel, 'Move to Trash', 'the yes names what was asked about');
   assert.match(out, /type, click_at, type/, 'what was done before and after');
   // Return on a risky default button: same path.
-  answer = null;
+  answer = planYes;
   await assert.rejects(act.execute({ target: 'Finder', steps: [{ do: 'key', key: 'return' }] }, { toolCallId: 'e1' }), /said no/);
   assert.equal(asked.pop()?.always, true, 'Return on a risky default button asks');
   // Review m2: two Delete clicks in one plan ask twice, not once for both.
   answer = 'Allow'; asked.length = 0;
   await act.execute({ target: 'Finder', steps: [{ do: 'click_text', text: 'Delete' }, { do: 'click_text', text: 'Delete' }] }, { toolCallId: 'd2' });
-  assert.equal(asked.length, 2, 'each delete click asks on its own');
+  assert.equal(asked.length, 3, 'the plan, then each delete click on its own');
+  assert.ok(asked[0].placeholder.includes('1. click "Delete"') && asked[0].placeholder.includes('2. click "Delete"'), 'the plan names both');
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('risky click_at, chords and Return ask: passed');
 }
