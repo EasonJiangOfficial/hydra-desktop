@@ -61,7 +61,7 @@ const { LIMITS } = await import('../relayschema.mjs');
     assert.equal(v.level, 'ask', c.name); assert.equal(v.always, true);
   }
   assert.ok(checkMcpCall({ name: 'read_text_file', annotations: ro, args: { path: 'Projects/notes.txt' }, home: HOME }).reason.includes(path.join(HOME, 'Projects/notes.txt')), 'names the real path');
-  for (const tool of ['search_threads', 'get_message', 'list_events']) assert.equal(connectorLevel({ server: 'claude_ai_Gmail', tool }).level, 'ask', `connector ${tool}`);
+  for (const tool of ['search_threads', 'get_message', 'list_events']) assert.equal(connectorLevel({ server: 'claude_ai_Notion', tool }).level, 'ask', `connector ${tool} (not Gmail or Calendar)`);
 }
 
 // ---- R10-9: a javascript: link can't be built up in a field; R10-10: shells and settings apps never open by name.

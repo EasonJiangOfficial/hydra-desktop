@@ -120,11 +120,10 @@ await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
 
 // ---- 3. A connector write is a relay approval: it runs only after "approved"; a read runs; a decline never runs.
 {
-  // The gate alone: a read asks too (tenth review R10-3: only reads of Hydra's data are free), a send waits for it.
+  // The gate alone: a plain Gmail or Calendar read runs unasked (owner, 2026-11-22: "check my email" just works); a send waits.
   const readAsks = [];
-  assert.equal(await brainGate({ approve: async (a) => { readAsks.push(a.summary); return 'approved'; } })('mcp__claude_ai_Gmail__search_threads', { query: 'invoice' }), true, 'an approved read runs');
-  assert.deepEqual(readAsks, ['Gmail: search threads; query: invoice'], 'a read asks, showing what it sends');
-  assert.equal(await brainGate({ approve: async () => 'declined' })('mcp__claude_ai_Gmail__search_threads', { query: 'invoice' }), false, 'a declined read never runs');
+  assert.equal(await brainGate({ approve: async (a) => { readAsks.push(a.summary); return 'declined'; } })('mcp__claude_ai_Gmail__search_threads', { query: 'invoice' }), true, 'a read runs');
+  assert.deepEqual(readAsks, [], 'and asks nothing');
   const asked = [];
   let answer;
   const gate = brainGate({ approve: (a) => { asked.push(a); return new Promise((r) => { answer = r; }); } });
@@ -159,7 +158,9 @@ await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
   for (const tool of ['get-bucket-credentials', 'list-variables', 'get_project_env', 'web_fetch_vercel_url', 'get_access_to_vercel_url', 'fetch_url', 'get_api_key', 'list_tokens', 'getSecret']) {
     assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'ask', `${tool} asks`);
   }
-  for (const tool of ['search_threads', 'get_thread', 'list_events', 'read_file_content', 'download_gmail_attachment']) assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'ask', `${tool} is a read, and asks (R10-3)`);
+  for (const tool of ['search_threads', 'get_thread', 'read_file_content', 'download_gmail_attachment']) assert.equal(connectorLevel({ server: 'claude_ai_X', tool }).level, 'ask', `${tool} on another connector asks`);
+  for (const [server, tool] of [['claude_ai_Gmail', 'search_threads'], ['claude_ai_Gmail', 'get_thread'], ['claude_ai_Google_Calendar', 'list_events']]) assert.equal(connectorLevel({ server, tool }).level, 'safe', `${server} ${tool} is a plain read: free`);
+  for (const tool of ['send_message', 'trash_thread', 'create_event', 'get_api_key']) assert.equal(connectorLevel({ server: 'claude_ai_Gmail', tool }).level, 'ask', `Gmail ${tool} asks`);
 
   // End to end through the relay and a fake Hydra (the server's own schemas), with Claude Code stubbed.
   const T = [randomUUID(), randomUUID()];
@@ -215,11 +216,11 @@ await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
   await until(() => posted.filter((e) => e.turn === T[1] && e.type === 'done').length === 1);
   await relay.stop();
   assert.deepEqual(order, [
-    'asked Gmail: search threads; query: Ann', 'owner approved', 'read allow', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner approved', 'SENT',
-    'asked Gmail: search threads; query: Ann', 'owner declined', 'read deny', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner declined', 'not sent',
-  ], 'read and sent only after the owner approved; never after a decline');
+    'read allow', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner approved', 'SENT',
+    'read allow', 'asked Gmail: send message; to: ann@example.com; subject: Lunch; body: Noon?', 'owner declined', 'not sent',
+  ], 'reads run; sent only after the owner approved; never after a decline');
   const confirms = posted.filter((e) => e.type === 'confirm');
-  assert.equal(confirms.length, 4, 'each ask showed as a confirm on the owner\'s surfaces');
+  assert.equal(confirms.length, 2, 'each send ask showed as a confirm on the owner\'s surfaces');
   assert.ok(confirms.every((c) => approvals.has(c.id) && c.danger === true));
 }
 

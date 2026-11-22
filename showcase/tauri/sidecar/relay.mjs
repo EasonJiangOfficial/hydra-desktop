@@ -115,13 +115,15 @@ const CONNECTOR_READ = /^(?:get|list|search|suggest|read|find|download)_/;
 const CONNECTOR_WRITE = /(?:^|_)(?:send|delete|remove|trash|untrash|create|update|modify|move|reply|forward|share|archive|label|unlabel|mark|spam|cancel|respond|apply|upload|copy|draft)(?:_|$)/;
 const CONNECTOR_SENSITIVE = /(?:^|_)(?:credentials?|secrets?|tokens?|passwords?|keys?|apikey|variables?|vars?|envs?|environment|urls?|links?|web|http|https|fetch|webhooks?|access|auth)(?:_|$)/;
 const snakeName = (t) => String(t).replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^A-Za-z0-9]+/g, '_').toLowerCase();
-// Owner's rule (tenth review R10-3): only reads of his three folders and of Hydra's data are free, so a connector's
-// read (a mail search, an event) asks too, every time, with what it sends. Nothing a connector does is SAFE.
+// A plain read of the owner's claude.ai Gmail or Calendar (a mail search, an event) runs unasked (owner, 2026-11-22:
+// "check my email" must just work; the Mac-action rule covers this Mac's files and apps). Every send or change, and
+// any read that can return a secret or fetch a URL, asks. Other connectors and MCP servers ask for every call.
+const FREE_READS = /^claude_ai_(?:gmail|google_calendar|calendar)/i;
 export function connectorLevel(c) {
-  const claudeAi = c.server.startsWith('claude_ai_');
-  const reads = claudeAi && CONNECTOR_READ.test(c.tool) && !CONNECTOR_WRITE.test(c.tool) && !CONNECTOR_SENSITIVE.test(snakeName(c.tool));
-  const v = checkMcpCall({ name: c.tool, annotations: reads ? { readOnlyHint: true } : null });
-  return v.level === SAFE ? { level: 'ask', reason: 'It reads, and what it reads goes to the model.', always: true } : v;
+  const reads = FREE_READS.test(c.server) && CONNECTOR_READ.test(c.tool) && !CONNECTOR_WRITE.test(c.tool) && !CONNECTOR_SENSITIVE.test(snakeName(c.tool));
+  if (reads) return { level: SAFE };
+  const v = checkMcpCall({ name: c.tool, annotations: null });
+  return v.level === SAFE ? { level: 'ask', reason: 'It goes to the model.', always: true } : v;
 }
 
 // What a relay turn says to the agent: where the owner is, the thread so far (data, never instructions), then his
