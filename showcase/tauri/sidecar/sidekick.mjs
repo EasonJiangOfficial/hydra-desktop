@@ -2712,10 +2712,13 @@ function onVoice(m) {
   if (m.type === 'voice_state' && m.state === 'listening' && whileBusy({ busy }) === 'add_on') { addOnTake = true; hush(true); logLine('add_on', { listening: true, mode: String(m.mode ?? '') }); }
   // With nothing running, a take over the last reply still being said holds it (C7): the owner's words stop it, and a
   // take that hears none (a noise opened it) lets the cut sentence go on, never silence.
-  else if (m.type === 'voice_state' && m.state === 'listening') { addOnTake = false; cutTake = overReply({ saying: saidPending, voiceOn: VOICE_ON() }) === 'hold'; if (cutTake) hush(true); else speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); }
+  else if (m.type === 'voice_state' && m.state === 'listening') { addOnTake = false; const via = takeVia && Date.now() - takeVia.at < 3000 ? takeVia.via : ''; takeVia = null; cutTake = overReply({ saying: saidPending, voiceOn: VOICE_ON(), via }) === 'hold'; if (cutTake) hush(true); else speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); }
   else if (m.type === 'voice_state' && m.state === 'processing') frontSoon = { at: Date.now(), p: whereNow() };
   else if (m.type === 'voice' && m.text?.trim()) {
-    if (cutTake && afterHeld({ words: m.text }) === 'stop') { cutTake = false; speech.stop(); } // the owner said something over the reply: it stays cut
+    const held = cutTake ? afterHeld({ words: m.text, reply: heardTrack.said() }) : null;
+    if (held === 'stop') { cutTake = false; speech.stop(); } // the owner said something over the reply: it stays cut
+    // Only Hydra's own words came back (a noise opened the take): dropped, and the reply goes on when the take ends.
+    if (held === 'echo') { logLine('echo_words', { chars: m.text.trim().length }); return; }
     // Key release to the words arriving (mic tail and the recogniser finishing), to see what that step costs.
     if (typeof m.ms === 'number') logLine('voice_final', { ms: m.ms, via: String(m.via ?? ''), chars: m.text.trim().length });
     onSpoken(m.text.trim(), m.area);
@@ -3148,6 +3151,9 @@ let addOnTake = false;
 let takeAt = null; // when the newest take started listening (its voice_state)
 // A take over the last reply while it was still being said (C7): held, not cut, until the take ends.
 let cutTake = false, resumedAt = 0;
+// What opened the next take, from the helper's voice_trigger just before its listening state (clap, barge); none for
+// the talk keys, the orb, the phrase or auto-listen.
+let takeVia = null;
 // The take heard no words: the reply it held goes on from where it was, and the next turn isn't told it was cut off.
 function resumeCut() {
   cutTake = false; resumedAt = Date.now(); interruptedAfter = '';
@@ -3532,7 +3538,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     agents.sync();
   } else if (m.type?.startsWith('ob_') || m.type?.startsWith('chat_') || m.type === 'set_keys' || m.type === 'set_actions' || m.type === 'set_login' || m.type === 'keybind_error') onGuide(m).catch((e) => console.error('guide', e));
   // A clap or barge-in take (the helper's trigger): counts as talking. Before the voice* catch-all, which swallowed it.
-  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); if (m.via === 'barge') noteInterrupted(); power.talked(); }
+  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); takeVia = { via: String(m.via ?? ''), at: Date.now() }; if (m.via === 'barge') noteInterrupted(); power.talked(); }
   else if (m.type?.startsWith('voice')) onVoice(m);
   else if (m.type === 'snap') areaSnap();
   else if (m.type === 'write_tap') onWriteTap();
