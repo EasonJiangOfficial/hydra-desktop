@@ -149,10 +149,10 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
   assert.match(side, /voice\.say\(t\); if \(!answerSaid\) \{ answerSaid = true; pendingNow\(\); \}/);
   assert.match(side, /msg\.e\?\.type === 'tool' && answerSaid\) \{ answerSaid = false; pendingNow\(\); \}/);
   assert.match(side, /power\.busy\(\); \/\/ the 5 minutes[^\n]*\n    pendingVoice = null; pendingNow\(\);/);
-  assert.match(side, /voiceBusy = m\.state === 'listening' \|\| m\.state === 'processing'; if \(m\.state === 'listening'\) takeAt = Date\.now\(\); stir\(\); pendingNow\(\);/);
+  assert.match(side, /voiceBusy = m\.state === 'listening' \|\| m\.state === 'processing'; if \(m\.state === 'listening'\) \{ emptyTake = true; takeAt = Date\.now\(\); \} stir\(\); pendingNow\(\);/);
   assert.match(side, /yesNoOpen\.set\(id, \{ a, to, voice \}\); pendingNow\(\);/);
   assert.match(side, /yesNoOpen\.delete\(id\); pendingNow\(\);/);
-  assert.match(side, /if \(on === pendingSent\) return;\n  pendingSent = on;\n  send\(\{ type: 'pending', on \}\);\n  ui\(\{ kind: 'pending', on \}\);/);
+  assert.match(side, /if \(on !== pendingSent\) \{\n    pendingSent = on;\n    send\(\{ type: 'pending', on \}\);\n    ui\(\{ kind: 'pending', on \}\);\n  \}/);
   // The helper: 0.6 s in, 150 ms out, ducked under Hydra's voice, never while listening.
   assert.match(cue, /static let pendingDelay = 0\.6, pendingFadeIn = 0\.4, pendingFadeOut = 0\.15/);
   // The loop itself: 2.4 s, quiet (about -24 dBFS peak), no click at the loop point.
@@ -167,8 +167,8 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
   assert.ok(step < 0.002, 'no harsh transient');
 }
 
-// ---- The desktop orb: listening leans in, pending orbits on the pulse, talking pushes out; eased, never a snap; the
-// wake burst; asleep pale and still.
+// ---- The desktop orb: listening does not pull in, pending orbits on the pulse, talking pushes out; eased, never a
+// snap; a wake stays put and goes darker and denser; asleep pale and still.
 {
   const R = {};
   globalThis.window = { Roamie: R };
@@ -177,7 +177,7 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
   const draw = (st, rad = 12) => { const d = []; H.body({ dot: (x, y, r, shade) => d.push([x, y, r, shade]), L: 4 }, 50, 50, rad, { t: 1, dt: 0.016, ...st }); return d; };
   const mean = (d) => d.reduce((a, [x, y]) => a + Math.hypot(x - 50, y - 50), 0) / d.length;
   const rest = mean(draw({}));
-  assert.ok(mean(draw({ mode: 'listen', heard: 0.3 })) < rest, 'listening leans inward');
+  assert.ok(mean(draw({ mode: 'listen', heard: 0.8 })) >= rest * 0.99, 'listening does not pull the shell in');
   assert.ok(mean(draw({ mode: 'talk', voice: 0.9 })) > rest, 'talking pushes outward');
   const loud = draw({ mode: 'talk', voice: 1 }), soft = draw({ mode: 'talk', voice: 0.1 });
   assert.ok(mean(loud) > mean(soft), 'on its own output level');
@@ -198,14 +198,18 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
   for (let i = 0; i < 16; i++) H.body({ dot() {}, L: 4 }, 50, 50, 12, st);
   const a2 = []; H.body(k(a2), 50, 50, 12, st);
   assert.ok(Math.abs(mean(a2) - mean(draw({ mode: 'talk', voice: 0.9, spin: st.spin }))) < Math.abs(full) * 0.05, 'there by 250 ms');
-  // The wake burst: every dot full ink, the shell up to 10% out, a ring of dots outward; gone after 900 ms.
+  // A wake stays the same sphere: full ink, larger dots, no pull toward the center.
   R.pendingAt = null;
+  const idle = draw({});
   R.wokeAt = performance.now() - 200;
   const burst = draw({});
-  assert.ok(burst.length === 220 + 36, 'the ring');
-  assert.ok(burst.slice(0, 220).every(([, , , s]) => s === 0), 'full ink');
-  assert.ok(mean(burst.slice(0, 220)) > rest * 1.04 && mean(burst.slice(0, 220)) < rest * 1.11, 'the shell swells, at most 10%');
-  assert.ok(burst.slice(220).every(([x, y]) => Math.hypot(x - 50, y - 50) <= 12 * 1.42), 'inside the patch the overlay redraws');
+  const meanR = (d) => d.reduce((a, [, , r]) => a + r, 0) / d.length;
+  const meanS = (d) => d.reduce((a, [, , , s]) => a + s, 0) / d.length;
+  assert.equal(burst.length, idle.length, 'the same dots, no extra ring');
+  assert.ok(burst.every(([, , , s]) => s === 0), 'full ink');
+  assert.ok(Math.abs(mean(burst) - mean(idle)) / mean(idle) < 0.03, 'the shell stays in place');
+  assert.ok(meanR(burst) > meanR(idle) * 1.2, 'the dots grow, so it reads denser');
+  assert.ok(meanS(burst) < meanS(idle), 'darker than idle');
   R.wokeAt = performance.now() - 1000;
   assert.equal(draw({}).length, 220, 'over after 900 ms');
   // Asleep: pale and still, burst or not.

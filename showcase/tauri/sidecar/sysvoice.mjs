@@ -94,5 +94,26 @@ export class SystemVoice {
   }
 }
 
+/**
+ * The best installed macOS voice from `say -v ?` text: an English Premium voice, else English Enhanced, else the
+ * first English voice, else the first voice. Null when the list is empty. The name keeps its (Premium) mark so
+ * `say -v` selects that install.
+ */
+export function bestMacVoice(listing) {
+  const rows = [];
+  for (const line of String(listing ?? '').split('\n')) {
+    const m = /^(.*?)\s{2,}([a-z]{2}_[A-Z]{2})\s+#/.exec(line);
+    if (!m) continue;
+    const raw = m[1].trim();
+    if (!raw) continue;
+    const en = m[2].startsWith('en_');
+    const premium = /\(premium\)/i.test(raw);
+    const enhanced = /\(enhanced\)/i.test(raw);
+    rows.push({ raw, rank: (en ? 4 : 0) + (premium ? 2 : 0) + (enhanced ? 1 : 0) });
+  }
+  rows.sort((a, b) => b.rank - a.rank);
+  return rows[0]?.raw ?? null;
+}
+
 /** The local voice's status for the speaker: always there on a Mac. */
 export const systemStatus = async () => ({ ok: process.platform === 'darwin', reason: process.platform === 'darwin' ? null : 'offline', message: process.platform === 'darwin' ? '' : 'Only on a Mac.', engine: 'macOS', voices: [] });

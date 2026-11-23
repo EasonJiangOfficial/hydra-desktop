@@ -7,9 +7,9 @@
 import { CONFIG_PATH, DATA_DIR, OLDER_DATA, ROAMIES_DIR } from './datadir.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
-import { HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, showTool } from './hydramcp.mjs';
+import { HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, setCapabilities, showTool } from './hydramcp.mjs';
 import { askAsApproval, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from './relay.mjs';
-import { brainFor, CLAP_LEVELS, cleanWakePhrase, createSettingsWatch, hydraModelPick, wakePhraseFor } from './agentsettings.mjs';
+import { avatarStyle, brainFor, CLAP_LEVELS, cleanWakePhrase, createSettingsWatch, gptRoute, hydraModelPick, wakePhraseFor } from './agentsettings.mjs';
 import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, approveAllSays, deletesCall, isYes, redactArgs } from './safety.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
@@ -48,7 +48,8 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { ASK_DEADLINE_MS, addOnTo, afterHeld, askForTake, createSpokenTrack, endNote, overReply, ownTurn, pcmSecs, pendingWanted, retryText, runStart, startProgress, tagRun, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
+import { postDrawnNotes } from './notesync.mjs';
+import { ASK_DEADLINE_MS, addOnTo, afterHeld, askForTake, createSpokenTrack, endNote, overReply, ownTurn, pcmSecs, pendingWanted, phaseOf, retryText, runStart, startProgress, tagRun, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -90,7 +91,7 @@ let intro = null; // the get-to-know-you chat, while it's on
 const guideVoices = new Set();
 // 0 to 100: my voice and sounds (#136). A missing or broken value is full volume, never silence.
 const volumeNow = () => (Number.isFinite(Number(config.volume)) ? Math.max(0, Math.min(100, Math.round(Number(config.volume)))) : 100);
-let pendingVoice = null, answerSaid = false, pendingSent = false; // pendingNow() below
+let pendingVoice = null, answerSaid = false, pendingSent = false, phaseSent = '', approvalOpen = 0, emptyTake = false; // pendingNow() below
 // A request waiting for the fold under way (prompt, before busy): Stop and the sleep word end the wait and the request.
 // foldWaitOwn: it's the owner's own (ownTurn), the only kind that gets the pending sound meanwhile.
 let foldWait = null, foldWaitOwn = false;
@@ -164,12 +165,18 @@ let turnProgress = null;
 // flags are declared above ui(), which reads them).
 function pendingNow() {
   // Waiting for a fold before the owner's own request starts (foldFirst): working too, so never silent. Never for a
-  // system turn (a reminder, the agents' news), over a yes/no, or asleep.
-  const on = (!!foldWait && foldWaitOwn && !voiceBusy && VOICE_ON() && yesNoOpen.size === 0 && !power.asleep) || pendingWanted({ voice: pendingVoice && turnVoice === pendingVoice, busy, answerSaid, listening: voiceBusy, asking: yesNoOpen.size > 0 });
-  if (on === pendingSent) return;
-  pendingSent = on;
-  send({ type: 'pending', on });
-  ui({ kind: 'pending', on });
+  // system turn (a reminder, the agents' news), over a yes/no or any approval, or asleep.
+  const asking = yesNoOpen.size > 0 || (typeof approvalOpen !== 'undefined' && approvalOpen > 0);
+  const on = (!!foldWait && foldWaitOwn && !voiceBusy && VOICE_ON() && yesNoOpen.size === 0 && !power.asleep) || pendingWanted({ voice: pendingVoice && turnVoice === pendingVoice, busy, answerSaid, listening: voiceBusy, asking });
+  if (on !== pendingSent) {
+    pendingSent = on;
+    send({ type: 'pending', on });
+    ui({ kind: 'pending', on });
+  }
+  if (typeof phaseOf === 'function') {
+    const phase = phaseOf({ asleep: power.asleep, listening: voiceBusy, asking, busy, answerSaid, playing: typeof heardTrack !== 'undefined' && !!heardTrack.playing });
+    if (typeof phaseSent === 'undefined' || phase !== phaseSent) { phaseSent = phase; ui({ kind: 'phase', phase }); }
+  }
 }
 let interruptedAfter = '';
 function noteInterrupted() {
@@ -593,6 +600,7 @@ async function refreshAuthNow() {
   }
   for (const k of servers().map((x) => `local:${x.id}`)) jobs.push(auth.hasCredentials(k).catch(() => false).then((ok) => { if (ok) storedKeys.add(k); else storedKeys.delete(k); }));
   await Promise.all(jobs);
+  setCapabilities(oauthOn.get('openai') ? { signedIn: ['chatgpt'] } : {});
 }
 // The local servers: Ollama, LM Studio and the ones the user added. Their models are found when they're connected:
 // those that can see and use tools. local.windows: the context Ollama really serves each model with, measured once
@@ -671,7 +679,7 @@ const textOnly = (p) => getModelsForProvider(p).filter((m) => !seesImages(p, m.i
 function ensureModel() {
   // Signed in with Claude: Hydra's model decides (agent_settings.model), not a pick made here. A heavy job's own
   // model (routed) keeps its turn.
-  const pick = hydraModelPick({ provider: config.provider, model: config.model, want: agentSettings.current.model, routed, canRun });
+  const pick = hydraModelPick({ provider: config.provider, model: config.model, want: agentSettings.current.model, routed, canRun, chatgpt: !!oauthOn.get('openai') });
   if (pick) {
     if (!pick.same) { config.provider = pick.provider; config.model = pick.model; agentStale = true; saveConfig(); }
     return true;
@@ -827,6 +835,7 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
   watchClicks: (on) => send({ type: 'watch_clicks', on: !!on }),
   onInkGone: (why) => { inkGone = true; logLine('ink_gone', { why }); },
   askShell: (msg) => shellCall(msg),
+  onNotes: (marks, id) => { if (hydraKey) postDrawnNotes(hydraHttp, marks, id); },
   workdir: WORKDIR,
   pointScale: () => pointScale(config.model ?? ''),
   jobs: { changed: () => { scheduleJobs(); panel(); }, run: (id) => runJob(getJob(id), { now: true }) },
@@ -1005,7 +1014,11 @@ ${facts.length ? `What you know about ${userName}${total > facts.length ? ` (${f
 };
 // Lite mode (#73, lite.mjs): a lighter agent for small and local models.
 const litePrompt = () => liteSystem({ name: lookName(), body: LOOK_BODY[config.look] ?? LOOK_BODY.hydra, style: LOOK_STYLE[config.look], user: userName, version: VERSION, panel: PANEL, voice: VOICE_ON() });
-const system = () => (config.lite ? litePrompt() : stablePrompt());
+let agentStyle = null;
+const system = () => {
+  const base = config.lite ? litePrompt() : stablePrompt();
+  return agentStyle ? `${base}\n\n${agentStyle}` : base;
+};
 const LIVE_OPEN = '<live-state>', LIVE_CLOSE = '</live-state>';
 const stripLive = (text) => (typeof text === 'string' && text.startsWith(LIVE_OPEN) ? text.slice(text.indexOf(LIVE_CLOSE) + LIVE_CLOSE.length).replace(/^\n+/, '') : text);
 // Each request's live block is made once and kept on that message from then on, so earlier messages
@@ -1694,7 +1707,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   let hatching = agentish;
   const hatchOff = () => { if (hatching) { hatching = false; ui({ kind: 'agents', e: { type: 'hatch_off' } }); } };
   // Voice: the socket opens now, while the model thinks; sentences are spoken as soon as each is ready.
-  const voice = VOICE_ON() ? speech.start() : (speech.stop(), null);
+  const voice = VOICE_ON() && !news ? speech.start() : (speech.stop(), null);
   turnVoice = voice;
   if (voice && intro) guideVoices.add(voice.id);
   if (voice) heardTrack.start(voice.id);
@@ -1705,7 +1718,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   // no progress line.
   const own = ownTurn({ text, news, intro: !!intro });
   const progress = turnProgress = startProgress({ voice: own && voice, live: () => busy && turnVoice === voice, muted: () => voiceMuted || voiceBusy,
-    waiting: () => yesNoOpen.size > 0, onLine: (line) => {
+    waiting: () => yesNoOpen.size > 0 || approvalOpen > 0, onLine: (line) => {
       ui({ kind: 'agent', e: { type: 'thinking', text: `${line} ` } });
       // A progress line after the answer (an addition being worked on): that answer is said, so the pending sound is back.
       if (answerSaid) { answerSaid = false; pendingNow(); }
@@ -1876,7 +1889,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // Asked by voice and answered with a question: the overlay opens the mic once the reply has been typed and said.
     // A reminder nudge, with "Listen after reminders" on: the same hands-free listen, for "snooze 10 minutes".
     // After every answer to something said, a follow-up window listens without the key phrase (W5 contract 4).
-    const listen = !stalled && !controller.signal.aborted && ((byVoice && autoListenOn() && listensAfter(lastReply, true)) || (listenAfter && snoozeListenOn())) ? { turn, speech: voice?.id ?? null } : null;
+    const listen = !stalled && !controller.signal.aborted && ((byVoice && autoListenOn() && listensAfter(lastReply, !!config.listenEvery)) || (listenAfter && snoozeListenOn())) ? { turn, speech: voice?.id ?? null } : null;
     autoTurn = listen ? turn : null;
     rated = !stalled && !controller.signal.aborted && !!turnWords && learn.ok + learn.bad > 0;
     const rate = rated && learningOn();
@@ -2734,7 +2747,7 @@ const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecog
 let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
 function onVoice(m) {
-  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') takeAt = Date.now(); stir(); pendingNow(); }
+  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') { emptyTake = true; takeAt = Date.now(); } stir(); pendingNow(); }
   // A take the helper says isn't the ask's (the owner's own, begun as the ask's was sent, so the helper never opened that
   // one): it isn't closed when the ask ends.
   if (m.type === 'voice_state' && m.state === 'listening' && askTake && m.ask !== true) askTake = null;
@@ -2749,13 +2762,14 @@ function onVoice(m) {
   else if (m.type === 'voice' && m.text?.trim()) {
     const held = cutTake ? afterHeld({ words: m.text, reply: heardTrack.said() }) : null;
     if (held === 'stop') { cutTake = false; speech.stop(); } // the owner said something over the reply: it stays cut
+    emptyTake = false;
     // Only Hydra's own words came back (a noise opened the take): dropped, and the reply goes on when the take ends.
     if (held === 'echo') { logLine('echo_words', { chars: m.text.trim().length }); return; }
     // Key release to the words arriving (mic tail and the recogniser finishing), to see what that step costs.
     if (typeof m.ms === 'number') logLine('voice_final', { ms: m.ms, via: String(m.via ?? ''), chars: m.text.trim().length });
     onSpoken(m.text.trim(), m.area);
   }
-  else if (m.type === 'voice_state' && m.state === 'idle') { addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (snap?.waitingVoice) snap.waitingVoice = false; if (cutTake) resumeCut(); } // the take ended (its words came first)
+  else if (m.type === 'voice_state' && m.state === 'idle') { addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (emptyTake) { emptyTake = false; power.takeEnded(); } if (snap?.waitingVoice) snap.waitingVoice = false; if (cutTake) resumeCut(); } // the take ended (its words came first)
   else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; voiceConfigSent = ''; voiceConfig(); }
   // "Clap twice" (the panel): the owner's claps set the detector for his room; the live level while the page is open.
   else if (m.type === 'voice_clap_calibrated') {
@@ -3383,6 +3397,10 @@ function hydraOnline() {
 // Hydra's settings changed (agentsettings.mjs): the sleep word and wake phrase go to the voice helper; a new model or
 // effort rebuilds the agent before the next request (the same conversation).
 function applyHydraSettings(next, before) {
+  const style = avatarStyle(agentSettings.avatar);
+  if (style !== agentStyle) { agentStyle = style; agentStale = true; }
+  const voiceId = agentSettings.avatar?.voiceId || '';
+  if (voiceId !== HydraVoice.voiceId) { HydraVoice.voiceId = voiceId; HydraVoice.forget(); }
   if (typeof next.sleepWord === 'string') {
     const c = cleanSleepWord(next.sleepWord);
     if (c.ok && c.phrase !== (config.sleepWord || '')) { config.sleepWord = c.phrase; saveConfig(); logLine('sleep_word', { from: 'hydra' }); }
@@ -3395,7 +3413,10 @@ function applyHydraSettings(next, before) {
 function localHydraTools() {
   if (!hydraKey) return [];
   return [
-    ...hydraTools.tools({ onConfirm: ({ summary }) => say(`That needs your yes in Hydra: ${summary}`, 'concerned') }),
+    ...hydraTools.tools({
+      onConfirm: ({ summary }) => say(`That needs your yes in Hydra: ${summary}`, 'concerned'),
+      onWait: (on) => { approvalOpen += on ? 1 : -1; if (approvalOpen < 0) approvalOpen = 0; pendingNow(); },
+    }),
     showTool({ onUi: (action) => { send({ type: 'main_show' }); pushWeb({ ui: { ...action, at: Date.now() } }); } }),
   ];
 }
@@ -3462,8 +3483,20 @@ async function relayTurn(turn, h) {
   const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
   // Hydra's model and effort (agent_settings): effort_routine for a routine, effort_live for the rest.
   const { model, thinking } = brainFor(agentSettings.current, turn.surface);
-  const agentRun = new ClaudeCodeAgent({
-    model, system: system(), tools: list, maxTurns: 24, thinking,
+  const route = gptRoute({ model, chatgpt: !!oauthOn.get('openai') });
+  const runModel = route.provider ? route.model : model;
+  if (route.note) emit({ type: 'text', delta: `${route.note} ` });
+  if (route.fallback || route.provider === 'openai') emit({ type: 'model', model: runModel, effort: thinking || 'low', ...(route.fallback ? { fallback: route.fallback } : {}) });
+  const agentRun = route.provider === 'openai'
+    ? new Agent({
+      model: runModel, provider: 'openai', system: system(), tools: list, maxTurns: 24, thinking, signal,
+      resolveCredentials: async () => {
+        const c = await credsFor('openai', runModel);
+        return { apiKey: c.accessToken, ...(c.accountId !== undefined ? { accountId: c.accountId } : {}) };
+      },
+    })
+    : new ClaudeCodeAgent({
+    model: runModel, system: system(), tools: list, maxTurns: 24, thinking,
     executable: cc.executable, env: cc.env, cwd: WORKDIR, signal, connectors: true,
     gate: (name, input, s) => inRelay(() => connectorGate(name, input, s, may)),
   });
@@ -3564,7 +3597,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     agents.sync();
   } else if (m.type?.startsWith('ob_') || m.type?.startsWith('chat_') || m.type === 'set_keys' || m.type === 'set_actions' || m.type === 'set_login' || m.type === 'keybind_error') onGuide(m).catch((e) => console.error('guide', e));
   // A clap or barge-in take (the helper's trigger): counts as talking. Before the voice* catch-all, which swallowed it.
-  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); takeVia = { via: String(m.via ?? ''), at: Date.now() }; if (m.via === 'barge') noteInterrupted(); power.talked(); }
+  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); takeVia = { via: String(m.via ?? ''), at: Date.now() }; if (m.via === 'barge') noteInterrupted(); if (['clap', 'phrase', 'keys', 'orb'].includes(m.via)) ui({ kind: 'woke', from: m.via }); }
   else if (m.type?.startsWith('voice')) onVoice(m);
   else if (m.type === 'snap') areaSnap();
   else if (m.type === 'write_tap') onWriteTap();

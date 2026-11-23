@@ -37,6 +37,7 @@ const reqs = [];
 const api = { req: async (p, o) => { reqs.push([p, o]); return { status, ok: status === 200, arrayBuffer: async () => new Uint8Array([0xff, 0xfb, 1, 2]).buffer }; } };
 let paired = true;
 HydraVoice.server = { api, paired: () => paired };
+HydraVoice.listVoices = async () => 'Samantha (Premium)  en_US    # Hello\nAlex                en_US    # Hello\n';
 
 // Paired: the server's voice.
 assert.deepEqual(await speak('Hello sir.'), [[40, SERVER_RATE]]);
@@ -48,13 +49,13 @@ status = 500;
 assert.deepEqual(await speak('One.'), [[20, SYSTEM_RATE]]);
 status = 200;
 assert.deepEqual(await speak('Two.'), [[40, SERVER_RATE]]);
-// No voice on the server (503): the Mac's voice, and the server isn't asked again for a while.
+// No voice on the server (503): one retry, then the Mac's voice. The next sentence tries Fish again.
 status = 503;
 const before = reqs.length;
 assert.deepEqual(await speak('Three.'), [[20, SYSTEM_RATE]]);
+assert.equal(reqs.length, before + 2, 'a 503 is tried once more');
 status = 200;
-assert.deepEqual(await speak('Four.'), [[20, SYSTEM_RATE]]);
-assert.equal(reqs.length, before + 1, 'after a 503 the server rests');
+assert.deepEqual(await speak('Four.'), [[40, SERVER_RATE]]);
 HydraVoice.resetForTests();
 // A Mac voice the owner picked: his voice, the server isn't asked.
 const m = reqs.length;

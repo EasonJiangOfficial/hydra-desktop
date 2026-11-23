@@ -992,7 +992,7 @@ final class Voice {
     private static let tapLimit = 0.25
     // A release must last this long to count, so one glitchy frame of key state can't end a session.
     private static let releaseDebounce = 0.09
-    private static let pauseEnds = 1.5
+    private static let pauseEnds = 1.2
     private static let wordsEnd = 2.5 // hands-free: no new words for this long ends it, even with background sound
     private static let maxSession = 60.0
     private static let wakeRecycle = 30.0 // a fresh wake recogniser this often, so memory stays bounded
@@ -1166,6 +1166,9 @@ final class Voice {
     }
     /// The take a wake opens (via 'wake'): if it hears nothing, Hydra just stays awake, with no "I didn't hear anything".
     private var quietEmpty = false
+    /// A clap or a wake take ignores words that were already being said when the chime started (a TV, a call).
+    private var roomTalk = false
+    private var takeVia = ""
     /// The take open now is one an ask opened (listen via 'ask'): only that one is closed by the ask's cancel (only
     /// "ask"). Any other take (the owner's keys, a clap, the phrase) clears it, as does the owner taking this one over.
     private var askTake = false
@@ -1182,6 +1185,8 @@ final class Voice {
         }
         if !dryRun { OutputMute.begin() }
         quietEmpty = via == "wake"
+        takeVia = via
+        roomTalk = false
         // The listen chime (cue.swift) only for the owner's own triggers; never the pending loop while he talks.
         Cue.pending(false)
         if !dryRun { if Cue.audible(via: via) { Cue.play("listen") } else { Cue.keepAudible() } }
@@ -1552,6 +1557,12 @@ final class Voice {
         }
         // A take started by the wake phrase: the phrase itself isn't part of what was said.
         let text = woke ? (WakeWord.match(raw) ?? WakeWord.dropping(wakeWords, from: raw)) : raw
+        // Speech already running when the chime started never confirms the take. Words after the chime do.
+        if (quietEmpty || takeVia == "clap"), uptime() < Cue.until + 0.05 {
+            roomTalk = true
+            return
+        }
+        if roomTalk { return }
         guard text != best else { return }
         best = text
         heardAt = uptime()
