@@ -48,7 +48,7 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { ASK_DEADLINE_MS, addOnTo, askForTake, createSpokenTrack, endNote, ownTurn, pcmSecs, pendingWanted, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
+import { ASK_DEADLINE_MS, addOnTo, askForTake, createSpokenTrack, endNote, ownTurn, pcmSecs, pendingWanted, retryText, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -104,7 +104,7 @@ const ui = (msg) => {
     if (msg.stop) { send({ type: 'onboard', msg }); nativeSpeech(msg); return send({ type: 'ui', msg }); }
     if (guideVoices.has(msg.id)) { if (msg.end) guideVoices.delete(msg.id); return send({ type: 'onboard', msg }); }
     // How much of the reply has played (voiceturn.mjs): where a barge-in cut it off.
-    if (msg.pcm) { heardTrack.audio(msg); if (msg.id === turnVoice?.id) turnProgress?.touch(pcmSecs(msg)); if (msg.id === turnVoice?.id) askAudio(pcmSecs(msg)); }
+    if (msg.pcm) { heardTrack.audio(msg); if (msg.id === turnVoice?.id) turnProgress?.touch(pcmSecs(msg)); }
     nativeSpeech(msg);
   }
   if (intro && msg.kind === 'agent') return send({ type: 'onboard', msg: { kind: 'chat', e: msg.e } });
@@ -138,16 +138,9 @@ function trackReply(msg) {
     replyPush(true); replyNow = null;
   }
 }
-// The owner's own pause: while it lasts, a yes/no's question still to play hasn't played (no take opens for it, no
-// word answers it), and it plays that much later.
-let pausedAt = 0;
+// The owner's own pause: the player holds, so a yes/no's question still to play reports played only once it has.
 function setPaused(on) {
   on = !!on;
-  if (on !== voicePaused) {
-    const t = Date.now();
-    if (on) pausedAt = t; else if (voiceEndsAt > pausedAt) voiceEndsAt += t - pausedAt;
-    for (const [id, w] of yesNoOpen) { w.a.hold(on, t); if (!on && w.a.voiced && !w.took) askArm(id, w); }
-  }
   voicePaused = on; send({ type: 'ui', msg: { kind: 'voice_pause', on: voicePaused } }); nativeSpeech({ paused: voicePaused }); pushWeb({ paused: voicePaused }); }
 // Hydra's voice on the Mac plays in the voice helper (W5 contract 6): the same voice-processing engine as the mic, so
 // echo cancellation hears it as its own. The overlay still schedules every chunk (silently) for its timing and the
@@ -1299,9 +1292,12 @@ const withoutLive = (msgs) => msgs.map((m) => {
   if (typeof m.content === 'string') { const c = stripLive(m.content); return c === m.content ? m : { ...m, content: c }; }
   return { ...m, content: m.content.map((p, j) => (j === 0 && p.type === 'text' ? { ...p, text: stripLive(p.text) } : p)) };
 });
-const syncSession = () => {
+// upTo: only the history before that index (a run retried after a usage limit is left out: its words go along with
+// the retry, so they are saved once).
+const syncSession = (upTo) => {
   if (!session || !agent) return;
-  session.messages = forDisk(withoutLive(agent.getMessages()));
+  const all = agent.getMessages();
+  session.messages = forDisk(withoutLive(Number.isInteger(upTo) && upTo >= 0 ? all.slice(0, upTo) : all));
   session.lastActiveAt = Date.now();
   if (pendingFold?.session === session) applyPendingFold(); else saveSession(session);
 };
@@ -1651,9 +1647,10 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   turnWords = news || intro || String(text).startsWith('(') ? '' : String(text);
   nextMessageLearn(turnWords);
   skillsUsed.clear();
-  // Retrying after a usage limit: the unanswered message is dropped from the conversation, and the next model is told.
+  // Retrying after a usage limit: the failed run is already out of the saved conversation (its words are this text), and
+  // the next model is told.
   const retrying = retryInfo?.text === text ? retryInfo : null, retryCount = retrying?.count ?? 0;
-  if (retrying) { retryInfo = retrying; if (session?.messages?.at(-1)?.role === 'user') session.messages.pop(); agent = null; }
+  if (retrying) { retryInfo = retrying; agent = null; }
   const handoff = routeForTurn(turnWords || '(system)');
   if (retrying) retryInfo = null;
   // Before busy: the fold under way lands now, and the agent is built from the folded history. The wait is part of the
@@ -1710,6 +1707,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     } });
   pendingVoice = own ? voice : null; answerSaid = false; pendingNow();
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null, hitMax = false, endLine = '';
+  let runFrom = -1; // where this request's own messages start in the agent's history
   let lastSeen = 0; // the newest call's whole prompt (cache log): tools, system prompt and chat
   try {
     // Voice: a short first line before a tool ("On it, checking Paris.") is a beat: it's spoken, but not
@@ -1779,6 +1777,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     };
     const ctl = controller;
     watch = stallWatch(STALL_MS, () => { stalled = true; logLine('stalled', { turn, ms: Date.now() - use.t }); ctl.abort(); });
+    runFrom = agent.getMessages().length;
     for await (const e of agentEvents(agent.prompt(content))) {
       watch.event(e);
       if (e.type === 'text_delta') {
@@ -1894,8 +1893,9 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       if (retryCount < 2 && firstFree(chainOrder(), limits).pick) {
         // The backup says how to give Roamies more of ChatGPT, since the error that would have isn't shown.
         const fix = explain('reply', err).where === 'chatgpt' ? chatGPTUsageHelp() : '';
-        // What they added while it worked goes along with the retry (R11e-6).
-        const again = [text, ...(agent?.unanswered?.() ?? [])].join('\n\n');
+        // What they added while it worked goes along with the retry (R11e-6), each once: the run's own messages (the
+        // request, what was added into it, any steps) are left out of the saved conversation (syncSession below).
+        const again = retryText({ messages: agent?.getMessages?.() ?? [], from: runFrom, text, unanswered: agent?.unanswered?.() ?? [] });
         retryNext = { text: again, image, note, byVoice, listenAfter, news, info: { text: again, from: modelName(config.model), untilText: untilWords(lim.until), kind: lim.kind, count: retryCount + 1, fix } };
       }
     }
@@ -1929,7 +1929,9 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // A tool cut off by Stop never reports back: end its tag too, or the Sidekick kept showing it ("looking at
     // CapCut") on every later request, with their own tags queued behind it.
     for (const id of activity.stopped()) ui({ kind: 'agent', e: { type: 'tool_end', id, isError: true } });
-    syncSession();
+    syncSession(retryNext ? runFrom : undefined);
+    // Its history is saved without the run the retry repeats: no later sync may write that run back.
+    if (retryNext) agent = null;
     // This request's turns, once they're in the session: the skill pass may learn from them (after their next message).
     let req = null;
     if ((learnAfter || rated) && session) {
@@ -1994,20 +1996,18 @@ const panelAsk = (msg) => send({ type: 'panel', msg });
 // The yes/no asks showing now (oneYesNoAtATime: one at a time): progress lines wait for them, and in a voice turn a
 // clear spoken yes or no answers the one Hydra said aloud (onSpoken).
 const yesNoOpen = new Map();
-// The ask's own take (C3): it opens only once the question Hydra said has played (trackAsk heardAt: from the turn's
-// voice chunks as they come, held time added), never in a gap before it, and closes the moment the ask is answered any
-// way, ends, or Stop is pressed. voiceEndsAt: when the turn's queued voice ends playing. askTake: { id } of the take
-// opened for an ask (until it ends).
-let voiceEndsAt = 0, askTake = null;
-function askAudio(secs) {
-  voiceEndsAt = Math.max(voiceEndsAt, Date.now()) + secs * 1000;
-  for (const [id, w] of yesNoOpen) if (w.a.voiced && w.voice === turnVoice) { w.a.audio(secs, voiceEndsAt); askArm(id, w); }
+// The ask's own take (C3): it opens only once the question Hydra said has really played (principle 1: the player that
+// plays the voice, the Mac's voice helper or the overlay, reports the question's mark: voice_played), never on a guess
+// or in a gap before it, and closes the moment the ask is answered any way, ends, or Stop is pressed. A pause or the
+// owner talking holds the player, so the report waits for that too. askTake: { id } of the take opened for an ask
+// (until it ends).
+let askTake = null;
+function askPlayed(mark) {
+  for (const [id, w] of yesNoOpen) if (mark && w.a.mark === mark) { w.a.played(Date.now()); askArm(id, w); }
 }
 // One take per ask (w.took), once it has played; another take under way then (the owner's) goes first, and the ask's
 // opens when that one ends (voice_state idle) unless it answered.
 function askArm(id, w) {
-  // More of it still to play: a take opened too soon closes, and opens again once it has been said.
-  if (askTake?.id === id) { askTakeEnd(id); w.took = false; }
   clearTimeout(w.timer); w.timer = null;
   // Asleep (the sleep word, the menu): the mic never opens by itself.
   const at = w.a.heardAt;
@@ -2052,8 +2052,8 @@ function showAsk(opts, signal) {
       // Answered any way, ended or cancelled: the take opened for it closes (one that heard the answer has already ended).
       resolve: (v, by) => { if (by === 'voice' && askTake?.id === id) askTake = null; askTakeEnd(id); pending.delete(id); yesNoOpen.delete(id); pendingNow(); power.busy(); resolve(v); } });
     pending.set(id, (text) => a.answer(text));
-    // Said aloud: a short take opens once its question has played (askAudio), so a bare "yes" is heard.
-    if (opts.choices) { if (voicePaused) a.hold(true); yesNoOpen.set(id, { a, to, voice }); pendingNow(); }
+    // Said aloud: a short take opens once its question has played (askPlayed), so a bare "yes" is heard.
+    if (opts.choices) { yesNoOpen.set(id, { a, to, voice }); pendingNow(); }
     // Another route finished first (e.g. the OAuth callback server): close the input bubble.
     signal?.addEventListener('abort', () => { to({ kind: 'cancel_ask', id }); a.cancel(); }, { once: true });
   });
@@ -3167,17 +3167,11 @@ let addOnTake = false;
 let takeAt = null; // when the newest take started listening (its voice_state)
 // While the owner talks over a working turn its voice holds (paused, never cut), and goes on once the take ends; the
 // owner's own pause (voicePaused) is left as it is.
-let hushed = false, hushedAt = 0;
+// Held while the owner talks: what was still to play (an ask's question) reports played only once it has.
+let hushed = false;
 function hush(on) {
   if (on === hushed) return;
   hushed = on;
-  // Held while the owner talked: what was still to play (an ask's question) ends that much later.
-  if (on) hushedAt = Date.now();
-  else {
-    const t = Date.now();
-    if (voiceEndsAt > hushedAt) voiceEndsAt += t - hushedAt;
-    for (const [id, w] of yesNoOpen) { w.a.held(hushedAt, t); if (w.timer) askArm(id, w); }
-  }
   if (!voicePaused) { send({ type: 'ui', msg: { kind: 'voice_pause', on } }); nativeSpeech({ paused: on }); }
 }
 function addOn(text) {
@@ -3578,6 +3572,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'voice_barge_unavailable') { bargeUnavailable = true; logLine('barge', { unavailable: true }); if (panelOpen) panel(); }
   // Talking over Hydra (barge-in): the helper already cut its voice off; the next turn knows what was heard.
   else if (m.type === 'hydra_settings_changed') agentSettings.refresh();
+  // The player played an ask's question to its end (its mark): the voice helper on the Mac, else the overlay.
+  else if (m.type === 'voice_played') askPlayed(String(m.mark ?? ''));
   else if (m.type === 'reply_said') { heardTrack.finished(); power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on
   // A link clicked on the research card: web and mail links only.

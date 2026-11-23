@@ -172,28 +172,33 @@ export function parseKey(combo) {
   const k = keys[0];
   return { mods, key: k === 'enter' ? 'return' : k === 'backspace' ? 'delete' : k };
 }
-/** A key step that deletes (delete or forward delete, with any modifiers): what's selected in Mail, Notes, Reminders,
- *  Finder… goes. Also the Cocoa text chords that delete as those keys do: ctrl+h (delete back), ctrl+d (delete forward),
- *  ctrl+k (delete to the end of the line). Tags the plan's ask as a deletion, so Approve all never runs it unasked. */
-export const deletesKey = (combo) => {
-  const p = parseKey(combo);
-  if (!p) return false;
-  if (p.key === 'delete' || p.key === 'forwarddelete') return true;
-  return p.mods.has('ctrl') && !p.mods.has('cmd') && ['h', 'd', 'k'].includes(p.key);
-};
-/** Steps that lose what's there (act_in_app's plan, draw's typing): a delete key or chord (deletesKey), or after a
- *  select-all (cmd+a) anything that types over it, pastes over it, cuts it or fills a field. Tags the ask a deletion. */
-export function stepsLose(steps) {
-  let all = false;
-  for (const s of steps ?? []) {
-    const key = s?.do === 'key' ? parseKey(s.key) : null;
-    if (key && deletesKey(s.key)) return true;
-    const cuts = !!key && key.mods.has('cmd') && key.key === 'x';
-    if (all && (['type', 'fill', 'set'].includes(s?.do) || cuts || (key && (isPasteKey(s.key) || keyChar(s.key))))) return true;
-    if (key && key.mods.has('cmd') && key.key === 'a') all = true;
+// Approve all's one rule for a plan of steps (act_in_app, draw's typing): it runs unasked only when EVERY step is in
+// this safe set. Any other step (a selection: cmd+a, shift or cmd+shift with a key, a "Select All" click; a delete key
+// or chord: Backspace, Delete, ctrl+h, ctrl+d, ctrl+k; cut, copy, paste; fill, set, choose; any key or step kind not
+// listed) makes the whole plan deletion-class, so it asks as with Approve all off. A whitelist, never a list of
+// dangerous keys: what isn't known to be safe asks. Typing is safe only with no selection before it, which a safe plan
+// can't make.
+const SAFE_KINDS = new Set(['click', 'click_text', 'click_at', 'hover', 'scroll', 'focus', 'wait', 'type', 'read_window', 'take_screenshot', 'screenshot']);
+const ARROWS = new Set(['left', 'right', 'up', 'down']);
+// A control clicked by its name that selects, moves or edits text (the Edit menu's items).
+const EDIT_CLICK = /^\s*(?:select(?: all)?|cut|copy|paste(?: and match style)?|delete|clear|replace|undo|redo)\b/i;
+function safeStep(s) {
+  if (!SAFE_KINDS.has(s?.do)) {
+    if (s?.do !== 'key') return false;
+    const p = parseKey(s.key);
+    if (!p) return false;
+    // Arrows move the caret (with cmd, opt or ctrl too); with shift they select.
+    if (ARROWS.has(p.key)) return !p.mods.has('shift');
+    // Return, Tab and Escape, alone or with shift (a new line, the field before).
+    return ['return', 'tab', 'escape', 'esc'].includes(p.key) && [...p.mods].every((m) => m === 'shift');
   }
-  return false;
+  return !['click', 'click_text', 'hover'].includes(s.do) || !EDIT_CLICK.test(String(s.text ?? s.shown ?? s.label ?? ''));
 }
+/** A plan that can lose what's there (any step outside the safe set): its ask is a deletion. */
+export const stepsLose = (steps) => !Array.isArray(steps) || !steps.every(safeStep);
+/** Approve all's tag for a plan: a deletion when it can lose what's there (stepsLose) or runs in a password manager
+ *  (its vault comes forward). The one place act_in_app and draw's typing take it from. */
+export const planDeletion = (steps, apps = []) => stepsLose(steps) || apps.some(isPasswordApp);
 export function riskyKey(combo) {
   const p = parseKey(combo);
   if (!p || !p.mods.has('cmd')) return null;
@@ -316,9 +321,12 @@ const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) 
 });
 // Password managers and 2FA code apps, with a Beta, Nightly, Desktop or version after the name ("1Password Beta",
 // "Authy Desktop", "Secrets 4"). ponytail: names from memory, not read off a Mac; add any the owner uses.
-const PASSWORD_APPS = /^(?:1password|bitwarden|lastpass|dashlane|keeper(?: password manager)?|keepass\w*|keeweb|macpass|kypass|minikeepass|strongbox|enpass|proton pass|nordpass|roboform|passwords|keychain access|secrets|codebook|buttercup|padloc|psono|passbolt|sticky password|myki|authy|(?:google |microsoft )?authenticator|2fas(?: auth)?|ente auth|step two|otp auth|raivo(?: otp)?|aegis)(?:[ -](?:beta|nightly|desktop|\d+(?:\.\d+)*))*$/i;
-/** A password manager (its window shows sign-ins): bringing it forward asks under Approve all too (tools.mjs). */
-export const isPasswordApp = (app) => PASSWORD_APPS.test(String(app ?? '').trim().replace(/\.app$/i, ''));
+const PASSWORD_APPS = /^(?:1password|bitwarden|lastpass|dashlane|keeper(?: password manager)?|keepass\w*|keeweb|macpass|kypass|minikeepass|strongbox|enpass|proton pass|nordpass|roboform|(?:apple )?passwords|keychain access|secrets|codebook|buttercup|padloc|psono|passbolt|sticky password|myki|authy|(?:google |microsoft )?authenticator|2fas(?: auth)?|ente auth|step two|otp auth|raivo(?: otp)?|aegis)(?:[ -](?:beta|nightly|desktop|\d+(?:\.\d+)*))*$/i;
+// Any other name or bundle id with one of these in it ("Passwords Pro", com.agilebits.onepassword7, "OTP Manager").
+const PASSWORD_WORDS = /password|vault|keychain|authenticator|(?:^|[^a-z0-9])otp|2fa/i;
+/** A password manager or 2FA app (its window shows sign-ins), by name or bundle id: bringing it forward asks under
+ *  Approve all too (tools.mjs). */
+export const isPasswordApp = (app) => { const a = String(app ?? '').trim().replace(/\.app$/i, ''); return PASSWORD_APPS.test(a) || PASSWORD_WORDS.test(a); };
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -347,7 +355,7 @@ export function checkWindow(win, home, { viewers = true } = {}) {
     worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a password, a message, a terminal).`), app };
   }
   // A password manager's window shows sign-ins: Approve all never answers it (secret), and no earlier yes covers it.
-  if (worst.level === ASK && PASSWORD_APPS.test(app)) worst = { ...worst, secret: true };
+  if (worst.level === ASK && isPasswordApp(app)) worst = { ...worst, secret: true };
   return worst;
 }
 

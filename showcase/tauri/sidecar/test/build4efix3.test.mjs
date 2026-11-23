@@ -34,7 +34,7 @@ process.env.ROAMIES_HANDS = stub;
 
 const { askForTake, spokenAnswer, trackAsk } = await import('../voiceturn.mjs');
 const { createSpeaker } = await import('../speaker.mjs');
-const { approveAllSays, checkWindow, deletesKey, isPasswordApp, stepsLose } = await import('../safety.mjs');
+const { approveAllSays, checkWindow, isPasswordApp, stepsLose } = await import('../safety.mjs');
 const { createTools } = await import('../tools.mjs');
 const S = await import('../store.mjs');
 const { ClaudeCodeAgent } = await import('../claudecode.mjs');
@@ -67,19 +67,19 @@ function piece(from, to, names, st) {
   assert.ok(a >= 0 && b > a, `sidekick.mjs has ${from}`);
   return new Function('st', `with (st) { ${side.slice(a, b)}; return { ${names.join(', ')} }; }`)(st);
 }
-// The ask machinery of sidekick.mjs on a fake clock: askAudio, askArm, askTakeEnd, asksAsleep, and setPaused.
-function askRig({ tally = null, paused = false } = {}) {
+// The ask machinery of sidekick.mjs on a fake clock: askPlayed, askArm, askTakeEnd, asksAsleep, and setPaused.
+function askRig({ paused = false } = {}) {
   const c = fakeClock(), sent = [];
-  const V = { id: 's1', progress: () => true, ...(tally ? { tally } : {}) };
-  const st = { power: { asleep: false }, voicePaused: paused, yesNoOpen: new Map(), turnVoice: V, voiceBusy: false, voiceEndsAt: 0, askTake: null, send: (m) => sent.push(m),
+  let marks = 0;
+  const V = { id: 's1', progress: () => `s1q${++marks}` };
+  const st = { power: { asleep: false }, voicePaused: paused, yesNoOpen: new Map(), turnVoice: V, voiceBusy: false, askTake: null, send: (m) => sent.push(m),
     nativeSpeech: () => {}, pushWeb: () => {}, Date: { now: c.now }, setTimeout: (f, ms) => c.setTimer(f, ms), clearTimeout: (h) => h && c.clearTimer(h) };
-  Object.assign(st, piece('function askAudio(secs) {', 'function showAsk(', ['askAudio', 'askArm', 'askTakeEnd', 'asksAsleep'], st));
-  Object.assign(st, piece('let pausedAt = 0;', "// Hydra's voice on the Mac plays", ['setPaused'], st));
+  Object.assign(st, piece('function askPlayed(mark) {', 'function showAsk(', ['askPlayed', 'askArm', 'askTakeEnd', 'asksAsleep'], st));
+  Object.assign(st, piece('function setPaused(on) {', "// Hydra's voice on the Mac plays", ['setPaused'], st));
   const ask = (id, question = 'Can I quit Safari?') => {
     const shown = [];
     const w = { voice: V, to: (m) => shown.push(m), shown };
     w.a = trackAsk({ id, route: 'overlay', question, choices: true, voice: V, resolve: (v) => { w.answer = v; st.askTakeEnd(id); st.yesNoOpen.delete(id); }, ...c });
-    if (st.voicePaused) w.a.hold(true); // as showAsk does
     st.yesNoOpen.set(id, w);
     return w;
   };
@@ -90,8 +90,8 @@ function askRig({ tally = null, paused = false } = {}) {
 {
   const r = askRig();
   const w = r.ask('a1', 'Save the skill "x"?');
-  r.st.askAudio(3); // its question queued: its take's timer is armed
-  r.c.advance(1000);
+  r.st.askPlayed(w.a.mark); // its question played: its take's timer is armed
+  r.c.advance(100);
   r.st.power.asleep = true; // the sleep word
   r.c.advance(3000);
   assert.deepEqual(r.types(), [], 'the armed timer opens nothing asleep');
@@ -103,74 +103,89 @@ function askRig({ tally = null, paused = false } = {}) {
   assert.match(side, /if \(asleep\) \{ asksAsleep\(\); speech\.stop\(\); send\(\{ type: 'listen_cancel' \}\);/, 'the sleep runs it');
 }
 
-// ---- 2. Only the question's own audio counts: narration still owed when it was asked plays first.
+// ---- 2. Only the question's own audio counts, as the player played it (build4efix4, principle 1): narration before it,
+// a slow voice or a late sentence never make it heard; its mark comes back only after its last audio.
 {
-  // The voice had handed on "Sure, I'll quit Safari for you now." (36 characters, about 2.5 s) and no audio yet.
-  const r = askRig({ tally: () => ({ chars: 36, secs: 0 }) });
+  const r = askRig();
   const w = r.ask('a1');
-  r.c.advance(500); r.st.askAudio(2.5); // the narration's audio
-  assert.equal(w.a.heardAt, null, 'narration alone is not the question');
-  r.c.advance(3500); // the question's audio is late (a slow sentence request)
+  r.c.advance(20_000); // narration plays, the question's own audio is late (a slow voice, a slow sentence request)
   assert.deepEqual(r.types(), [], 'no take before the question played');
-  assert.equal(askForTake(r.st.yesNoOpen, { text: 'okay', takeAt: 3400 }), null, 'and no word answers it');
-  r.st.askAudio(2.4); // the question's own audio
-  assert.ok(Number.isFinite(w.a.heardAt), 'its own audio: heard');
-  r.c.advance(3000);
+  assert.equal(askForTake(r.st.yesNoOpen, { text: 'yes', takeAt: 19_000 }), null, 'and no word answers it');
+  r.st.askPlayed(w.a.mark); // the player: all of it has played
+  assert.equal(w.a.heardAt, 20_000, 'heard when the player says');
+  r.c.advance(400);
   assert.deepEqual(r.types(), ['listen'], 'then its take opens');
-  // The voices count what they were handed and the audio they gave (both engines).
+  // The voices give the mark after the question's last audio, never before it (both engines).
   const out = [];
+  let sv = null;
   class Studio {
-    constructor(o) { Object.assign(this, o); }
+    constructor(o) { Object.assign(this, o); sv = this; this.q = []; }
     open() { return this; }
-    say() { queueMicrotask(() => this.onAudio(new Int16Array(4410), 44100)); }
-    end() { queueMicrotask(() => this.onEnd()); }
+    say(t, done) { this.q.push([t, done]); }
+    // VoiceStudio sends a sentence's audio, then its "done".
+    sentence() { const [, done] = this.q.shift(); this.onAudio(new Int16Array(4410), 44100); this.onAudio(new Int16Array(4410), 44100); done?.(); }
+    end() { this.onEnd(); }
     abort() {}
   }
   const sp = createSpeaker({ emit: (m) => out.push(m), LocalVoiceImpl: Studio, localStatus: async () => ({ ok: true }), bundled: () => null, keepWarmMs: 1e9 });
   sp.setProvider('voicestudio');
   const v = sp.start();
   v.say("Sure, I'll quit Safari for you now.");
-  assert.deepEqual(v.tally(), { chars: 36, secs: 0 }, 'handed on, no audio yet');
-  await new Promise((res) => setTimeout(res, 5));
-  assert.equal(v.tally().secs, 0.1, 'its audio counted');
+  const m = v.progress('Can I quit Safari? Say yes or no.', 'ask');
+  assert.match(m, /^s\d+q1$/, 'an ask gives back its mark');
+  assert.deepEqual(out.filter((x) => x.mark), [], 'not before any audio');
+  sv.sentence(); // the narration's audio
+  assert.deepEqual(out.filter((x) => x.mark), [], 'nor after the narration');
+  sv.sentence(); // the question's
+  assert.deepEqual(out.slice(-1), [{ kind: 'speech', id: v.id, mark: m }], 'right after the last of its audio');
+  assert.equal(out.filter((x) => x.pcm).length, 4);
+  // Fish: the socket that said the question is sealed (stop), so its end is all of it; the reply goes on in a new one
+  // whose audio waits for the old one's.
+  const socks = [], fout = [];
   class Fish {
-    constructor(o) { Object.assign(this, o); }
-    open() { return this; }
-    say() {}
-    end() {}
+    constructor(o) { Object.assign(this, o); this.said = []; socks.push(this); }
+    open() { this.opened = true; return this; }
+    say(t) { this.said.push(t); }
+    end() { this.ended = true; }
     abort() {}
     rebind(cbs) { Object.assign(this, cbs); return true; }
   }
-  let fishV = null;
-  const fish = createSpeaker({ emit: () => {}, FishVoiceImpl: class extends Fish { constructor(o) { super(o); fishV = this; } }, account: async () => ({ ok: true, credit: 4 }), beatPhrases: [], bundled: () => null });
+  const fish = createSpeaker({ emit: (x) => fout.push(x), FishVoiceImpl: Fish, account: async () => ({ ok: true, credit: 4 }), beatPhrases: [], bundled: () => null });
   fish.setKey('k'); await new Promise((res) => setTimeout(res, 0));
   const f = fish.start();
   f.say('Opening it.');
-  assert.equal(f.tally().chars, 12);
-  fishV.onAudio(new Int16Array(4410));
-  assert.ok(f.tally().secs > 0, 'Fish: its audio counted');
+  const fm = f.progress('Can I quit Safari? Say yes or no.', 'ask');
+  assert.match(fm, /^s\d+q1$/);
+  assert.equal(socks.length, 2, 'a new socket for after the question');
+  assert.deepEqual([socks[0].said, socks[0].ended], [['Opening it.', 'Can I quit Safari? Say yes or no.'], true], 'the question sealed its socket');
+  assert.equal(socks[1].opened, undefined, 'the next one opens with its first sentence');
+  socks[0].onAudio(new Uint8Array(8));
+  f.say('Quit it.'); socks[1].onAudio(new Uint8Array(4)); // the answer after a quick yes: its audio waits
+  assert.equal(fout.filter((x) => x.pcm).length, 1, 'held behind the question');
+  assert.deepEqual(fout.filter((x) => x.mark), [], 'no mark while the question still comes');
+  socks[0].onAudio(new Uint8Array(8)); socks[0].onEnd();
+  const tail = fout.slice(-3).map((x) => (x.mark ? `mark ${x.mark}` : x.pcm ? `pcm ${Buffer.from(x.pcm, 'base64').length}` : JSON.stringify(x)));
+  assert.deepEqual(tail, ['pcm 8', `mark ${fm}`, 'pcm 4'], 'the question, its mark, then the answer');
+  f.end(); assert.equal(socks[1].ended, true); socks[1].onEnd();
+  assert.equal(fout.at(-1).end, true, 'the reply ends after its last socket');
 }
 
-// ---- 3. The owner's own pause holds a question still to play: no take, no spoken answer, until it plays.
+// ---- 3. The owner's own pause holds the player, so a question still to play reports nothing (no take, no spoken
+// answer) until it has played; setPaused only passes the pause on.
 {
   const r = askRig({ paused: true });
   const w = r.ask('a1');
-  r.c.advance(300); r.st.askAudio(2.4); r.c.advance(3000);
+  r.c.advance(10_000);
   assert.deepEqual(r.types(), [], 'paused: no take');
   assert.equal(w.a.heardAt, null);
   assert.equal(askForTake(r.st.yesNoOpen, { text: 'yes', takeAt: 3300 }), null, 'paused: no word answers it');
-  r.c.advance(1700); r.st.setPaused(false); // unpaused at 5000: it plays from now
-  assert.ok(w.a.heardAt >= 5000 + 2000, `it plays after the pause (${w.a.heardAt})`);
-  r.c.advance(1000);
-  assert.deepEqual(r.types(), [], 'not before it played');
+  r.st.setPaused(false);
   r.c.advance(5000);
+  assert.deepEqual(r.types(), [], 'unpaused: still not before it played');
+  r.st.askPlayed(w.a.mark); r.c.advance(400);
   assert.deepEqual(r.types(), ['listen'], 'then its take');
-  // Paused after its take was due to open: the armed timer opens nothing.
-  const q = askRig();
-  q.ask('a1'); q.st.askAudio(2.4);
-  q.c.advance(1000); q.st.setPaused(true); q.c.advance(5000);
-  assert.deepEqual(q.types(), [], 'paused mid-question: no take');
-  assert.match(side, /if \(opts\.choices\) \{ if \(voicePaused\) a\.hold\(true\);/, 'an ask shown while paused starts held');
+  // The players hold their report while paused (hydraout.swift PlayMarks, voice-out.js by the audio clock).
+  assert.match(fs.readFileSync(new URL('voice/hydraout.swift', tauri), 'utf8'), /completionCallbackType: \.dataPlayedBack/, 'the helper counts what was played out');
 }
 
 // ---- 4. An acknowledgement is no answer to a yes/no.
@@ -184,7 +199,7 @@ function askRig({ tally = null, paused = false } = {}) {
 // ---- 5. An ask closes only its own take: the helper says which take it opened, and its cancel names the ask.
 {
   const r = askRig();
-  r.ask('a1'); r.st.askAudio(2.4); r.c.advance(3000);
+  r.st.askPlayed(r.ask('a1').a.mark); r.c.advance(3000);
   assert.deepEqual(r.sent, [{ type: 'listen', via: 'ask', wait: 8 }]);
   // The owner pressed the talk keys as it was sent: the helper's take is his (no ask: true).
   r.st.m = { type: 'voice_state', state: 'listening', mode: 'hold' };
@@ -194,7 +209,7 @@ function askRig({ tally = null, paused = false } = {}) {
   assert.deepEqual(r.sent.slice(1), [], 'so the ask ending never cancels it');
   // Its own take: closed with only: 'ask'.
   const q = askRig();
-  q.ask('a1'); q.st.askAudio(2.4); q.c.advance(3000);
+  q.st.askPlayed(q.ask('a1').a.mark); q.c.advance(3000);
   q.st.m = { type: 'voice_state', state: 'listening', mode: 'handsfree', ask: true };
   new Function('st', `with (st) { ${side.slice(side.indexOf("  // A take the helper says isn't the ask's"), side.indexOf('  // Any take while Hydra works'))} }`)(q.st);
   assert.equal(q.st.askTake?.id, 'a1');
@@ -241,29 +256,31 @@ const tags = (x) => x.asks.map((a) => [a.auto, a.deletion]);
   const act = await run('gone', (T) => T('act_in_app').execute({ target: '1Password', steps: [{ do: 'key', key: 'tab' }] }, {}), { owner: (q) => (q.startsWith('In ') ? 'yes' : null) });
   assert.deepEqual(tags(act), [[false, true], [false, true]], `the plan and the launch both ask: ${JSON.stringify(act)}`);
   assert.doesNotMatch(act.opened, /1Password/, 'never launched on a no');
-  // 9, 10. Delete chords and replace-all plans are deletions; a plain plan is not.
-  for (const k of ['ctrl+h', 'ctrl+d', 'ctrl+k', 'control+h']) assert.equal(deletesKey(k), true, k);
-  for (const k of ['cmd+d', 'cmd+k', 'h', 'ctrl+a']) assert.equal(deletesKey(k), false, k);
+  // 9, 10 (build4efix4: one safe-step whitelist, safety.mjs stepsLose). Delete keys and chords, selections, replace-all
+  // plans, cut, copy, paste, fill and any key not in the safe set are deletions; asked under Approve all.
   for (const steps of [[{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'ctrl+h' }], [{ do: 'key', key: 'cmd+a' }, { do: 'type', text: 'x' }], [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'cmd+x' }],
-    [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'x' }]]) {
+    [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'x' }], [{ do: 'key', key: 'ctrl+d' }], [{ do: 'key', key: 'ctrl+k' }], [{ do: 'key', key: 'control+h' }]]) {
     assert.equal(stepsLose(steps), true, JSON.stringify(steps));
     const x = await run('notes', (T) => T('act_in_app').execute({ target: 'Notes', steps }, {}));
     assert.deepEqual(tags(x), [[false, true]], `asked: ${JSON.stringify(steps)} ${JSON.stringify(x)}`);
     assert.ok(!x.calls.some((c) => c[0] === 'act'), 'nothing ran on a no');
   }
-  for (const steps of [[{ do: 'type', text: 'hello' }], [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'cmd+c' }]]) assert.equal(stepsLose(steps), false, JSON.stringify(steps));
+  for (const steps of [[{ do: 'type', text: 'hello' }], [{ do: 'click_text', text: 'Next' }, { do: 'key', key: 'return' }, { do: 'key', key: 'tab' }, { do: 'key', key: 'shift+tab' },
+    { do: 'key', key: 'escape' }, { do: 'key', key: 'down' }, { do: 'key', key: 'cmd+left' }, { do: 'scroll', direction: 'down' }, { do: 'wait', seconds: 1 }, { do: 'focus', id: 2 }, { do: 'hover', text: 'Menu' }, { do: 'click_at', x: 1, y: 2 }]]) {
+    assert.equal(stepsLose(steps), false, JSON.stringify(steps));
+  }
   const ok = await run('notes', (T) => T('act_in_app').execute({ target: 'Notes', steps: [{ do: 'type', text: 'hello' }] }, {}));
   assert.deepEqual(tags(ok), [[true, false]], 'typing alone runs under Approve all');
   const tools = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
-  assert.match(tools, /const deletes = notes\.length > 0 \|\| stepsLose\(left\) \|\| isPasswordApp\(r\.app\)/, 'the re-ask in another app too');
   assert.match(tools, /it replaces what's there\)\?\\n\$\{m\.text\}`, undefined, \{ deletion: true \}/, "draw's clipboard replace asks");
-  assert.match(tools, /const loses = steps\.some\(\(st\) => st\.do === 'fill'\) \|\| stepsLose\(steps\)/, "draw's typing over a field asks");
-  // 11. More password managers and 2FA apps.
-  for (const a of ['MacPass', 'Secrets 4', '1Password Beta', 'Authy Desktop', 'Google Authenticator', 'KeePassXC', 'Bitwarden', 'Strongbox']) {
+  assert.match(tools, /\{ deletion: planDeletion\(steps, \[where, app\.app\]\) \}/, "draw's typing takes the same rule");
+  // 11. Password managers and 2FA apps, by the list and by a name or bundle id pattern.
+  for (const a of ['MacPass', 'Secrets 4', '1Password Beta', 'Authy Desktop', 'Google Authenticator', 'KeePassXC', 'Bitwarden', 'Strongbox', 'Dashlane', 'Keeper', 'LastPass', 'Enpass', 'NordPass',
+    'Proton Pass', 'RoboForm', 'Keychain Access', 'Apple Passwords', 'Passwords', 'Microsoft Authenticator', '2FAS', 'Raivo', 'Step Two', 'OTP Auth', 'com.agilebits.onepassword7', 'OTP Manager', 'Vault 7', 'Passwordless Demo']) {
     assert.equal(isPasswordApp(a), true, a);
     assert.equal(checkWindow({ app: a }, os.homedir()).secret, true, `${a}'s window is a secret read`);
   }
-  for (const a of ['Notes', 'Safari', 'Secret Santa', 'Passwordless Demo']) assert.equal(isPasswordApp(a), false, a);
+  for (const a of ['Notes', 'Safari', 'Secret Santa', 'Hotpot', 'Spotify', 'Photos']) assert.equal(isPasswordApp(a), false, a);
 }
 
 // ---- 12. Folding goes on when the first reply was plain and every later one asks; the kept part ends under the trigger.

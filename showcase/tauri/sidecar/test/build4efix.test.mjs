@@ -20,7 +20,7 @@ process.env.ROAMIES_DATA_DIR = mkdtempSync(path.join(os.tmpdir(), 'b4fix-'));
 const { askForTake, ownTurn, spokenAnswer, spokenQuestion, startProgress, trackAsk, ASK_DEADLINE_MS } = await import('../voiceturn.mjs');
 const { heardSleepWord } = await import('../power.mjs');
 const { canNudge } = await import('../agents.mjs');
-const { checkRead, checkWindow, deletesCall, deletesKey } = await import('../safety.mjs');
+const { checkRead, checkWindow, deletesCall, stepsLose } = await import('../safety.mjs');
 const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await import('../relayschema.mjs');
 const { CAPABILITIES, hydraApi } = await import('../hydramcp.mjs');
 const S = await import('../store.mjs');
@@ -58,7 +58,7 @@ function fakeClock() {
 // ---- 2. Only a take that started after the question was shown answers it ("okay thanks" from before means else).
 {
   const c = fakeClock();
-  const voice = { progress: () => true };
+  const voice = { progress: () => 'q1' };
   c.advance(1000);
   const a = trackAsk({ id: 'a1', route: 'overlay', question: 'Open ui.elevenlabs.io?', choices: true, voice, resolve: () => {}, ...c });
   const open = new Map([['a1', { a }]]);
@@ -66,7 +66,7 @@ function fakeClock() {
   assert.equal(askForTake(open, { text: 'yes', takeAt: null }), null, 'nor one whose start is unknown');
   // Lane E round 2: shown is not heard. Only a take that started once its question had played answers it.
   assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 1200 }), null, 'a take before its question played never does');
-  a.audio(3, 4000);
+  c.advance(3000); a.played(); // the player says all of it has played (build4efix4: its mark, not a guess)
   assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 3999 }), null, 'nor one that started while it played');
   assert.equal(askForTake(open, { text: 'yes', takeAt: 4000 })?.said, 'yes', 'a take after it played does');
   assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 4000 }), null, '"okay thanks" is no answer, even after it played (lane E round 3)');
@@ -108,7 +108,7 @@ function fakeClock() {
   assert.equal(askForTake(new Map([['a1', { a }]]), { text: 'yes', takeAt: 10 }), null, 'so no spoken yes answers it');
   c.advance(ASK_DEADLINE_MS);
   assert.equal(got, null); assert.equal(said.length, 1, 'and its expiry says nothing');
-  const live = { progress: (l) => { said.push(l); return true; } };
+  const live = { progress: (l) => { said.push(l); return 'q1'; } };
   const b = trackAsk({ id: 'b1', route: 'panel', question: 'Open Mail?', choices: true, voice: live, resolve: () => {}, ...c });
   assert.equal(b.voiced, true);
   b.unvoice();
@@ -139,9 +139,10 @@ function fakeClock() {
 
 // ---- 9. A Delete key (with or without cmd) makes the plan a deletion, so Approve all asks.
 {
-  for (const k of ['delete', 'backspace', 'forwarddelete', 'cmd+delete', 'shift+delete']) assert.equal(deletesKey(k), true, k);
-  for (const k of ['return', 'a', 'cmd+s', 'tab']) assert.equal(deletesKey(k), false, k);
-  assert.match(tools, /deletion: notes\.length > 0 \|\| stepsLose\(mapped\)/, 'stepsLose counts every deletesKey step (round 3)');
+  // build4efix4: Approve all's safe-step whitelist decides it (safety.mjs stepsLose): a delete key is never safe.
+  for (const k of ['delete', 'backspace', 'forwarddelete', 'cmd+delete', 'shift+delete']) assert.equal(stepsLose([{ do: 'key', key: k }]), true, k);
+  for (const k of ['return', 'tab']) assert.equal(stepsLose([{ do: 'key', key: k }]), false, k);
+  assert.match(tools, /let tagged = notes\.length > 0 \|\| planDeletion\(mapped, \[inWhat, appName\]\);/, 'act_in_app tags its plan by the whitelist');
 }
 
 // ---- 10. After Stop (an aborted signal) an ask is a no before Approve all could say yes.

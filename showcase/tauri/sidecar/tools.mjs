@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isPasswordApp, isYes, stepsLose } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isPasswordApp, isYes, planDeletion } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -885,9 +885,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             : [{ do: 'click_at', x: m.at.rect[0] + m.at.rect[2] / 2, y: m.at.rect[1] + m.at.rect[3] / 2, global: true }, { do: 'type', text: m.text }];
         // Typing is a Mac action: asked every time, with the real app and the whole text (owner's rule).
         const where = await hands('locate', app.app ? `app:${app.app}` : 'front').then((r) => r?.window?.app ?? null, () => null);
-        // A fill replaces what the field holds (lost); a password manager brings its vault forward: asked under Approve all.
-        const loses = steps.some((st) => st.do === 'fill') || stepsLose(steps) || isPasswordApp(where) || isPasswordApp(app.app);
-        if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`, undefined, { deletion: loses }))) throw new Error(`${userName} said no, so nothing was typed.`);
+        // A fill replaces what the field holds (lost); a password manager brings its vault forward: asked under Approve
+        // all (planDeletion, the same rule as act_in_app).
+        if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`, undefined, { deletion: planDeletion(steps, [where, app.app]) }))) throw new Error(`${userName} said no, so nothing was typed.`);
         const r = await hands('act', JSON.stringify({ steps, ...app, wholeOk: ['plan'], planApp: where ?? app.app ?? '' }));
         if (r?.needsConfirm) throw new Error(`${actWords(r.why, where ?? app.app)} Nothing more was typed; use act_in_app for that.`);
         if (lastShot) lastShot.used = true;
@@ -1172,9 +1172,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const where = await hands('locate', spec).then((r) => r?.window?.app ?? null, () => null);
           const inWhat = where ?? (appName === 'front' ? 'the app in front' : appName);
           const question = `In ${inWhat}, every step I'd take:\n${stepsText(mapped, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`;
-          // A plain Delete key (or its ctrl chords) deletes what's selected (a message in Mail, a note), as typing over a
-          // select-all replaces it: a deletion. Steps in a password manager bring its vault forward: asked too.
-          if (!(await confirm(question, ctx, { deletion: notes.length > 0 || stepsLose(mapped) || isPasswordApp(inWhat) || isPasswordApp(appName) }))) throw new Error(`${userName} said no, so nothing ran.`);
+          // Approve all runs a plan unasked only when every step is in the safe set (planDeletion: a selection, a delete
+          // key, cut, copy, paste or a fill makes it a deletion) and nothing in it needs naming; steps in a password
+          // manager bring its vault forward: asked too. tagged: the strongest tag this plan was asked with, which every
+          // re-ask keeps (never weaker).
+          let tagged = notes.length > 0 || planDeletion(mapped, [inWhat, appName]);
+          if (!(await confirm(question, ctx, { deletion: tagged }))) throw new Error(`${userName} said no, so nothing ran.`);
           const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
@@ -1211,9 +1214,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               // another one came forward). Asked again with that app's real name.
               if (r.whole === 'plan') {
                 const left = plan.steps.slice(r.step);
-                // Tagged as the first ask was: the deletion's target changed with the app, so its yes doesn't carry.
-                const deletes = notes.length > 0 || stepsLose(left) || isPasswordApp(r.app) || isPasswordApp(appName);
-                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`, ctx, { deletion: deletes }))) {
+                // The strongest of the first ask's tag and this one's (the steps left can't make a selection made
+                // before them safe, and the deletion's target changed with the app, so its yes doesn't carry).
+                tagged = tagged || planDeletion(left, [r.app, appName]);
+                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`, ctx, { deletion: tagged }))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []).filter((x) => x !== 'plan'), 'plan'];

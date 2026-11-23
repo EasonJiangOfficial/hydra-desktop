@@ -240,7 +240,8 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
     // Taken but not answered (it hit max turns): answered in the same session before the turn ends, capped.
     const missed = left();
     if (missed.length) {
-      if (++again <= HOLD_MAX) { prompt = missed.join('\n\n'); carried = true; continue; }
+      // Carried as the next prompt's own words: their copies in the history go first, so they're there once.
+      if (++again <= HOLD_MAX) { agent.carryLeft?.(); prompt = missed.join('\n\n'); carried = true; continue; }
       emit(TOO_MANY_ADDED);
       return;
     }

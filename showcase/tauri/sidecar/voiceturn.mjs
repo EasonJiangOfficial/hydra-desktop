@@ -139,8 +139,9 @@ const wordsOf = (t) => String(t ?? '').toLowerCase().replace(/[’]/g, "'").spli
 /** A take's words as the answer to a waiting yes/no: 'yes', 'no', or null when they aren't a clear one (then they're
  *  words for the turn): "yeah, do it", "go ahead", "yes open it", "yes you can", "go for it", "no thanks", "don't allow
  *  it". question: the ask itself, whose words ("open", "ui.elevenlabs.io") may follow the yes or no. */
-// Consent said with a negative word: "I don't mind" is a yes; "never mind" alone says nothing either way.
-const CONSENT = [[/\b(?:don'?t|do not) mind\b/g, 'okay'], [/\bnever ?mind\b/g, '']];
+// Consent said with a negative word: "I don't mind" is a yes (a clear one: a thanks beside it never cancels it);
+// "never mind" alone says nothing either way.
+const CONSENT = [[/\b(?:don'?t|do not) mind\b/g, 'yes'], [/\bnever ?mind\b/g, '']];
 export function spokenAnswer(text, question = '') {
   let t = String(text ?? '').toLowerCase().replace(/[’]/g, "'");
   for (const [re, to] of CONSENT) t = t.replace(re, to);
@@ -148,11 +149,14 @@ export function spokenAnswer(text, question = '') {
   if (!w.length || w.length > 8) return null;
   const obj = new Set(wordsOf(question).filter((x) => !YES_STRONG.has(x) && !NO_STRONG.has(x)));
   const fits = (set) => w.every((x) => set.has(x) || VERB_WORDS.has(x) || obj.has(x));
-  const said = w.join(' ');
+  const said = ` ${w.join(' ')} `;
   // An acknowledgement ("okay thanks", "ok, thank you hydra") answers nothing: only a yes word beyond ok/okay/alright,
-  // or a yes phrase, says yes next to a thanks.
+  // or a yes phrase anywhere ("okay thanks, do it"), says yes next to a thanks. The question's own verb with "it" or
+  // its target is a yes phrase too ("quit it", "quit safari" to "Can I quit Safari?").
   const thanked = w.some((x) => THANKS.has(x));
-  const yes = (w.some((x) => YES_STRONG.has(x) && !(thanked && ACK.has(x))) || [...YES_PHRASES].some((p) => said === p || said.startsWith(`${p} `))) && fits(YES_WORDS);
+  const qw = wordsOf(question), verb = qw.find((x) => VERB_WORDS.has(x));
+  const phrases = [...YES_PHRASES, ...(verb ? ['it', 'that', 'them', ...obj].filter((o) => o !== verb).map((o) => `${verb} ${o}`) : [])];
+  const yes = (w.some((x) => YES_STRONG.has(x) && !(thanked && ACK.has(x))) || phrases.some((p) => said.includes(` ${p} `))) && fits(YES_WORDS);
   const no = w.some((x) => NO_STRONG.has(x)) && fits(NO_WORDS);
   return yes && !no ? 'yes' : no && !yes ? 'no' : null;
 }
@@ -187,23 +191,12 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
   now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
   const t0 = now();
   // Said aloud only when the voice took the question (it refuses once the turn's voice ended): an ask never said is
-  // never answered by a spoken word, nor expires aloud.
+  // never answered by a spoken word, nor expires aloud. The voice gives back the question's mark, which the player
+  // reports (played) once it has really played all of it: never a guess from its length.
   const line = spokenQuestion(question);
-  // What the voice still owed for the words said before the question (narration flushed just before it, the reply so
-  // far): its audio comes first, so the question's own audio is only what comes after that (voice.tally(): characters
-  // handed to the voice and seconds of audio it gave so far).
-  const before = choices && voice ? voice.tally?.() : null;
-  let owed = before ? Math.max(0, (Number(before.chars) || 0) / CHARS_PER_SEC - (Number(before.secs) || 0)) : 0;
-  let voiced = !!(choices && voice) && voice.progress?.(line, 'ask') === true;
-  let open = true, timer = null;
-  // Its question's audio (audio()): how much of its own came, and when all the voice had queued ends playing.
-  // ponytail: chunks carry no sentence marks, so "the question has played" is at least half its length in audio heard
-  // after what was owed before it (both at a fixed speaking rate), and the queue's estimated end (chunk lengths from
-  // their arrival); a play report per line would be exact.
-  // holdFrom: the voice is paused (the owner's own pause): what was still to play then hasn't played.
-  let got = 0, endsAt = null, holdFrom = null;
-  const needs = (line.length / CHARS_PER_SEC) * 0.5;
-  const held = (from, to) => { if (Number.isFinite(endsAt) && endsAt > from) endsAt += Math.max(0, to - from); };
+  const said = choices && voice ? voice.progress?.(line, 'ask') : null;
+  const mark = typeof said === 'string' && said ? said : null;
+  let voiced = !!mark, open = true, timer = null, playedAt = null;
   log('ask', { id, route, ...(choices ? { yesno: true } : {}), ...(voiced ? { spoken: true } : {}) });
   const done = (answer, how, by) => {
     if (!open) return false;
@@ -214,7 +207,8 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
     return true;
   };
   if (choices && deadlineMs > 0) {
-    timer = setTimer(() => { if (!open) return; if (voiced) voice.progress?.(skippedLine(question), 'ask'); close(); done(null, 'expired'); }, deadlineMs);
+    // The line that says so is a plain one: nothing waits on its audio.
+    timer = setTimer(() => { if (!open) return; if (voiced) voice.progress?.(skippedLine(question)); close(); done(null, 'expired'); }, deadlineMs);
     timer?.unref?.();
   }
   return {
@@ -223,26 +217,13 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
     /** When it was shown. */
     at: t0,
     question,
-    /** A chunk of the turn's voice came after the question was said: secs long, the queue now ending at queueEnd. */
-    audio(secs, queueEnd) {
-      if (!open || !voiced) return;
-      const s = Math.max(0, Number(secs) || 0), earlier = Math.min(owed, s);
-      owed -= earlier; got += s - earlier; endsAt = queueEnd;
-    },
-    /** The voice was held (the owner talking) from `from` to `to`: what was still to play ends that much later. */
-    held,
-    /** The owner's own pause (on) from `at`, or its end (off): while it lasts, what was still to play hasn't played. */
-    hold(on, at = now()) {
-      if (on) { holdFrom ??= at; return; }
-      if (holdFrom == null) return;
-      held(holdFrom, at); holdFrom = null;
-    },
+    /** The question's mark, as the voice's player reports it (voice_played), or null when it wasn't said. */
+    mark,
+    /** The player played all of the question (its mark came back) at `at`. */
+    played(at = now()) { if (open && voiced && playedAt == null) playedAt = at; },
     /** When its question finished playing (null while it hasn't): only a take that started after it answers it by
      *  voice (askForTake), and the ask's own take opens then. */
-    get heardAt() {
-      if (!voiced || got < needs || !Number.isFinite(endsAt)) return null;
-      return holdFrom != null && endsAt > holdFrom ? null : endsAt;
-    },
+    get heardAt() { return voiced ? playedAt : null; },
     /** The turn's voice ended: no spoken answer, nothing said at its expiry. */
     unvoice() { voiced = false; },
     /** text: what the screen sent ('yes' for the first choice, null for the rest or a cancel); by: 'voice' when said. */
@@ -289,6 +270,15 @@ export function addOnTo(text, { busy, addInput, enqueue }) {
   if (addInput?.(`${INPUT_PREFIX}${text}`)) return 'turn';
   enqueue(text, { byVoice: true });
   return 'next';
+}
+
+/** A request retried on the next model after a usage limit (sidekick): the retry's words, each once, in the order said:
+ *  the request, then what was added into its run (answered or not: the run's own messages, from `from` in the agent's
+ *  history, are left out of the saved conversation, so nothing is there twice and nothing added is lost), then any
+ *  added word the run never took in. */
+export function retryText({ messages = [], from = -1, text, unanswered = [] }) {
+  const adds = from >= 0 ? messages.slice(from).filter((m) => m.role === 'user' && m.added).map((m) => String(m.content)) : [];
+  return [text, ...new Set([...adds, ...unanswered])].join('\n\n');
 }
 
 /** Words added into the session that its run ended before answering (agent.unanswered(): max turns, an error, Stop),

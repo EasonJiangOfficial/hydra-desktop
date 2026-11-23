@@ -120,7 +120,7 @@ class SdkMessageMapper {
    *  one already sent but not yet mapped keeps its place before them. What is left at the run's end goes last
    *  (flushAdds). ponytail: placed at the next message start, one round early if Claude Code holds it for a later
    *  boundary. Marked added: a later run never sends them again as its own words (claudeCodeLoop). */
-  added(text, after = Infinity) { this.#adds.push({ after, m: { role: 'user', content: String(text), added: true } }); }
+  added(text, after = Infinity) { const m = { role: 'user', content: String(text), added: true }; this.#adds.push({ after, m }); return m; }
   #place(all) {
     const now = all ? this.#adds : this.#adds.filter((a) => a.after < this.#handled);
     if (!now.length) return;
@@ -537,8 +537,7 @@ async function* claudeCodeLoop(messages, o) {
     const m = toSdkUserMessage([{ type: 'text', text: String(text) }]);
     input.push(m);
     addedAt = ++step;
-    added.push({ at: addedAt, text: String(text), uuid: m.uuid, m });
-    mapper.added(text, received);
+    added.push({ at: addedAt, text: String(text), uuid: m.uuid, m, saved: mapper.added(text, received) });
     return true;
   });
 
@@ -621,7 +620,8 @@ async function* claudeCodeLoop(messages, o) {
     // (its own turn). A message that merely started after it (the head's next step, already built) answers nothing.
     // Else by step, as before.
     const started = (a) => folds.some((f) => f > a.at && f > turnAt) || results.some((r) => r >= a.at && r < answeredAt);
-    o.onLeft?.(added.filter((a) => !a.done && (aborted ? !started(a) : byUuid || a.at > (cut ? finalAt : answeredAt))).map((a) => a.text));
+    const left = added.filter((a) => !a.done && (aborted ? !started(a) : byUuid || a.at > (cut ? finalAt : answeredAt)));
+    o.onLeft?.(left.map((a) => a.text), left.map((a) => a.saved));
     // Answered: its turn ended well, or the run was cut (an error, max turns, a stream that just ended) after that turn's
     // final answer, as settle counts it for additions. Else not: carried words in it are then unanswered (B4-5..B4-7).
     o.onAnswered?.(headDone || (!aborted && finalAt > 0 && finalAt === answeredAt));
@@ -659,7 +659,7 @@ export function resumeId(state, messages) {
  */
 export class ClaudeCodeAgent {
   #running = false;
-  #add = null; #early = []; #left = []; #answered = false; #last = null;
+  #add = null; #early = []; #left = []; #leftSaved = []; #answered = false; #last = null;
   constructor(options) {
     this.options = options;
     this.resume = options.resume ?? null;
@@ -676,6 +676,20 @@ export class ClaudeCodeAgent {
   addInput(text) { return this.#add ? this.#add(text) : false; }
   /** After a prompt's run: the added words it took but ended before answering (max turns, an error), as given. */
   unanswered() { return [...this.#early, ...this.#left]; }
+  /** After a prompt's run: the caller carries its unanswered() words into the next prompt as that prompt's own words
+   *  (relaySession). Their copies kept in the history (flushAdds, or placed before a message that didn't answer them) go,
+   *  so the owner's words are there exactly once, where they get answered. Its Claude Code session isn't resumed then
+   *  (it may hold them): the next run starts fresh from the history. */
+  carryLeft() {
+    if (this.#running || !this.#leftSaved.length) return;
+    const gone = new Set(this.#leftSaved);
+    this.#leftSaved = [];
+    const kept = this.messages.filter((m) => !gone.has(m));
+    if (kept.length === this.messages.length) return;
+    this.messages = kept;
+    this.resume = null;
+    this.options.onResume?.(null);
+  }
   /** After a prompt's run: whether that prompt's own turn got its answer (false when the run never got that far). */
   answered() { return this.#answered; }
   /** After a prompt's run whose words were named unanswered: takes them back out when nothing came after them in the
@@ -699,7 +713,7 @@ export class ClaudeCodeAgent {
     this.#last = { role: 'user', content };
     this.messages.push(this.#last);
     // Additions before Claude Code has started wait for it (the stream starts when it is first read).
-    this.#early = []; this.#left = []; this.#answered = false;
+    this.#early = []; this.#left = []; this.#leftSaved = []; this.#answered = false;
     this.#add = (t) => { this.#early.push(t); return true; };
     return new AgentStream(this.#run(), () => { this.#running = false; });
   }
@@ -717,7 +731,7 @@ export class ClaudeCodeAgent {
       return yield* claudeCodeLoop(loopMsgs, {
         ...o, resume,
         takeInput: (fn) => { this.#add = fn; if (fn) for (const t of this.#early.splice(0)) fn(t); },
-        onLeft: (l) => { this.#left = l; },
+        onLeft: (l, saved = []) => { this.#left = l; this.#leftSaved = saved.filter(Boolean); },
         onAnswered: (v) => { this.#answered = v; },
         onSessionId: (id) => { sessionId = id; },
         onRateLimit: o.onRateLimit ?? ((info) => void recordClaudeCodeRateLimit(info).catch(() => {})),

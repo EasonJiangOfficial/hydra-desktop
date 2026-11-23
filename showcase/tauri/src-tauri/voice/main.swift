@@ -1873,6 +1873,7 @@ Cue.speaking = { voice.out.busy }
 if let i = args.firstIndex(of: "--sounds"), i + 1 < args.count { Cue.dir = URL(fileURLWithPath: args[i + 1], isDirectory: true) }
 voice.out.onBands = { emit(["type": "bands", "b": $0.map { ($0 * 1000).rounded() / 1000 }]) }
 voice.out.onFail = { emit(["type": "play_failed", "why": $0]) }
+voice.out.onPlayed = { emit(["type": "played", "id": $0, "mark": $1]) }
 if args.contains("--no-mute") { OutputMute.enabled = false }
 if let i = args.firstIndex(of: "--chord"), i + 1 < args.count { voice.setChord(args[i + 1].components(separatedBy: ",")) }
 if LiveTest.url != nil { OutputMute.enabled = false; voice.setWake(true); LiveTest.start() }
@@ -1924,6 +1925,8 @@ Thread.detachNewThread {
             let id = msg["id"] as? String ?? "", rate = msg["rate"] as? Double ?? HydraOut.rate
             if let b64 = msg["pcm"] as? String, let pcm = Data(base64Encoded: b64) { DispatchQueue.main.async { voice.play(id: id, pcm: pcm, rate: rate) } }
         case "play_stop": DispatchQueue.main.async { voice.out.stop() }
+        // After an ask's question (W5): "played" comes back once all of it has played.
+        case "play_mark": if let id = msg["id"] as? String, let m = msg["mark"] as? String { DispatchQueue.main.async { voice.out.mark(id: id, mark: m) } }
         case "play_pause": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.out.pause(on) }
         case "play_volume": if let v = msg["v"] as? Double { DispatchQueue.main.async { voice.out.volume = Float(max(0, min(1, v))) } }
         // Hydra's wake phrase (agent_settings.wake_phrase). Only whether it was taken is logged, never the words.

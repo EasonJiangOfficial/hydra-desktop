@@ -6,6 +6,8 @@
   const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke) return;
   const send = (msg) => invoke('sidecar_send', { msg }).catch(() => {});
+  // An ask's question has played here to its end: only then does the sidecar open its take (principle 1).
+  if (Roamie.voiceOut) Roamie.voiceOut.onPlayed = (id, mark) => send({ type: 'voice_played', id, mark });
   const typing = (on) => invoke('set_typing', { on }).catch(() => {});
   // Drawings (ink.js) talk to the sidecar (started, waits done, buttons, closed cards) and arm the shell's click watch.
   if (Roamie.ink) { Roamie.ink.send = send; Roamie.ink.invoke = (cmd, args) => invoke(cmd, args).catch(() => {}); }

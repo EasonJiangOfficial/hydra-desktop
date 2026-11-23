@@ -119,7 +119,7 @@ function fakeClock() {
   assert.equal(r.beat(), false, 'the opener stays once, before anything');
   assert.equal(r.progress('Still checking.'), true, 'a progress line after a sentence');
   assert.ok(logs.some(([k, d]) => k === 'speech_beat' && d.progress === true), 'logged progress:true');
-  assert.equal(r.progress('Can I open it? Say yes or no.', 'ask'), true);
+  assert.match(r.progress('Can I open it? Say yes or no.', 'ask'), /^s\d+q1$/, 'an ask gives back its mark');
   assert.ok(logs.some(([k, d]) => k === 'speech_beat' && d.ask === true), 'an ask is logged as one');
   r.end();
   await until(() => out.some((m) => m.end));
@@ -161,7 +161,7 @@ function fakeClock() {
   // A voice-turn ask: logged, said, then given up after 60 s, said too, closed and answered no.
   const c = fakeClock(), logs = [], said = [];
   let closed = 0, got;
-  const voice = { progress: (l, k) => { said.push([l, k]); return true; } };
+  const voice = { progress: (l, k) => { said.push([l, k]); return k === 'ask' ? 'q1' : true; } };
   const a = trackAsk({ id: 'a1', route: 'panel', question: 'Open https://ui.elevenlabs.io/?', choices: true, voice, log: (k, d) => logs.push([k, d]), resolve: (v) => { got = v; }, close: () => closed++, ...c });
   assert.deepEqual(logs[0], ['ask', { id: 'a1', route: 'panel', yesno: true, spoken: true }], 'logged when shown');
   assert.deepEqual(said, [['Can I open ui.elevenlabs.io? Say yes or no.', 'ask']], 'said in Hydra\'s voice');
@@ -170,7 +170,7 @@ function fakeClock() {
   c.advance(1);
   assert.equal(got, null, 'then the tool gets a no');
   assert.equal(closed, 1, 'and it closes on screen');
-  assert.deepEqual(said.at(-1), ["I didn't hear a yes, so I skipped opening it.", 'ask'], 'said aloud, never a silent wait');
+  assert.deepEqual(said.at(-1), ["I didn't hear a yes, so I skipped opening it.", undefined], 'said aloud (a plain line), never a silent wait');
   assert.deepEqual(logs.at(-1), ['ask_done', { id: 'a1', route: 'panel', answer: 'expired', ms: ASK_DEADLINE_MS }]);
   assert.equal(a.answer('yes'), false, 'answered once');
 

@@ -77,59 +77,57 @@ function piece(from, to, names, st) {
   for (const t of ['no', "no don't open it", 'nope']) assert.equal(spokenAnswer(t, q), 'no', t);
 }
 
-// ---- 2. Shown is not heard: only a take that started after the question's audio played answers it.
+// ---- 2. Shown is not heard: only a take that started after the question's audio played answers it (build4efix4: the
+// player's report of its mark, never a guess).
 {
   const c = fakeClock();
-  const a = trackAsk({ id: 'a1', route: 'overlay', question: 'Can I quit Safari?', choices: true, voice: { progress: () => true }, resolve: () => {}, ...c });
+  const a = trackAsk({ id: 'a1', route: 'overlay', question: 'Can I quit Safari?', choices: true, voice: { progress: () => 'q1' }, resolve: () => {}, ...c });
   const open = new Map([['a1', { a }]]);
+  assert.equal(a.mark, 'q1');
   assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 300 }), null, '300 ms after it showed, before it played: no');
-  a.audio(0.4, 700);
-  assert.equal(a.heardAt, null, 'a little audio (narration before it) is not the question');
-  a.audio(2, 2700);
-  assert.equal(a.heardAt, 2700);
-  a.held(1000, 3000); // the owner talked over it: what was left plays 2 s later
-  assert.equal(a.heardAt, 4700);
-  assert.equal(askForTake(open, { text: 'yes', takeAt: 4000 }), null, 'a take while it was still to play: no');
-  assert.equal(askForTake(open, { text: 'yes', takeAt: 4700 })?.said, 'yes', 'after it played: yes');
+  c.advance(30_000);
+  assert.equal(a.heardAt, null, 'however long it waits, not played until the player says so');
+  assert.equal(askForTake(open, { text: 'yes', takeAt: 30_000 }), null, 'a take while it was still to play: no');
+  a.played();
+  assert.equal(a.heardAt, 30_000);
+  a.played(40_000);
+  assert.equal(a.heardAt, 30_000, 'played once');
+  assert.equal(askForTake(open, { text: 'yes', takeAt: 29_999 }), null, 'a take that began before it ended: no');
+  assert.equal(askForTake(open, { text: 'yes', takeAt: 30_000 })?.said, 'yes', 'after it played: yes');
 }
 
 // ---- 5, 6, 22. The ask's own take: opens only once its question has played (never in a gap before it), closes the
-// moment the ask is answered another way, more of it plays, or Stop; one take per ask.
+// moment the ask is answered another way, or Stop; one take per ask.
 {
   const c = fakeClock();
   const sent = [];
-  const V = { id: 's1', progress: () => true };
-  const st = { power: { asleep: false }, yesNoOpen: new Map(), turnVoice: V, voiceBusy: false, voiceEndsAt: 0, askTake: null, send: (m) => sent.push(m.type),
+  const V = { id: 's1', progress: () => 'q1' };
+  const st = { power: { asleep: false }, yesNoOpen: new Map(), turnVoice: V, voiceBusy: false, askTake: null, send: (m) => sent.push(m.type),
     Date: { now: c.now }, setTimeout: (f, ms) => c.setTimer(f, ms), clearTimeout: (h) => h && c.clearTimer(h) };
-  const { askAudio, askArm, askTakeEnd } = piece('function askAudio(secs) {', 'function showAsk(', ['askAudio', 'askArm', 'askTakeEnd'], st);
-  const ask = (id) => { const a = trackAsk({ id, route: 'overlay', question: 'Can I open ui.elevenlabs.io?', choices: true, voice: V, resolve: () => {}, ...c }); st.yesNoOpen.set(id, { a, voice: V }); return a; };
+  const { askPlayed, askArm, askTakeEnd } = piece('function askPlayed(mark) {', 'function showAsk(', ['askPlayed', 'askArm', 'askTakeEnd'], st);
+  let marks = 0;
+  const ask = (id) => { const m = `q${++marks}`; V.progress = () => m; const a = trackAsk({ id, route: 'overlay', question: 'Can I open ui.elevenlabs.io?', choices: true, voice: V, resolve: () => {}, ...c }); st.yesNoOpen.set(id, { a, voice: V }); return a; };
   ask('a1');
   c.advance(5000);
-  assert.deepEqual(sent, [], 'no take before any of its audio (the quiet gap after narration)');
-  askAudio(0.4); c.advance(2000);
-  assert.deepEqual(sent, [], 'nor after only the narration before it');
-  askAudio(2.5); c.advance(2000);
-  assert.deepEqual(sent, [], 'nor while it plays');
-  c.advance(2000);
+  assert.deepEqual(sent, [], 'no take before its mark comes back (the quiet gap after narration)');
+  askPlayed('q9'); c.advance(2000);
+  assert.deepEqual(sent, [], "nor on another ask's mark");
+  askPlayed('q1'); c.advance(200);
+  assert.deepEqual(sent, [], 'a short moment after it');
+  c.advance(200);
   assert.deepEqual(sent, ['listen'], 'once it played: one take');
   assert.equal(st.askTake.id, 'a1');
-  askAudio(0.5);
-  assert.deepEqual(sent, ['listen', 'listen_cancel'], 'more of it came: that take closes');
-  c.advance(2000);
-  assert.deepEqual(sent, ['listen', 'listen_cancel', 'listen'], 'and opens again once it has played');
   askTakeEnd('a1');
   assert.deepEqual(sent.at(-1), 'listen_cancel', 'answered by a click: its take closes');
   st.yesNoOpen.get('a1').took = true;
   askArm('a1', st.yesNoOpen.get('a1')); c.advance(5000);
-  assert.equal(sent.filter((x) => x === 'listen').length, 2, 'one take per ask: never again by itself');
+  assert.equal(sent.filter((x) => x === 'listen').length, 1, 'one take per ask: never again by itself');
   // Answered any way before it played: its take never opens.
   sent.length = 0; st.yesNoOpen.clear(); st.askTake = null;
-  ask('a2'); askAudio(3);
-  askTakeEnd('a2'); c.advance(10_000);
+  ask('a2'); askTakeEnd('a2'); st.yesNoOpen.clear(); askPlayed('q2'); c.advance(10_000);
   assert.deepEqual(sent, [], 'answered before its take opened: none opens');
   // The owner's own take is open when it's due: it waits, and opens when that one ends (sidekick's voice_state idle).
-  st.yesNoOpen.clear();
-  ask('a3'); st.voiceBusy = true; askAudio(3); c.advance(10_000);
+  ask('a3'); st.voiceBusy = true; askPlayed('q3'); c.advance(10_000);
   assert.deepEqual(sent, [], 'not over his own take');
   st.voiceBusy = false; askArm('a3', st.yesNoOpen.get('a3')); c.advance(400);
   assert.deepEqual(sent, ['listen']);
@@ -137,10 +135,10 @@ function piece(from, to, names, st) {
   assert.match(side, /resolve: \(v, by\) => \{ if \(by === 'voice' && askTake\?\.id === id\) askTake = null; askTakeEnd\(id\);/, 'answered any way closes it');
   assert.match(side, /foldWait\?\.abort\(\); for \(const \[k, w\] of yesNoOpen\) \{ w\.took = true; askTakeEnd\(k\); \}/, 'Stop closes it');
   assert.match(side, /if \(w\.voice && w\.voice === voice\) \{ w\.took = true; askTakeEnd\(id\); \}/, 'the turn ending closes it');
-  assert.match(side, /if \(msg\.id === turnVoice\?\.id\) askAudio\(pcmSecs\(msg\)\);/, 'fed by the turn voice chunks');
+  assert.match(side, /else if \(m\.type === 'voice_played'\) askPlayed\(String\(m\.mark \?\? ''\)\);/, "fed by the player's reports");
   assert.match(side, /m\.state === 'idle'\) \{ addOnTake = false; hush\(false\); askTake = null; for \(const \[id, w\] of yesNoOpen\) if \(w\.a\.voiced && !w\.took\) askArm\(id, w\);/);
   assert.doesNotMatch(side, /afterVoice: true/, 'no take on a plain quiet gap');
-  assert.match(side, /for \(const \[id, w\] of yesNoOpen\) \{ w\.a\.held\(hushedAt, t\);/, 'held time counts');
+  assert.doesNotMatch(side, /askAudio|CHARS_PER_SEC|voiceEndsAt/, 'no estimate from chunk lengths anywhere');
 }
 
 // ---- 7, 17, 21. The pending sound during a fold wait: only for the owner's own request, never over a yes/no or asleep.

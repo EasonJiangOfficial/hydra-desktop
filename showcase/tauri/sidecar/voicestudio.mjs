@@ -120,7 +120,7 @@ export class StudioVoice {
         let m;
         try { m = JSON.parse(e.data); } catch { return; }
         if (m.type === 'start') { this.rate = Number(m.sample_rate) || STUDIO_RATE; this.odd = null; }
-        else if (m.type === 'done') { this.busy = false; this.clear(); this.pump(); }
+        else if (m.type === 'done') { const said = this.saying; this.saying = null; this.busy = false; this.clear(); said?.(); this.pump(); }
         else if (m.type === 'error') this.fail(/voice|profile/i.test(String(m.detail ?? '')) && /not found|unknown|missing/i.test(String(m.detail ?? '')) ? 'voice' : 'error', m.detail);
         return;
       }
@@ -133,12 +133,13 @@ export class StudioVoice {
     return this;
   }
 
-  say(text) {
+  /** done (optional): called once all of this sentence's audio has come (its "done"), before the next one's. */
+  say(text, done) {
     if (this.state === 'done' || this.ending) return;
     const t = plain(text);
     if (!t) return;
     if (this.state === 'new') this.open();
-    this.queue.push(t);
+    this.queue.push([t, done]);
     this.pump();
   }
 
@@ -153,9 +154,9 @@ export class StudioVoice {
 
   pump() {
     if (this.state !== 'open' || this.busy) return;
-    const text = this.queue.shift();
+    const [text, done] = this.queue.shift() ?? [];
     if (text == null) { if (this.ending) this.finish(); return; }
-    this.busy = true;
+    this.busy = true; this.saying = done;
     this.limit = this.sent++ ? this.sentenceTimeout : this.firstSentenceTimeout;
     this.ws.send(JSON.stringify({ text, ...(this.voice ? { voice: this.voice } : {}) }));
     this.arm(this.limit, 'timeout');

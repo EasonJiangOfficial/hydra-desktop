@@ -81,6 +81,16 @@ export const relayEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ui"), action: uiActionSchema }).strict(),
   z.object({ type: z.literal("confirm"), id: z.uuid(), summary: z.string().min(1).max(LIMITS.confirmSummary), danger: z.boolean() }).strict(),
   z.object({ type: z.literal("done"), usage: usageSchema }).strict(),
+  // Who answered this turn (models.ts): once per turn, from whichever runtime ran it. fallback: why it is not the model
+  // the owner picked (not connected, the provider failed before any tool or text, or the server runs Claude only).
+  z
+    .object({
+      type: z.literal("model"),
+      model: z.string().min(1).max(100),
+      effort: z.enum(["low", "medium", "high", "xhigh", "max"]),
+      fallback: z.enum(["not_connected", "provider_error", "server_claude_only"]).optional(),
+    })
+    .strict(),
   z.object({ type: z.literal("error"), message: z.string().min(1).max(LIMITS.errorMessage), code: z.string().max(LIMITS.errorCode).optional() }).strict(),
 ]);
 
@@ -133,7 +143,9 @@ export const relayApprovalSchema = z.object({
  * sends none, which clears it) and on GET /api/agent/jobs (a risky step approve all let through goes only to a pull
  * that declares it) as JSON in the CAPABILITIES_HEADER header, like {"approveAllDeletionTags":1}.
  * approveAllDeletionTags 1: every approval POST carries `deletion` from its own per-action tag, and for a queued Mac
- * step it asks locally before any deletion-class action. Unknown keys are dropped; anything unreadable is {}.
+ * step it asks locally before any deletion-class action. signedIn (models): the services this Mac is signed in to and
+ * runs turns on, like ["chatgpt"]; ChatGPT models are pickable only while a live Mac reports "chatgpt".
+ * Unknown keys and unknown sign-in names are dropped; anything unreadable is {}.
  */
 export const CAPABILITIES_HEADER = "x-hydra-capabilities";
 export const capabilitiesSchema = z.preprocess(
@@ -144,7 +156,19 @@ export const capabilitiesSchema = z.preprocess(
       return {};
     }
   },
-  z.object({ approveAllDeletionTags: z.literal(1).optional().catch(undefined) }).catch({}),
+  z
+    .object({
+      approveAllDeletionTags: z.literal(1).optional().catch(undefined),
+      // Filtered entry by entry: an unknown name, a non-string or a long list beside "chatgpt" never drops it.
+      signedIn: z
+        .array(z.unknown())
+        .transform((names) => names.filter((n) => n === "chatgpt"))
+        .pipe(z.array(z.enum(["chatgpt"])).max(8))
+        .transform((known) => (known.length ? known : undefined))
+        .optional()
+        .catch(undefined),
+    })
+    .catch({}),
 );
 
 /** GET /api/agent/relay/next?slot=: the Mac serves one live turn and one routine turn at a time. */

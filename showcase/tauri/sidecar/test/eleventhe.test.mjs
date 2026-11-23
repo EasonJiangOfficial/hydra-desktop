@@ -144,7 +144,7 @@ const text = (m) => m.message.content.map((c) => c.text).join('');
   assert.ok(from > 0 && after.includes('unansweredNote(agent?.unanswered?.())'), 'named after the local loop, before the reply ends');
   const caught = src.slice(src.indexOf('} catch (err) {', from), src.indexOf('} finally {', from));
   assert.match(caught, /const msg = `[^\n]*unansweredNote\(agent\?\.unanswered\?\.\(\)\)/, 'named in the error shown');
-  assert.match(caught, /again = \[text, \.\.\.\(agent\?\.unanswered\?\.\(\) \?\? \[\]\)\]/, 'carried along with a retry');
+  assert.match(caught, /const again = retryText\(\{ messages: agent\?\.getMessages\?\.\(\) \?\? \[\], from: runFrom, text, unanswered: agent\?\.unanswered\?\.\(\) \?\? \[\] \}\);/, 'carried along with a retry, each once (build4efix4)');
   assert.match(caught, /retryNext = \{ text: again,[^\n]*info: \{ text: again,/);
 }
 
