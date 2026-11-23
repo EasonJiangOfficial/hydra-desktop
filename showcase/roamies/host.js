@@ -497,7 +497,8 @@
     if ((m.type === 'state' && m.state !== 'listening') || m.type === 'final') hearing = false;
     if (m.type === 'state' && m.state === 'listening') {
       hearing = true;
-      dropAutoListen();
+      // Do not drop the follow-up window here. An interrupt is itself a take, and cancelling the window
+      // made the owner say the wake phrase again once that take ended.
       // A yes/no stays open: the take may be its spoken answer (the sidecar closes it when it is). Anything else closes.
       if (ask && !ask.choices) finishAsk(null);
       endTalk();

@@ -796,9 +796,9 @@
           el('span', { className: 'val', textContent: v.sleepWord ?? 'Hydra, sleep' })),
         v.mac ? toggle('Interrupt by talking', v.bargeNA ? 'Off for now: this mic has no echo cancellation, so Hydra could hear its own voice and stop itself. It tries again with another mic.' : needs('Talk while Hydra speaks to stop it and say something new. A double clap does it too. Uses the Mac\'s echo cancellation.'), v.barge, () => act('barge'), 'barge') : null),
       group('After replies', 'When the mic opens without a key.', null,
-        toggle('Auto-listen', needs(v.listenEvery ? 'Mic opens after every spoken reply.' : 'Mic opens when I ask you something.'), v.autoListen, () => act('autolisten'), 'autolisten'),
+        toggle('Auto-listen', needs('After I talk, the mic stays open so you can answer or add a thought.'), v.autoListen, () => act('autolisten'), 'autolisten'),
         v.autoListen && v.listenChoices ? el('div', { className: 'reveal', 'data-anim': 'listen-more' },
-          toggle('After every reply', needs('Not just questions, so you can keep talking.'), v.listenEvery, () => act('listenevery'), 'listenevery'),
+          toggle('After every reply', needs('Already on with Auto-listen. A question or a statement both leave the mic open.'), v.listenEvery, () => act('listenevery'), 'listenevery'),
           el('p', { className: 'sub', textContent: 'Mic waits for you' }),
           picks('Mic waits for you', v.listenChoices.map((s) => [String(s), `${s} s`]), String(v.listenSecs), (x) => act(`listensecs:${x}`), 'listensecs')) : null,
         toggle('Listen after reminders', needs('Mic opens after a reminder, so you can say “snooze 10 minutes”.'), v.snoozeListen, () => act('snoozelisten'), 'snoozelisten'))])];

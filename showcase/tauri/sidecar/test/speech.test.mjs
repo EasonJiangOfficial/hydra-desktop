@@ -140,10 +140,11 @@ assert.equal(endsWithQuestion('He said "really?"'), true);
 assert.equal(endsWithQuestion(''), false);
 assert.equal(endsWithQuestion(null), false);
 
-// Auto-listen after every reply (#44): a statement opens the mic too when they chose it; a question always does.
-assert.equal(listensAfter('Done, the file is saved.', false), false);
+// Auto-listen: a statement keeps the mic open too. The "After every reply" switch is not required.
+assert.equal(listensAfter('Done, the file is saved.', false), true);
 assert.equal(listensAfter('Done, the file is saved.', true), true);
 assert.equal(listensAfter('Want me to open it?', false), true);
+assert.equal(listensAfter('  ', false), false);
 // How long the mic waits: one of the choices, else 8 s (an old or hand-edited config).
 assert.deepEqual(LISTEN_SECS, [3, 5, 8, 10, 15]);
 for (const s of LISTEN_SECS) assert.equal(listenWait(s), s);
