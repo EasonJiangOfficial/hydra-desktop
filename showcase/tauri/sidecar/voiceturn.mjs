@@ -21,9 +21,12 @@ export const pcmSecs = (msg) => Buffer.byteLength(String(msg?.pcm ?? ''), 'base6
  * finished() when the helper said it all; interrupted() at a barge-in: the whole sentences he heard, '' if none.
  */
 export function createSpokenTrack({ now = Date.now, cps = CHARS_PER_SEC } = {}) {
-  let cur = null;
+  let cur = null, last = null;
   return {
-    start(id) { cur = { id, said: [], first: null, filler: 0, secs: 0, finished: false }; },
+    start(id) { cur = { id, said: [], first: null, filler: 0, secs: 0, finished: false }; last = null; },
+    /** Every line of the reply handed to the voice so far (the one interrupted() just ended, too): what Hydra's own
+     *  voice could put back in the mic. */
+    said() { return (cur ?? last)?.said.join(' ') ?? ''; },
     line(t) { if (cur && spokenText(t)) cur.said.push(spokenText(t)); },
     audio(msg) {
       if (!cur || msg?.id !== cur.id || !msg.pcm) return;
@@ -35,7 +38,7 @@ export function createSpokenTrack({ now = Date.now, cps = CHARS_PER_SEC } = {}) 
     get id() { return cur?.id ?? null; },
     interrupted() {
       const s = cur;
-      cur = null;
+      cur = null; last = s;
       if (!s || s.finished || s.first == null || !s.secs) return '';
       // Played so far: from the first chunk, the filler first, never more than was handed on.
       const heard = Math.min(Math.max(0, (now() - s.first) / 1000 - s.filler), s.secs);
@@ -121,6 +124,25 @@ export const pendingWanted = ({ voice, busy, answerSaid, listening, asking }) =>
 /** Whether a take that starts while Hydra works adds on (owner: "speech added while Hydra thinks is added onto the
  *  prompt, never cancelled"): every take, whatever opened it (the phrase, a clap, the talk keys, barge-in). */
 export const whileBusy = ({ busy }) => (busy ? 'add_on' : 'new');
+
+/** Build 4 C7 (owner: "the agent speaks and is interupted by my laptop fans or sounds not by my speach"): a take that
+ *  starts over the last reply while it is still being said holds the reply ('hold'), it doesn't cut it; with no reply
+ *  playing there is nothing to keep ('stop'). When the take ends, words keep the reply cut ('stop'); no words (a noise
+ *  opened it) let it go on from where it was ('resume'), never silence. */
+/** Second verify pass: only a take a noise could open holds the reply (via 'clap', or 'barge', the helper's check over
+ *  Hydra's voice); one the owner opened on purpose (the talk keys, the orb, the phrase, auto-listen) cuts it as before,
+ *  and a word-less one of those still says "I didn't hear anything". Words that are only Hydra's own (its voice left in
+ *  the mic after echo cancellation: every word is in the reply, and none is a stop word) are 'echo': dropped, and the
+ *  reply goes on. */
+export const NOISE_TAKES = new Set(['clap', 'barge']);
+export const overReply = ({ saying, voiceOn, via }) => (saying && voiceOn && NOISE_TAKES.has(via) ? 'hold' : 'stop');
+const STOP_WORDS = new Set(['stop', 'wait', 'pause', 'cancel', 'enough', 'quiet', 'hold', 'shush', 'nevermind']);
+export const afterHeld = ({ words, reply = '' }) => {
+  const w = wordsOf(words);
+  if (!w.length) return 'resume';
+  const said = new Set(wordsOf(reply));
+  return said.size && !w.some((x) => STOP_WORDS.has(x)) && w.every((x) => said.has(x)) ? 'echo' : 'stop';
+};
 
 // ---- Allow asks in a voice turn (owner: "sometimes it cancels and doesnt warn me or do anything") ----
 export const ASK_DEADLINE_MS = 60_000;
