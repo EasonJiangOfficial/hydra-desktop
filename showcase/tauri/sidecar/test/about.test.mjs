@@ -5,7 +5,7 @@ import { aboutHydra } from '../about.mjs';
 const full = aboutHydra({ name: 'Hydra', mac: true, snap: true, voice: true, hotkeys: true, wake: true });
 const bare = aboutHydra({ name: 'Hydra', mac: true, snap: false, voice: false, hotkeys: false, wake: false });
 assert.match(full, /after 5 minutes without the owner talking/);
-assert.match(full, /two sharp claps 0\.25 to 0\.8 seconds apart wake you, and you say "Hydra at your service, sir\."/);
+assert.match(full, /two sharp claps 0\.25 to 0\.8 seconds apart wake you with a short chime, and you listen at once \(no greeting\)/);
 assert.match(full, /default "Hydra, sleep"/);
 assert.match(full, /Hey Hydra/);
 assert.match(full, /modified version of Roamies by Ken Kai under AGPL-3\.0/);

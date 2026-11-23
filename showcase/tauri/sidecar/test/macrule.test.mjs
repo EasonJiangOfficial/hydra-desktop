@@ -68,6 +68,7 @@ if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1
 if (a[0] === 'front') o = { ok: true, app: win.app };
 if (a[0] === 'windows') o = { ok: true, windows: [win] };
 if (a[0] === 'manage') o = { ok: true, done: 'quit ' + JSON.parse(a[1]).app };
+if (a[0] === 'resolve') o = { ok: true, window: win, running: a[1].slice(4) };
 console.log(JSON.stringify(o));
 `);
   process.env.ROAMIES_HANDS = fake;

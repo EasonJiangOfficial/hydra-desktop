@@ -73,7 +73,23 @@
   };
 
   let vol = null, volume = 1, paused = false, native = false;
+  // An ask's question said (its mark, sent after its last chunk): reported (onPlayed) once everything scheduled before
+  // it has played here, by the audio clock (a pause stops it), and only when this player is the one heard: with the
+  // Mac's voice helper playing (native), the helper reports it. A reply stopped or replaced never reports. [mark, id, end]
+  let marks = [], markTimer = null;
+  const checkMarks = () => {
+    markTimer = null;
+    marks = marks.filter(([mk, rid, end]) => {
+      if (rid !== id) return false;
+      if (ac && ac.currentTime < end) return true;
+      R.voiceOut.onPlayed?.(rid, mk);
+      return false;
+    });
+    if (marks.length) markTimer = setTimeout(checkMarks, 50);
+  };
   R.voiceOut = {
+    /** (reply id, mark): set by host.js, which tells the sidecar (voice_played). */
+    onPlayed: null,
     setVolume(v) { volume = Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : 1; if (vol) vol.gain.value = native ? 0 : volume; },
     setNative(on) { native = !!on; if (vol) vol.gain.value = native ? 0 : volume; },
     handle(m) {
@@ -81,6 +97,10 @@
       if ('feel' in m) {
         if (!feels.has(m.id)) { feels.set(m.id, []); if (feels.size > 8) feels.delete(feels.keys().next().value); }
         feels.get(m.id).push([m.at ?? 0, m.feel]);
+        return;
+      }
+      if (m.mark) {
+        if (!native && m.id === id) { marks.push([m.mark, m.id, endAt]); if (!markTimer) checkMarks(); }
         return;
       }
       if (m.end) { // the last chunk is already scheduled

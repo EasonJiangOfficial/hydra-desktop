@@ -107,7 +107,8 @@ async function checkCommandLine({ createBrainTurn, BUILTIN_TOOLS }) {
   assert.deepEqual(flag('--allowedTools').split(','), ['mcp__gg__hydra_list_transactions', 'mcp__gg__hydra_show'], 'exactly the Hydra tools are allowed');
   assert.deepEqual(flag('--disallowedTools').split(','), BUILTIN_TOOLS, 'every built-in disallowed');
   for (const t of ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task']) assert.ok(BUILTIN_TOOLS.includes(t), `${t} is disallowed`);
-  assert.equal(flag('--tools'), '', 'no built-in tools at all');
+  assert.equal(flag('--tools'), 'ToolSearch', 'no built-in tools but ToolSearch (E3: connector schemas wait behind it)');
+  assert.ok(!BUILTIN_TOOLS.includes('ToolSearch'), 'ToolSearch is the one built-in not disallowed');
   assert.ok(flag('--permission-prompt-tool') !== undefined, 'anything not allowed comes to canUseTool (the gate)');
   assert.ok(!seen.args.includes('--strict-mcp-config'), 'no strict MCP config: claude.ai connectors load');
   assert.ok(!seen.args.includes('--bare'), 'never --bare');

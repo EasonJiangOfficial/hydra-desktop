@@ -116,11 +116,31 @@ const redact = (t) => redactText(String(t), { secrets: (secrets ??= environmentS
 // Things redactText doesn't know (it catches keys and tokens): card-like digit runs and named secrets.
 const SECRETISH = /\b(?:\d[ -]?){12,19}\b|\b(?:password|passcode|passphrase|pin code|api key|secret key|access token|2fa code|one-time code)\b/i;
 
-function jsonOf(text) {
+// The first balanced {...} (braces inside strings skipped) that is the answer: it parses and has one of the answer's
+// keys (wants). A model that writes two objects, or a note after the JSON, still parses (E3: a fold failed on
+// "Unexpected non-whitespace character after JSON"). A '{' that starts no JSON (a preamble's "Output format {facts,
+// summary}:") or an object that isn't the answer (a preamble's "Facts were {} this time", {"facts":[]} before the
+// summary) is skipped for the next one. None has them: the first that parses, as before.
+function jsonOf(text, wants = []) {
   const raw = String(text ?? '').replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '');
-  const a = raw.indexOf('{'), b = raw.lastIndexOf('}');
-  if (a < 0 || b < a) throw new Error('no JSON in the reply');
-  return JSON.parse(raw.slice(a, b + 1));
+  let err = null, first;
+  for (let a = raw.indexOf('{'); a >= 0; a = raw.indexOf('{', a + 1)) {
+    let depth = 0, str = false, esc = false, end = -1;
+    for (let i = a; i < raw.length && end < 0; i++) {
+      const c = raw[i];
+      if (str) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') str = false; }
+      else if (c === '"') str = true;
+      else if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) end = i;
+    }
+    if (end < 0) continue;
+    let j;
+    try { j = JSON.parse(raw.slice(a, end + 1)); } catch (e) { err ??= e; continue; }
+    if (!wants.length || (j && typeof j === 'object' && wants.some((k) => Object.hasOwn(j, k)))) return j;
+    first ??= j;
+  }
+  if (first !== undefined) return first;
+  throw err ?? new Error('no JSON in the reply');
 }
 function cleanFacts(list, knownIds) {
   const known = new Set(knownIds);
@@ -135,7 +155,7 @@ function cleanFacts(list, knownIds) {
 
 /** The model's JSON → { summary, facts: [{ text, replaces? }] }. Throws if there's no usable JSON. */
 export function parseBrain(text, { knownIds = [], wantSummary = false } = {}) {
-  const j = jsonOf(text);
+  const j = jsonOf(text, wantSummary ? ['summary'] : ['facts']);
   const facts = cleanFacts(Array.isArray(j.facts) ? j.facts : [], knownIds).slice(0, 20);
   if (!wantSummary) return { facts };
   const summary = redact(typeof j.summary === 'string' ? j.summary : '').trim();
@@ -193,7 +213,7 @@ export function skillInput({ index = '', used = [], turns }) {
 }
 
 /** The model's JSON → { name, description, steps } or null. Redacted; nothing with a redaction or card-like number. */
-export const parseSkill = (text) => cleanSkill(jsonOf(text).skill);
+export const parseSkill = (text) => cleanSkill(jsonOf(text, ['skill']).skill);
 function cleanSkill(k) {
   if (!k || typeof k !== 'object') return null;
   const name = redact(String(k.name ?? '')).replace(/\s+/g, ' ').trim();
@@ -222,7 +242,7 @@ export function lessonInput({ facts = [], index = '', used = [], turns, correcti
 
 /** The model's JSON → { fact?, skill? }; each kept only if it passes the memory and skill filters. */
 export function parseLesson(text, { knownIds = [] } = {}) {
-  const j = jsonOf(text);
+  const j = jsonOf(text, ['fact', 'skill']);
   const fact = j.fact ? cleanFacts([j.fact], knownIds)[0] : undefined;
   const skill = cleanSkill(j.skill);
   return { ...(fact ? { fact } : {}), ...(skill ? { skill } : {}) };

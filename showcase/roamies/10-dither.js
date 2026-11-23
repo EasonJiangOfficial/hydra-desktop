@@ -62,12 +62,12 @@
       // Presence: 'shown' | 'hidden' | 'in' (entering) | 'out' (leaving); v is the variant playing.
       const pres = { state: 'shown', u: 1, v: null, tx: 0, ty: 0, landed: false, launched: false, crouched: false };
       let mask = null, EW = 800, EH = 600;
-      const startAct = (name, quiet) => {
+      // Acts are silent (E4): the idle act loop, model emotes and drawn emotes made sounds no one asked for.
+      const startAct = (name) => {
         if (pres.state !== 'shown') { pending = name; return; }
         act = { name, a: 0, dur: name === 'upset' ? 3.4 : name === 'hype' ? 2.8 : 3.1 };
         m.mode = 'rest'; m.rest = act.dur;
         if (name === 'remind') face.set('surprised', 0.3);
-        if (!quiet) S(name);
       };
       let wasFlung = false, wasAsleep = false, snoreT = 3;
       // Hydra's orb throws off no LED sparks, dust or debris (flat, restrained motion): only the classic look does.
@@ -627,7 +627,7 @@
           // Hydra's orb: the size setting is its outer edge (48 px by default), on every screen.
           R = form === 'cursor' ? 26 : look === 'hydra' ? (Roamie.orbPx ?? 48) / 2 : clamp(S * 0.15, 28, 140) * (form === 'small' ? 0.5 : 1); m.radius = R * (o.ears || o.antenna ? 1.35 : 1.25);
         },
-        boop() { sq.kick(11); S('boop'); if (ant) ant.forEach((p, i) => { p.vx += rand(-1, 1) * 260 * i; }); if (!forced) startAct('hype', true); },
+        boop() { sq.kick(11); S('boop'); if (ant) ant.forEach((p, i) => { p.vx += rand(-1, 1) * 260 * i; }); if (!forced) startAct('hype'); },
         grab() { S('grab'); },
         tap() { S('pip'); },
         bonk() { sq.kick(16); S('bonk'); if (!forced) pending = 'upset'; for (let i = 0; i < 6; i++) drips.push({ x: m.x, y: m.y, vx: rand(-260, 260), vy: rand(-300, 60), r: R * rand(0.12, 0.22), rMax: 0, hold: 0, life: 1 }); },

@@ -637,15 +637,25 @@ enum SleepWord {
         defer { words = next }
         return next != words
     }
-    static func heard(in text: String) -> Bool {
+    /// The words that may stand around it in a strict take (the sidecar's power.mjs AROUND, kept the same).
+    static let around: Set<String> = ["ok", "okay", "hey", "now", "please", "thanks", "thank", "you", "so", "um", "uh", "alright", "right", "then", "go", "to"]
+    /// strict (while Hydra works on a turn): its exact words only, never a letter off, and alone in the take but for a few
+    /// fillers (as power.mjs heardSleepWord), so a near miss or a sentence that mentions it ("I told Hydra sleep is
+    /// important") can't end the work.
+    static func heard(in text: String, strict: Bool = false) -> Bool {
         let got = Spoken.words(text).map(\.word)
-        return got.indices.contains { Spoken.follows(words, in: got, at: $0, loose: true) != nil }
+        return got.indices.contains { i in
+            guard let j = Spoken.follows(words, in: got, at: i, loose: !strict, exact: strict) else { return false }
+            return !strict || (got[..<i] + got[j...]).allSatisfy { around.contains($0) }
+        }
     }
 }
 
 final class Voice {
     // wake: listening quietly for "Hey Roamies" (no pill, nothing muted); hearing it turns into a hands-free take.
-    enum Phase { case idle, wake, armed, holding, handsFree, finishing }
+    // barge: the owner may be talking over Hydra (C7): the recogniser listens quietly while Hydra goes on, and enough words
+    // turn it into a hands-free take (BargeGate).
+    enum Phase { case idle, wake, barge, armed, holding, handsFree, finishing }
 
     private var phase = Phase.idle
     // How long a hands-free take waits for words before giving up (auto-listen's setting; 8 s otherwise).
@@ -721,7 +731,11 @@ final class Voice {
         guard clapOn || speaking else { return }
         switch Trigger.decide(.clap, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) {
         case .wake: log("double clap"); emit(["type": "clap"])
-        case .take: guard phase == .idle || phase == .wake else { return }; log("double clap: listening"); startTake(via: "clap")
+        case .take:
+            guard phase == .idle || phase == .wake || phase == .barge else { return }
+            endBarge("a double clap")
+            // Over Hydra's voice, a take that hears no words gives the reply back in BargeGate.window s, not 8 (C7).
+            log("double clap: listening"); startTake(via: "clap", wait: speaking ? BargeGate.window : nil)
         case .none: log("double clap: nothing to do (clap-to-talk off)")
         }
     }
@@ -740,12 +754,40 @@ final class Voice {
     /// A chunk of Hydra's voice: it plays in the mic's engine when that runs with echo cancellation (the echo
     /// reference), opening the mic for it when it can; else on an output-only engine.
     func play(id: String, pcm: Data, rate: Double) {
-        if #available(macOS 14, *), !out.busy, bargeCan, !hub.echoCancel, micAllowed, hub.echoAllowed(now: uptime()) {
+        var mac14 = false
+        if #available(macOS 14, *) { mac14 = true }
+        // Second verify pass: the owner's log had 79 replies "output only (no echo reference)" and not one try at echo
+        // cancellation, so talking over Hydra could never stop it there. Each reply now logs, once, why it plays where it does.
+        let now = uptime()
+        let why = Self.echoAtPlay(macOS14: mac14, busy: out.busy, bargeWanted: bargeWanted, bargeBroken: bargeBroken, asleep: asleep, phase: "\(phase)",
+                                  test: dryRun || LiveTest.url != nil, echoNow: hub.echoCancel, micAllowed: micAllowed, echoFails: hub.echoFails, echoAllowed: hub.echoAllowed(now: now))
+        if why == nil, !hub.echoCancel, #available(macOS 14, *) {
             let opens = hub.opens
             hub.open(device: InputDevice.forListening(), echoCancel: true)
             if hub.opens != opens { micReopened() }
         }
+        if id != lastPlayId {
+            lastPlayId = id
+            log("Hydra's voice for this reply: \(hub.echoCancel ? "in the mic's engine (echo cancellation: talking over it can stop it)" : "output only, talking over it can't stop it: \(why ?? "echo cancellation didn't start")")")
+        }
         out.play(id: id, pcm: pcm, rate: rate)
+    }
+    private var lastPlayId = ""
+    /// Why a reply's first chunk won't open the mic with echo cancellation (its voice then plays output only, and talking
+    /// over it can't stop it), or nil when it will (or the mic already has it). The order is the checks' order in play().
+    static func echoAtPlay(macOS14: Bool, busy: Bool, bargeWanted: Bool, bargeBroken: Bool, asleep: Bool, phase: String, test: Bool,
+                           echoNow: Bool, micAllowed: Bool, echoFails: Int, echoAllowed: Bool) -> String? {
+        if echoNow { return nil }
+        if !macOS14 { return "macOS 13 or older has no echo cancellation for it" }
+        if !bargeWanted { return "interrupting by talking is off (the panel)" }
+        if bargeBroken { return "this mic has no echo cancellation (tried again when the mic changes)" }
+        if asleep { return "asleep" }
+        if phase != "idle" && phase != "wake" { return "a take was open (\(phase))" }
+        if test { return "test mode" }
+        if busy { return "the last reply's voice was still playing on its own engine" }
+        if !micAllowed { return "no mic permission" }
+        if !echoAllowed { return echoFails >= MicHub.echoTries ? "echo cancellation failed \(echoFails) times on this mic: not tried until it changes" : "echo cancellation failed \(echoFails) time\(echoFails == 1 ? "" : "s"): waiting to try again" }
+        return nil
     }
     // bargeBroken: this mic had no echo cancellation; tried again when the mic changes.
     private var bargeBroken = false, bargeWanted = true
@@ -760,7 +802,7 @@ final class Voice {
     private var spokeAt = -100.0
     private var echoWanted: Bool {
         guard #available(macOS 14, *) else { return false }
-        let take = phase == .armed || phase == .holding || phase == .handsFree || phase == .finishing
+        let take = phase == .barge || phase == .armed || phase == .holding || phase == .handsFree || phase == .finishing
         return Self.echoWanted(barge: bargeOn, speaking: speaking, spokeAgo: uptime() - spokeAt, take: take, echoNow: hub.echoCancel, ownEngineBusy: out.onOwnEngine && out.busy)
     }
     static func echoWanted(barge: Bool, speaking: Bool, spokeAgo: Double, take: Bool, echoNow: Bool, ownEngineBusy: Bool) -> Bool {
@@ -773,16 +815,63 @@ final class Voice {
     static func micWanted(allowed: Bool, take: Bool, wake: Bool, clap: Bool, barging: Bool, playingInMic: Bool) -> Bool {
         allowed && (take || wake || clap || barging || playingInMic)
     }
+    /// Someone may be talking over Hydra (a sustained rise over its voice, C7): energy alone never stops it. The recogniser
+    /// listens on this Mac (with the moment before, so the first word isn't lost) while Hydra goes on; enough words make it
+    /// a take (heardOverVoice), too few in BargeGate.window s and it ends quietly (endBarge).
+    private var gate = BargeGate()
     private func talkedOver() {
         guard Trigger.decide(.voice, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take, phase == .idle || phase == .wake else { return }
-        log("talked over Hydra: listening")
-        startTake(via: "barge")
+        guard gate.onset(now: uptime()) == .check else { return }
+        if phase == .wake { stopWake() }
+        hub.remove("barge")
+        phase = .barge
+        best = ""; woke = false; heardAt = uptime()
+        guard let r = makeRecognizer() else { gate.end(); phase = .idle; return }
+        rec = r; feed.set(r, preroll: true)
+        log("talk over Hydra: listening for words, Hydra goes on")
+    }
+    /// The check's recogniser heard something: enough of it stops Hydra and starts the take with those words; the sleep
+    /// word puts Hydra to sleep, as it does when wake listening hears it (wake listening is held while Hydra speaks).
+    private func heardOverVoice(_ text: String) {
+        best = text; heardAt = uptime()
+        switch gate.heard(text, now: uptime(), strict: wakeHold) {
+        case .take: bargeTake(text)
+        case .sleep: sleptOverVoice(text)
+        default: break
+        }
+    }
+    private func sleptOverVoice(_ text: String) {
+        endBarge("the sleep word")
+        wakeLog("heard the sleep word over Hydra's voice\(wakeHold ? " (exact, while Hydra answers)" : ""): \"\(text.prefix(120))\"")
+        emit(["type": "sleep_word"])
+    }
+    // A take opened over Hydra's voice on the wake phrase: the sleep word in it (said slowly, after the name) still sleeps.
+    private var bargeWoke = false
+    private func bargeTake(_ text: String) {
+        let n = BargeGate.realWords(text).count
+        log("talked over Hydra: \(n) word\(n == 1 ? "" : "s") heard, listening")
+        // The wake phrase said over it: what follows it is the take, as when it wakes.
+        if let rest = WakeWord.match(text) { woke = true; bargeWoke = true; wakeWords = max(0, WakeWord.tokens(text).count - WakeWord.tokens(rest).count); best = rest }
+        nothingWait = Self.phraseWait
+        phase = .handsFree
+        chordAt = uptime()
+        emit(["type": "trigger", "via": "barge"])
+        showListening("handsfree", uptime(), via: "barge")
+    }
+    /// The check is over with no take: its recogniser goes, and Hydra was never stopped.
+    private func endBarge(_ why: String) {
+        guard phase == .barge else { return }
+        gate.end()
+        let n = BargeGate.realWords(best).count
+        feed.set(nil); rec?.cancel(); rec = nil
+        phase = .idle; best = ""
+        log("talk over Hydra: \(why), \(n) real word\(n == 1 ? "" : "s"): Hydra goes on")
     }
     /// A hands-free take, as the talk keys start one; mode tells the overlay what started it.
-    private func startTake(via: String) {
+    private func startTake(via: String, wait: Double? = nil) {
         hub.remove("barge")
         emit(["type": "trigger", "via": via])
-        listenNow()
+        listenNow(wait: wait, via: via)
     }
     var wakeHold = false {
         didSet { if wakeOn && wakeHold != oldValue { wakeLog(wakeHold ? "paused while Hydra answers" : "resumed") } }
@@ -894,7 +983,7 @@ final class Voice {
     }
     func setChord(_ names: [String]) {
         guard let m = Self.mask(names) else { return log("ignored chord \(names)") }
-        if phase == .wake { stopWake() } else if phase != .idle { cancel() }
+        if phase == .wake { stopWake() } else if phase == .barge { endBarge("the talk keys changed") } else if phase != .idle { cancel() }
         chordMask = m; blocked = true
         log("talk chord: \(names.joined(separator: "+"))")
     }
@@ -986,6 +1075,14 @@ final class Voice {
             // The 30 s refresh waits for a quiet moment, so it can't split "Hey" from "Roamies".
             let quiet = now - voiceAt > Self.wakePause / 2 && now - heardAt > Self.wakePause
             if paused || (now - wakeAt > Self.wakeRecycle && quiet) || now - wakeAt > Self.wakeRecycle * 2 { recycleWake(now) }
+        case .barge:
+            if chord && !prevChord && !blocked { endBarge("the talk keys"); arm(now); return }
+            if asleep || !bargeOn { endBarge("interrupting is off"); return }
+            switch gate.tick(now: now) {
+            case .drop: endBarge("too few words in \(Int(BargeGate.window)) s")
+            case .take: bargeTake(best)
+            default: break
+            }
         case .armed:
             // Only the first moment decides shortcut vs. talk: ⌃⌥ plus a key pressed since, ⇧ or ⌘ is a shortcut.
             if down && Self.isShortcut(extra: extra, heldAtArm: heldAtArm, now: keysDown()) { log("not a talk: ⌃⌥ was part of a shortcut"); cancel(); blocked = true; return }
@@ -996,7 +1093,7 @@ final class Voice {
             if now - listenAt > Self.maxSession { end("max length"); finish() }
         case .handsFree:
             // Pressing again switches to push-to-talk; letting go then sends.
-            if chord && !prevChord && !blocked { phase = .holding; releasedAt = nil; return }
+            if chord && !prevChord && !blocked { phase = .holding; releasedAt = nil; askTake = false; return }
             let quiet = now - max(heardAt, voiceAt)
             // Steady sound in the room (a fan, music) keeps the level up, so words that stopped coming end it too.
             if !best.isEmpty && (quiet > Self.pauseEnds || now - heardAt > Self.wordsEnd) { end(quiet > Self.pauseEnds ? "pause" : "no new words"); finish() }
@@ -1015,9 +1112,14 @@ final class Voice {
         if let until = calibrateUntil, now > until { finishCalibration(nil) }
         let clapWanted = clapOn || bargeOn && speaking || calibrateUntil != nil || clapMeter
         if clapWanted != hub.has("clap") { if clapWanted { hub.add("clap", claps.feed) } else { hub.remove("clap") } }
+        // Hydra's voice on the output-only engine (no echo reference): the room hears it as it is, so a clap must clear
+        // the calibrated or Medium level, whatever the slider says (C6); and while it speaks a clap must stand clear of
+        // its voice (C7).
+        claps.setGuarded(speaking && !hub.echoCancel)
+        claps.setSpeaking(speaking)
         let take = phase == .armed || phase == .holding || phase == .handsFree || phase == .finishing
         if speaking { spokeAt = now }
-        let wanted = Self.micWanted(allowed: micAllowed, take: take, wake: phase == .wake, clap: clapWanted, barging: bargeCan && speaking, playingInMic: out.busy && hub.echoCancel)
+        let wanted = Self.micWanted(allowed: micAllowed, take: take, wake: phase == .wake, clap: clapWanted, barging: bargeCan && speaking || phase == .barge, playingInMic: out.busy && hub.echoCancel)
         hub.tick(now: now, wanted: wanted, device: InputDevice.forListening(), echo: echoWanted)
         if clapMeter, hub.running, now - meterAt >= 0.1, let m = claps.meter() {
             meterAt = now
@@ -1034,12 +1136,13 @@ final class Voice {
 
     private func arm(_ now: Double) {
         phase = .armed
+        askTake = false
         nothingWait = Self.phraseWait
         chordAt = now
         heldAtArm = keysDown()
         if !heldAtArm.isEmpty { log("chord: keys already down don't count toward a shortcut: \(heldAtArm.sorted())") }
         best = ""
-        woke = false
+        woke = false; bargeWoke = false
         // The drawing layer first: starting the mic below holds this thread for a moment (longer with Bluetooth),
         // and a drag begun in that moment would otherwise land in the app underneath.
         ink.setArmed(true)
@@ -1061,6 +1164,13 @@ final class Voice {
     private var takeBands = false {
         didSet { if oldValue && !takeBands { emit(["type": "bands", "b": [Double](repeating: 0, count: Spectrum.count)]) } }
     }
+    /// The take a wake opens (via 'wake'): if it hears nothing, Hydra just stays awake, with no "I didn't hear anything".
+    private var quietEmpty = false
+    /// The take open now is one an ask opened (listen via 'ask'): only that one is closed by the ask's cancel (only
+    /// "ask"). Any other take (the owner's keys, a clap, the phrase) clears it, as does the owner taking this one over.
+    private var askTake = false
+    /// Whether a cancel closes the take open now: an ask's cancel (onlyAsk) only the take an ask opened.
+    static func cancels(onlyAsk: Bool, askTake: Bool) -> Bool { !onlyAsk || askTake }
     private func showListening(_ mode: String, _ now: Double, via: String) {
         listenAt = now; heardAt = now; voiceAt = now
         takeBands = true
@@ -1071,18 +1181,22 @@ final class Voice {
             }
         }
         if !dryRun { OutputMute.begin() }
+        quietEmpty = via == "wake"
+        // The listen chime (cue.swift) only for the owner's own triggers; never the pending loop while he talks.
+        Cue.pending(false)
+        if !dryRun { if Cue.audible(via: via) { Cue.play("listen") } else { Cue.keepAudible() } }
         // The pill beside the cursor only for the talk keys; otherwise the orb shows the listening.
         let cursor = Self.cursorShows(via: via) && !wave.off
         if cursor { wave.show() } else { wave.hide() }
         // wave: the cursor shows the listening, so the app shows no listening bubble.
-        emit(["type": "state", "state": "listening", "mode": mode, "wave": cursor])
+        emit(["type": "state", "state": "listening", "mode": mode, "wave": cursor, "ask": askTake])
         if !best.isEmpty { emit(["type": "partial", "text": best]) }
     }
 
     private func finish() {
         guard phase == .armed || phase == .holding || phase == .handsFree else { return }
         let shown = phase != .armed
-        reportEmpty = shown && !failed
+        reportEmpty = shown && !failed && !quietEmpty
         phase = .finishing
         finishedAt = uptime(); endedVia = "recognizer"
         wave.think()
@@ -1109,8 +1223,8 @@ final class Voice {
         stopAudio()
         finishTimer?.invalidate(); finishTimer = nil
         rec?.cancel(); rec = nil
-        phase = .idle
-        woke = false; wakeCooldownUntil = uptime() + Self.wakeCooldown
+        phase = .idle; askTake = false
+        woke = false; bargeWoke = false; wakeCooldownUntil = uptime() + Self.wakeCooldown
         let text = best.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { wave.hide() } else { wave.awaitAnswer() }
         let empty = text.isEmpty && reportEmpty, spoke = voiceAt > listenAt + 0.05
@@ -1144,8 +1258,8 @@ final class Voice {
         stopAudio()
         rec?.cancel(); rec = nil
         finishTimer?.invalidate(); finishTimer = nil
-        phase = .idle
-        woke = false; wakeCooldownUntil = uptime() + Self.wakeCooldown
+        phase = .idle; askTake = false
+        woke = false; bargeWoke = false; wakeCooldownUntil = uptime() + Self.wakeCooldown
         reportEmpty = false
         ink.clear()
         wave.hide()
@@ -1154,19 +1268,57 @@ final class Voice {
 
     /// The shell saw ⌃⌥S: that ⌃⌥ was a shortcut, not a request to talk.
     /// Start listening hands-free without a key press (after an area snap). Ends on a pause or a tap.
-    func listenNow(wait: Double? = nil) {
+    /// via: what opened it (the cue plays for an orb tap, not for auto-listen or the take after a wake).
+    func listenNow(wait: Double? = nil, via: String = "listen", ask: Bool = false) {
         if phase == .wake { stopWake() }
+        endBarge("a take opened")
         guard phase == .idle else { return }
         arm(uptime())
+        askTake = ask
         nothingWait = min(15, max(3, wait ?? 8))
         phase = .handsFree
         blocked = true // the snap shortcut's keys may still be held: don't read them as a tap
-        showListening("handsfree", uptime(), via: "listen")
+        showListening("handsfree", uptime(), via: via)
     }
 
-    func externalCancel() {
+    func externalCancel(onlyAsk: Bool = false) {
+        guard Self.cancels(onlyAsk: onlyAsk, askTake: askTake) else { return }
+        afterVoiceGen += 1 // a take still waiting for Hydra's voice (listenAfterVoice) never opens
+        endBarge("cancelled")
         if phase == .armed || phase == .holding || phase == .handsFree { cancel() }
         blocked = true
+    }
+
+    /// An orb tap during a take (the sidecar's listen_finish): it sends what was heard, as a second tap on the talk keys
+    /// does. Esc still cancels (externalCancel).
+    func externalFinish() {
+        guard phase == .armed || phase == .holding || phase == .handsFree else { return }
+        end("orb tap")
+        finish()
+    }
+
+    /// A take once Hydra's voice has said what it is saying (an ask's question: "Say yes or no."), so a bare "yes" is
+    /// heard: it waits for the voice to start (at most 4 s), then for 0.4 s of quiet after it; still speaking after 30 s,
+    /// no take. A take opened meanwhile wins (listenNow opens only from idle).
+    private var afterVoiceGen = 0
+    func listenAfterVoice(wait: Double?, via: String) {
+        afterVoiceGen += 1
+        let gen = afterVoiceGen, t0 = uptime()
+        var started = false, quietAt = t0
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
+            guard let self, gen == self.afterVoiceGen else { timer.invalidate(); return }
+            let now = uptime()
+            if self.speaking { started = true; quietAt = now }
+            guard let go = Self.afterVoiceDue(started: started, quietFor: now - quietAt, waited: now - t0) else { return }
+            timer.invalidate()
+            if go { self.listenNow(wait: wait, via: via) }
+        }
+        RunLoop.main.add(t, forMode: .common)
+    }
+    /// listenAfterVoice's decision: true listen now, false give up, nil keep waiting.
+    static func afterVoiceDue(started: Bool, quietFor: Double, waited: Double) -> Bool? {
+        if started { return quietFor >= 0.4 ? true : waited > 30 ? false : nil }
+        return waited >= 4 ? true : nil
     }
 
     // ---------- wake word ----------
@@ -1246,9 +1398,9 @@ final class Voice {
         if !confirmed { wakeText = text; heardAt = now }
         tentative = nil
         let open = !confirmed && WakeWord.endsOpen(text)
-        if SleepWord.heard(in: text) {
+        if SleepWord.heard(in: text, strict: wakeHold) {
             if open { tentative = (text, now); return }
-            wakeLog("heard the sleep word"); emit(["type": "sleep_word"]); wakeMiss = nil; wakeText = ""; wakeLoud = 0; recycleWake(now, preroll: false); return
+            wakeLog("heard the sleep word\(wakeHold ? " (exact, while Hydra answers)" : ""): \"\(text.prefix(120))\""); emit(["type": "sleep_word"]); wakeMiss = nil; wakeText = ""; wakeLoud = 0; recycleWake(now, preroll: false); return
         }
         let (rest, d, miss) = WakeWord.scan(text)
         guard let rest else { if let miss { wakeMiss = miss }; return }
@@ -1259,11 +1411,12 @@ final class Voice {
         if asleep { asleep = false; emit(["type": "phrase_wake"]) }
         wakeMiss = nil
         // Same mic, same recogniser: what follows the phrase is already the start of the take.
-        woke = true
+        woke = true; bargeWoke = false
         wakeWords = max(0, WakeWord.tokens(text).count - WakeWord.tokens(rest).count)
         // The take's own wait for words, as a key press gives it (an earlier listenNow may have left 3 s).
         nothingWait = Self.phraseWait
         phase = .handsFree
+        askTake = false
         chordAt = now
         best = rest
         showListening("wake", now, via: "phrase")
@@ -1272,7 +1425,7 @@ final class Voice {
     /// The recogniser's other readings while wake listening: one that has the sleep word or the phrase, ended (not a word
     /// still being written), counts as hearing it.
     private func heardAlternatives(_ alts: [String]) {
-        for t in alts where !WakeWord.endsOpen(t) && (SleepWord.heard(in: t) || WakeWord.match(t) != nil) {
+        for t in alts where !WakeWord.endsOpen(t) && (SleepWord.heard(in: t, strict: wakeHold) || WakeWord.match(t) != nil) {
             wakeLog("heard it in another reading")
             heardWhileWaiting(t, confirmed: true)
             return
@@ -1318,17 +1471,17 @@ final class Voice {
             onText: { [weak self] text in guard let self, self.rec === mine else { return }; self.onText(text) },
             onDone: { [weak self] in
                 guard let self, self.rec === mine else { return }
-                if self.phase == .wake { self.recycleWake(uptime()) } else if self.phase == .finishing { self.finalize() }
+                if self.phase == .wake { self.recycleWake(uptime()) } else if self.phase == .barge { self.endBarge("the recogniser ended") } else if self.phase == .finishing { self.finalize() }
             },
             onError: { [weak self] err in guard let self, self.rec === mine else { return }; self.onError(err) },
             onAlternatives: phase == .wake ? { [weak self] alts in guard let self, self.rec === mine, self.phase == .wake else { return }; self.heardAlternatives(alts) } : nil
         )
         let engine = takeEngine()
-        if phase != .wake { // one line per take, not per wake window
+        if phase != .wake && phase != .barge { // one line per take, not per wake window or check
             let shown = engine.locale?.identifier ?? (engine.analyzer ? "auto" : legacySpeechLocale()?.identifier ?? "auto")
             log("speech: \(engine.analyzer ? "analyzer" : "sfspeech") \(shown)")
         }
-        if #available(macOS 26, *), engine.analyzer { mine = AnalyzerRecognizer(cb, locale: engine.locale) } else { mine = LegacyRecognizer(cb, onDeviceOnly: phase == .wake, locale: engine.locale) }
+        if #available(macOS 26, *), engine.analyzer { mine = AnalyzerRecognizer(cb, locale: engine.locale) } else { mine = LegacyRecognizer(cb, onDeviceOnly: phase == .wake || phase == .barge, locale: engine.locale) }
         return mine
     }
 
@@ -1392,6 +1545,11 @@ final class Voice {
 
     private func onText(_ raw: String) {
         if phase == .wake { return heardWhileWaiting(raw) }
+        if phase == .barge { return heardOverVoice(raw) }
+        if bargeWoke, SleepWord.heard(in: raw, strict: true) {
+            bargeWoke = false
+            wakeLog("heard the sleep word over Hydra's voice: \"\(raw.prefix(120))\""); emit(["type": "sleep_word"]); cancel(); return
+        }
         // A take started by the wake phrase: the phrase itself isn't part of what was said.
         let text = woke ? (WakeWord.match(raw) ?? WakeWord.dropping(wakeWords, from: raw)) : raw
         guard text != best else { return }
@@ -1405,6 +1563,8 @@ final class Voice {
         // Ending a request early reports "no speech"/cancel errors; only real failures reach the user.
         let ns = error as NSError
         let benign = ns.domain == "kAFAssistantErrorDomain" && [203, 216, 301, 1110].contains(ns.code)
+        // The check over Hydra's voice never bothers the user: it just ends, and Hydra goes on.
+        if phase == .barge { endBarge(benign ? "the recogniser ended" : "recognition: \(msg)"); return }
         // Wake listening never bothers the user: start fresh, or rest a while after a real failure.
         if phase == .wake {
             if benign { recycleWake(uptime()) } else { wakeLog("recognition: \(msg)"); stopWake(); wakeRetryAt = uptime() + 30 }
@@ -1472,13 +1632,24 @@ if args.contains("--test-mic") { exit(MicTest.run()) }
 // --bench-claps [set dir]: the double-clap detector's rates on made-up recordings (benchclaps.swift).
 if let i = args.firstIndex(of: "--bench-claps") {
     let dir = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : nil
-    let rs = ClapBench.run(make: { rate, k, cal in let d = ClapDetector(rate: rate, sensitivity: k, calibration: cal); if ProcessInfo.processInfo.environment["CLAP_BENCH"] != nil { d.onCandidate = { print(String(format: "  %.2f ", d.now) + $0) } }; return { d.feed($0) } }, setDir: dir)
-    exit(ClapBench.report(rs, label: "double clap (this build)"))
+    var bad: Int32 = 0
+    // Every seed is a full bench (ClapBench.seeds): one lucky seed can't pass it.
+    for seed in ClapBench.seeds {
+        ClapBench.seed = seed
+        let tag = seed.map { " (seed \($0))" } ?? " (the usual trials)"
+        let rs = ClapBench.run(make: { rate, k, cal in let d = ClapDetector(rate: rate, sensitivity: k, calibration: cal); if ProcessInfo.processInfo.environment["CLAP_BENCH"] != nil { d.onCandidate = { print(String(format: "  %.2f ", d.now) + $0) } }; return { d.feed($0) } }, setDir: dir)
+        bad |= ClapBench.report(rs, label: "double clap (this build)\(tag)")
+        // While Hydra speaks (C7): the same decisions Voice makes, the recogniser stubbed with each fixture's words.
+        bad |= ClapBench.report(ClapBench.runOver(over: BargeGate.interrupter), label: "what stops Hydra while it speaks (this build)\(tag)")
+    }
+    exit(bad)
 }
 // --test-bands: the orb's spectrum (24 bands from an FFT) and its 30-a-second pace; exits 1 on a failure.
 if args.contains("--test-bands") { exit(OutTest.bands()) }
 // --test-ducking: voice processing never turns other audio down, and mute-while-listening never mutes Hydra.
 if args.contains("--test-ducking") { exit(OutTest.ducking()) }
+// --test-cue [<sounds dir>]: which takes chime, the pending loop's ducking and the sound switch (cue.swift).
+if let i = args.firstIndex(of: "--test-cue") { exit(CueTest.run(dir: i + 1 < args.count ? args[i + 1] : nil)) }
 // --test-triggers checks what a clap, the key phrase and talking over Hydra do, awake and asleep, and the talk detector.
 if args.contains("--test-triggers") { exit(TriggerTest.run()) }
 // --test-wake checks the wake phrase matcher on transcripts the recogniser could write; exits 1 on a failure.
@@ -1561,6 +1732,19 @@ if args.contains("--test-wake") {
     sleeps("three keel", true)
     SleepWord.set("")
     sleeps("Hydra, sleep", true)
+    // Build 4 E1 (C5): while a turn runs only the exact words count.
+    func strictly(_ text: String, _ want: Bool) { let got = SleepWord.heard(in: text, strict: true); print("\(got == want ? "ok" : "FAIL") strict sleep \"\(text)\" -> \(got)"); if got != want { bad += 1 } }
+    strictly("Hydra, sleep.", true)
+    strictly("Hydro sleep", false)
+    strictly("Okay Hidra sleep now", false)
+    strictly("okay Hydra sleep now", true)
+    strictly("I told Hydra sleep is important", false)
+    strictly("so Hydra sleep mode is broken right", false)
+    SleepWord.set("Sleep beast")
+    strictly("Sleep beast", true)
+    strictly("sleep least", false)
+    sleeps("sleep least", true)
+    SleepWord.set("")
     // A later reading of the take that no longer matches the phrase: its words still come off.
     func dropped(_ n: Int, _ text: String, _ want: String) { let got = WakeWord.dropping(n, from: text); print("\(got == want ? "ok" : "FAIL") drop \(n) \"\(text)\" -> \"\(got)\""); if got != want { bad += 1 } }
     dropped(2, "Hey Hyde, what time is it?", "what time is it?")
@@ -1793,8 +1977,12 @@ if let i = args.firstIndex(of: "--request"), i + 1 < args.count {
 var signalSources: [DispatchSourceSignal] = []
 let voice = Voice()
 OutputMute.hydraPlaying = { voice.out.busy }
+Cue.volume = { voice.out.volume }
+Cue.speaking = { voice.out.busy }
+if let i = args.firstIndex(of: "--sounds"), i + 1 < args.count { Cue.dir = URL(fileURLWithPath: args[i + 1], isDirectory: true) }
 voice.out.onBands = { emit(["type": "bands", "b": $0.map { ($0 * 1000).rounded() / 1000 }]) }
 voice.out.onFail = { emit(["type": "play_failed", "why": $0]) }
+voice.out.onPlayed = { emit(["type": "played", "id": $0, "mark": $1]) }
 if args.contains("--no-mute") { OutputMute.enabled = false }
 if let i = args.firstIndex(of: "--chord"), i + 1 < args.count { voice.setChord(args[i + 1].components(separatedBy: ",")) }
 if LiveTest.url != nil { OutputMute.enabled = false; voice.setWake(true); LiveTest.start() }
@@ -1807,8 +1995,15 @@ Thread.detachNewThread {
     while let line = readLine() {
         guard let data = line.data(using: .utf8), let msg = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
         switch msg["cmd"] as? String {
-        case "cancel": DispatchQueue.main.async { voice.externalCancel() }
-        case "listen": let wait = msg["wait"] as? Double; DispatchQueue.main.async { voice.listenNow(wait: wait) }
+        case "cancel": let onlyAsk = msg["only"] as? String == "ask"; DispatchQueue.main.async { voice.externalCancel(onlyAsk: onlyAsk) }
+        case "listen":
+            let wait = msg["wait"] as? Double, via = (msg["via"] as? String).flatMap { ["orb", "wake"].contains($0) ? $0 : nil } ?? "listen"
+            let after = msg["afterVoice"] as? Bool == true, ask = msg["via"] as? String == "ask"
+            DispatchQueue.main.async { if after { voice.listenAfterVoice(wait: wait, via: via) } else { voice.listenNow(wait: wait, via: via, ask: ask) } }
+        case "finish": DispatchQueue.main.async { voice.externalFinish() }
+        // Hydra's cues (cue.swift): the wake chime, and the soft loop while it works.
+        case "cue": if let n = msg["name"] as? String, ["wake", "listen"].contains(n) { DispatchQueue.main.async { Cue.play(n) } }
+        case "pending": if let on = msg["on"] as? Bool { DispatchQueue.main.async { Cue.pending(on) } }
         // The sidekick is answering (it appears where the cursor is): the listening pill can go.
         case "handoff": DispatchQueue.main.async { voice.wave.handoff() }
         // The sidekick following the cursor in its cursor form, drawn here (buddy.swift) until the page takes it back.
@@ -1816,7 +2011,7 @@ Thread.detachNewThread {
         case "buddy_alpha": if let a = msg["a"] as? Double { DispatchQueue.main.async { voice.buddy.setHidden(a < 0.5) } }
         case "chord": if let mods = msg["mods"] as? [String] { DispatchQueue.main.async { voice.setChord(mods) } }
         case "watch_clicks": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.watchClicks = on }
-        case "sound": if let on = msg["on"] as? Bool { DispatchQueue.main.async { SnapCue.soundOn = on } }
+        case "sound": if let on = msg["on"] as? Bool { DispatchQueue.main.async { SnapCue.soundOn = on; Cue.soundOn = on; if !on { Cue.pending(false) } } }
         // The listening pill beside the cursor: off while the notch capsule shows it instead.
         case "pill": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.wave.off = !on; if !on { voice.wave.hide() } } }
         case "wake": if let on = msg["on"] as? Bool { DispatchQueue.main.async { voice.setWake(on) } }
@@ -1839,6 +2034,8 @@ Thread.detachNewThread {
             let id = msg["id"] as? String ?? "", rate = msg["rate"] as? Double ?? HydraOut.rate
             if let b64 = msg["pcm"] as? String, let pcm = Data(base64Encoded: b64) { DispatchQueue.main.async { voice.play(id: id, pcm: pcm, rate: rate) } }
         case "play_stop": DispatchQueue.main.async { voice.out.stop() }
+        // After an ask's question (W5): "played" comes back once all of it has played.
+        case "play_mark": if let id = msg["id"] as? String, let m = msg["mark"] as? String { DispatchQueue.main.async { voice.out.mark(id: id, mark: m) } }
         case "play_pause": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.out.pause(on) }
         case "play_volume": if let v = msg["v"] as? Double { DispatchQueue.main.async { voice.out.volume = Float(max(0, min(1, v))) } }
         // Hydra's wake phrase (agent_settings.wake_phrase). Only whether it was taken is logged, never the words.

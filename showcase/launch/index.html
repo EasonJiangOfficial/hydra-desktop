@@ -4,20 +4,98 @@
 <meta charset="utf-8">
 <title>Hydra</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #FFFFFF; }
-  body { display: grid; place-items: center; }
+  /* Notice type, color, and button: the same rules as the web "taking long" page (public/sw.js notice). */
+  html, body { margin: 0; height: 100%; background: #fff; color: #1d1d1f; font: 16px/1.4 system-ui, -apple-system, sans-serif; }
+  body { display: grid; place-content: center; justify-items: center; gap: 20px; text-align: center; }
   .launch-loader { position: relative; }
+  h1 { margin: 0; font: 500 28px/1.2 ui-serif, Georgia, serif; }
+  button { font: inherit; height: 34px; padding: 0 14px; border: 1px solid #1d1d1f; border-radius: 8px; background: #1d1d1f; color: #fff; }
+  #slow { display: grid; justify-items: center; gap: 20px; }
+  #slow[hidden] { display: none; }
 </style>
 </head>
 <body>
 <!-- Loading the Hydra window: the Hydra loading logo until Hydra's first page paints (WebKit keeps this page on screen
-     until then, and the navigation takes the loader with it). -->
+     until then). If that page has not painted after about 15 s, this page is still here: say so and offer Retry. -->
 <div class="launch-loader" id="launch-loader"></div>
+<div id="slow" hidden data-slow-shell>
+  <h1>Hydra is taking long to load</h1>
+  <button type="button" id="retry">Retry</button>
+</div>
 <script src="hydra-loader.js"></script>
 <script>
   window.mountHydraLoader(document.getElementById('launch-loader'), { size: 96, tone: 'ink', label: 'Loading' });
-  // Go on to Hydra once the loader has painted.
-  requestAnimationFrame(() => requestAnimationFrame(() => location.replace('https://hydra-olive-one.vercel.app/')));
+</script>
+<script id="launch-watchdog">
+// The loader must not stay up forever. Hydra's first page paints over this document, so if this page is
+// still here 15 s after the navigation started, show the notice and a Retry button (location.replace again).
+// While this page is still showing, try again every 10 s, but only while the window is visible. A hidden
+// window may never run requestAnimationFrame: leave after 1 s anyway.
+(function () {
+  var HYDRA = 'https://hydra-olive-one.vercel.app/';
+  var SLOW_MS = 15000;
+  var AGAIN_MS = 10000;
+  var FALLBACK_MS = 1000;
+  var slow = document.getElementById('slow');
+  var retry = document.getElementById('retry');
+  var againTimer = 0;
+  var waitVis = null;
+  var started = false;
+
+  function go() { location.replace(HYDRA); }
+
+  function dropWait() {
+    if (!waitVis) return;
+    document.removeEventListener('visibilitychange', waitVis);
+    waitVis = null;
+  }
+
+  function whenVisible(fn) {
+    dropWait();
+    if (document.visibilityState === 'visible') { fn(); return; }
+    waitVis = function () {
+      if (document.visibilityState !== 'visible') return;
+      dropWait();
+      fn();
+    };
+    document.addEventListener('visibilitychange', waitVis);
+  }
+
+  function armAgain() {
+    clearTimeout(againTimer);
+    dropWait();
+    againTimer = setTimeout(function () {
+      whenVisible(function () { go(); armAgain(); });
+    }, AGAIN_MS);
+  }
+
+  function showSlow() {
+    slow.hidden = false;
+    armAgain();
+  }
+
+  retry.addEventListener('click', function () {
+    clearTimeout(againTimer);
+    dropWait();
+    go();
+    if (!slow.hidden) armAgain();
+  });
+
+  function start() {
+    if (started) return;
+    started = true;
+    go();
+    setTimeout(showSlow, SLOW_MS);
+  }
+
+  var frames = 0;
+  function frame() {
+    if (++frames < 2) { requestAnimationFrame(frame); return; }
+    start();
+  }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(frame);
+  setTimeout(start, FALLBACK_MS);
+})();
 </script>
 </body>
 </html>

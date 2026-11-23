@@ -97,10 +97,13 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
   assert.doesNotMatch(panel, /Not while asleep/, 'the phrase wakes Hydra from sleep (W5 contract 4)');
 
   // Any ask while attached opens in the panel.
-  assert.match(side, /const to = onboarding \? ob : !orbDetached\(\) \? panelAsk : ui;\n  if \(to === panelAsk\) send\(\{ type: 'panel_show' \}\);/);
-  assert.match(panel, /else if \(m\.kind === 'ask'\) askSheet\(m\);\n    else if \(m\.kind === 'cancel_ask'\) closeAsk\(m\.id, true\);/);
+  assert.match(side, /const to = onboarding \? ob : !orbDetached\(\) \? panelAsk : ui;\n  const route = [^\n]+\n  if \(to === panelAsk\) send\(\{ type: 'panel_show' \}\);/);
+  assert.match(panel, /else if \(m\.kind === 'ask'\) askSheet\(m\);\n    else if \(m\.kind === 'cancel_ask'\) \{ if \(askHeld\?\.id === m\.id\) askHeld = null; closeAsk\(m\.id, true\); \}/);
   assert.match(panel, /answer\(i === 0 \? 'yes' : null\)/, 'a choice answers as the overlay does: the first is yes');
-  assert.match(panel, /if \(askNow\) \{ const id = askNow\.id; closeAsk\(id, false\); send\(\{ type: 'answer', id, text: null \}\); \}/, 'the panel closing answers no');
+  // Build 4 E1 (C3): the panel closing (it lost focus) is never a no; the ask shows again when it opens.
+  assert.match(panel, /if \(askNow\) \{ askHeld = askNow\.m; closeAsk\(askNow\.id, false\); \}/, 'the panel closing keeps the ask');
+  assert.doesNotMatch(panel, /closeAsk\(id, false\); send\(\{ type: 'answer', id, text: null \}\)/, 'never answered no for a close');
+  assert.match(panel, /render\(null, true\);\n    if \(held\) askSheet\(held\);/, 'and shows it again on open');
 
   // "Clap twice" and the clap level, panel -> sidecar -> shell -> helper and back.
   assert.match(side, /else if \(id === 'clapcal' && MAC\) \{ clapCalibrating = true; send\(\{ type: 'voice_clap_calibrate' \}\);/);

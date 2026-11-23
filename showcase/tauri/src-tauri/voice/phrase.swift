@@ -160,14 +160,16 @@ enum Spoken {
     /// Where `want` is heard in `words`, starting at word `i`: the index just past it, or nil. A wanted word may be heard
     /// as two ("good night" for "goodnight") and two wanted words as one ("goodnight" for "good night"). loose: one word
     /// of a phrase of two or more may be only near (see near), when another is heard as itself and has 5 letters or more.
-    static func follows(_ want: [String], in words: [String], at i: Int, loose: Bool = false) -> Int? {
+    /// exact: every word as it is written (a word heard as two, or two as one, still counts), nothing near.
+    static func follows(_ want: [String], in words: [String], at i: Int, loose: Bool = false, exact: Bool = false) -> Int? {
         var j = i, k = 0, nearUsed = false, strong = false
+        let same: (String, String) -> Bool = exact ? { $0 == $1 } : { Spoken.same($0, $1) }
         while k < want.count {
             guard j < words.count else { return nil }
             if same(words[j], want[k]) { strong = strong || want[k].count >= 5; j += 1; k += 1; continue }
             if j + 1 < words.count, same(words[j] + words[j + 1], want[k]) { strong = strong || want[k].count >= 5; j += 2; k += 1; continue }
             if k + 1 < want.count, same(words[j], want[k] + want[k + 1]) { strong = true; j += 1; k += 2; continue }
-            if loose, want.count >= 2, !nearUsed, near(words[j], want[k]) { nearUsed = true; j += 1; k += 1; continue }
+            if loose, !exact, want.count >= 2, !nearUsed, near(words[j], want[k]) { nearUsed = true; j += 1; k += 1; continue }
             return nil
         }
         return !nearUsed || strong ? j : nil
@@ -208,6 +210,11 @@ enum PhraseTest {
         check("a lost last sound isn't near: good night idea", Spoken.follows(w("goodnight hydra"), in: w("good night idea"), at: 0, loose: true) == nil)
         check("call isn't near kill: their call", Spoken.follows(w("3 kill"), in: w("it's their call"), at: 1, loose: true) == nil)
         check("a near word alone isn't a strong one: hey Harry", Spoken.follows(w("hey hydra"), in: w("hey harry"), at: 0, loose: true) == nil)
+        // Build 4 E1 (C5): exact, while a turn runs, takes only the words themselves.
+        check("exact: sleep least isn't sleep beast", Spoken.follows(w("sleep beast"), in: w("sleep least"), at: 0, exact: true) == nil)
+        check("exact: the words themselves are", Spoken.follows(w("sleep beast"), in: w("Sleep, beast."), at: 0, exact: true) == 2)
+        check("exact: good night is still goodnight", Spoken.follows(w("goodnight hydra"), in: w("good night Hydra"), at: 0, exact: true) == 3)
+        check("exact: never a letter off (Hydro)", Spoken.follows(w("hydra sleep"), in: w("Hydro sleep"), at: 0, loose: true, exact: true) == nil)
         return bad == 0 ? 0 : 1
     }
 }

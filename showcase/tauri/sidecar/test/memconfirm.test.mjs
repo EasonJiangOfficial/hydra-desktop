@@ -38,8 +38,9 @@ assert.equal(getCommitment(c.id).status, 'open');
 
 // The job and skill tools: the asks are in place before anything is removed.
 const src = fs.readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8');
-assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx\)\)/);
-assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?\$\{why\(reason\)\}`, ctx\)/, 'with its reason (ninth review V9-12)');
+// Each is a deletion (E2): it asks with Approve all on too.
+assert.match(src, /action === 'remove' && !\(await confirm\(`Remove the scheduled job[\s\S]{0,80}ctx, \{ deletion: true \}\)\)/);
+assert.match(src, /confirm\(`Delete the skill "\$\{name\}"\?\$\{why\(reason\)\}`, ctx, \{ deletion: true \}\)/, 'with its reason (ninth review V9-12)');
 assert.match(src, /const replacing = skillExists\(args\.name\);\s*if \(!\(await confirm\(`\$\{replacing \? 'Replace' : 'Save'\} the skill/, 'saving a skill asks every time, over one too (second review M8, owner\'s rule)');
 // Fourth review: a fact said again after it was replaced is current again, and replaced facts never reach the model.
 {

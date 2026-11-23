@@ -15,6 +15,17 @@ import { createHydraTools, hydraApi, needsApproval, pairDevice, showTool, toUiAc
 import { relayApprovalSchema, relayBatchSchema, slotSchema } from '../relayschema.mjs';
 
 const KEY = 'hyd_dev_0123456789abcdef0123456789';
+// A second device (the t4 relay below): only it is handed its turns, so a poll of the first relay still on its way when
+// that one stopped can never claim them.
+const KEY2 = 'hyd_dev_t4t4t4t4t4t4t4t4t4t4t4t4t4';
+const queues2 = { live: [], routine: [] };
+// Waits on events, never on the clock (relay.test.mjs was flaky under load): a promise and its resolve, failing
+// loudly instead of hanging if the event never comes.
+function event(what, ms = 60_000) {
+  let done;
+  const p = new Promise((res, rej) => { done = res; setTimeout(() => rej(new Error(`never happened: ${what}`)), ms).unref(); });
+  return { p, done };
+}
 const ctx = { path: '/money', search: '', scope: 'all' };
 const turn = (id, surface, extra = {}) => ({ id, claimId: randomUUID(), threadId: randomUUID(), input: { text: `turn ${id}` }, surface, context: ctx, ...extra });
 const T = { live: randomUUID(), routine: randomUUID(), bad: randomUUID(), stale: randomUUID() };
@@ -29,11 +40,13 @@ const approvals = new Map(); // id -> { status, polls, answer(polls) }
 const calls = []; // tools/call arguments the MCP server saw
 const slotsSeen = new Set();
 let exchanged = null;
-const auth = (req) => req.headers.authorization === `Bearer ${KEY}`;
+const auth = (req) => req.headers.authorization === `Bearer ${KEY}` || req.headers.authorization === `Bearer ${KEY2}`;
 const body = (req) => new Promise((res) => { let s = ''; req.on('data', (d) => { s += d; }); req.on('end', () => res(s ? JSON.parse(s) : null)); });
 const json = (res, code, v) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(v)); };
 const newApproval = (answer) => { const id = randomUUID(); approvals.set(id, { status: 'pending', polls: 0, answer }); return id; };
-let liveDone = 0;
+let liveDone = false;
+// The turn's own stop (the relay aborts it), awaited instead of a sleep: a relay that never stops it fails the test.
+const stopped = (signal) => new Promise((r) => { if (signal.aborted) r(); else signal.addEventListener('abort', r, { once: true }); });
 
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -48,7 +61,7 @@ const server = http.createServer(async (req, res) => {
     assert.equal(u.searchParams.get('wait'), '1');
     const slot = slotSchema.parse(u.searchParams.get('slot')); // the server's own check
     slotsSeen.add(slot);
-    const t = queues[slot].shift();
+    const t = (req.headers.authorization === `Bearer ${KEY2}` ? queues2 : queues)[slot].shift();
     if (t) return json(res, 200, { turn: t });
     return setTimeout(() => { res.writeHead(204); res.end(); }, 30);
   }
@@ -101,8 +114,9 @@ const server = http.createServer(async (req, res) => {
       const { approvalId, ...rest } = m.params.arguments;
       if (m.params.name === 'list_tasks') return json(res, 200, { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: '[{"id":"k1"}]' }] } });
       if (!approvalId) {
-        // The live turn's yes comes after 2 polls; the routine's no only a while after the live turn is done.
-        const id = newApproval(rest.id === 'k1' ? (n) => (n >= 2 ? 'approved' : null) : () => (liveDone && Date.now() - liveDone > 150 ? 'declined' : null));
+        // The live turn's yes comes after 2 polls; the routine's no only once the live turn is done and the routine has
+        // kept its lease with a heartbeat (events, never a time: principle 6).
+        const id = newApproval(rest.id === 'k1' ? (n) => (n >= 2 ? 'approved' : null) : () => (liveDone && turns.get(T.routine).posts.some((p) => !p.events.length) ? 'declined' : null));
         const gate = { needsApproval: true, approvalId: id, summary: `Delete task ${rest.id}` };
         return json(res, 200, { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: JSON.stringify(gate) }], structuredContent: gate } });
       }
@@ -140,13 +154,13 @@ async function runTurn(t, { emit, signal, approve }) {
   if (t.id === T.bad) {
     emit({ type: 'text', delta: 'Sending. ' });
     emit({ type: 'confirm', id: randomUUID(), summary: 'An approval the server never made', danger: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await stopped(signal); // the 400 stops it
     emit({ type: 'text', delta: 'never sent' });
     return;
   }
   if (t.id === T.stale) {
     emit({ type: 'text', delta: 'Working on it. ' });
-    await new Promise((r) => { signal.addEventListener('abort', r, { once: true }); setTimeout(r, 2000); });
+    await stopped(signal); // the 409 on its heartbeat stops it
     emit({ type: 'text', delta: 'never sent' });
     return;
   }
@@ -166,7 +180,7 @@ async function runTurn(t, { emit, signal, approve }) {
     emit({ type: 'ui', action: { kind: 'navigate', href: '/planning' } });
     emit({ type: 'text', delta: 'x'.repeat(17_000) });
     emit({ type: 'done', usage: { inputTokens: 1200, outputTokens: 80, cacheRead: 7 } });
-    liveDone = Date.now();
+    liveDone = true;
     liveDoneWhileRoutineWaiting = !turns.get(T.routine).closed;
     return;
   }
@@ -174,11 +188,13 @@ async function runTurn(t, { emit, signal, approve }) {
 }
 
 const logs = [];
-const relay = createRelay({ api, runTurn, waitSecs: 1, heartbeatMs: 40, flushMs: 5, backoff: [10, 20], retry: [10, 20, 40], waitFor: fastWait, log: (k, d) => logs.push([k, d]) });
-relay.start();
-const until = Date.now() + 20_000;
+// Done when the last turn's relay_done comes (after its last post) with every turn over.
 const finished = () => turns.get(T.routine).closed && turns.get(T.bad).closed && seen.includes(T.stale) && !relay.turns.live && !relay.turns.routine;
-while (!finished() && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+const allDone = event('the four turns ending');
+const relay = createRelay({ api, runTurn, waitSecs: 1, heartbeatMs: 40, flushMs: 5, backoff: [10, 20], retry: [10, 20, 40], waitFor: fastWait,
+  log: (k, d) => { logs.push([k, d]); if (k === 'relay_done' && finished()) allDone.done(); } });
+relay.start();
+await allDone.p;
 await relay.stop();
 assert.equal(relay.running, false);
 
@@ -232,37 +248,51 @@ assert.equal(stale.posts[1].events.length, 0, 'the 409 came on the heartbeat');
 assert.ok(!stale.posts.some((p) => p.events.some((e) => e.type === 'error')), 'no error batch on a stale claim');
 
 // A turn whose brain fails ends with an error event, and the loop carries on.
-const t4 = turn(randomUUID(), 'web'); queues.live.push(t4); turns.set(t4.id, { claimId: t4.claimId, events: [], posts: [] });
-const relay2 = createRelay({ api, runTurn: async () => { throw Object.assign(new Error('Sign in with Claude on the Mac.'), { code: 'mac_signed_out' }); }, waitSecs: 1, flushMs: 5, slots: ['live'] });
+// Its own device's queue (KEY2), so only this relay can claim it; waited for by its own end (relay_done, after its last
+// post), never a fixed time.
+const t4 = turn(randomUUID(), 'web'); queues2.live.push(t4); turns.set(t4.id, { claimId: t4.claimId, events: [], posts: [] });
+// The race that made this flaky: a poll of the first device reaching the server after its relay stopped took t4, and
+// t4 never ran. Such a poll now finds nothing.
+const stray = await api.req('/api/agent/relay/next?wait=1&slot=live', { timeout: 5000 });
+assert.equal(stray.status, 204, "the first device's late poll can't claim the second device's turn");
+const t4Ended = event('t4 ending');
+const relay2 = createRelay({ api: hydraApi({ base, getKey: async () => KEY2 }), runTurn: async () => { throw Object.assign(new Error('Sign in with Claude on the Mac.'), { code: 'mac_signed_out' }); }, waitSecs: 1, flushMs: 5, retry: [10, 20, 40], slots: ['live'],
+  log: (k, d) => { if (k === 'relay_done' && d.id === t4.id) t4Ended.done(); } });
 relay2.start();
-const until2 = Date.now() + 5000;
-while (!turns.get(t4.id).events.length && Date.now() < until2) await new Promise((r) => setTimeout(r, 20));
+await t4Ended.p;
 await relay2.stop();
 assert.deepEqual(turns.get(t4.id).events, [{ type: 'error', message: 'Sign in with Claude on the Mac.', code: 'mac_signed_out' }]);
 
 // Hydra unreachable: it backs off (the sleeps grow, to the last one) instead of spinning.
-const fakeSleep = (log) => (ms, s) => { log.push(ms); return new Promise((r, j) => { const t = setTimeout(r, 1); s?.addEventListener('abort', () => { clearTimeout(t); j(new Error('aborted')); }, { once: true }); }); };
-const waits = [];
-const relay3 = createRelay({ api: hydraApi({ base: 'http://127.0.0.1:1', getKey: async () => KEY }), runTurn: async () => {}, waitSecs: 1, backoff: [5, 10, 20], slots: ['live'], sleep: fakeSleep(waits) });
+// The injected sleep: it notes each wait, says when n have been asked for, and yields without the clock.
+const fakeSleep = (log, n, reached) => (ms, s) => {
+  log.push(ms);
+  if (log.length === n) reached();
+  return new Promise((r, j) => { const t = setImmediate(r); s?.addEventListener('abort', () => { clearImmediate(t); j(new Error('aborted')); }, { once: true }); });
+};
+const waits = [], five = event('five backoff waits');
+const relay3 = createRelay({ api: hydraApi({ base: 'http://127.0.0.1:1', getKey: async () => KEY }), runTurn: async () => {}, waitSecs: 1, backoff: [5, 10, 20], slots: ['live'], sleep: fakeSleep(waits, 5, five.done) });
 relay3.start();
-while (waits.length < 5) await new Promise((r) => setTimeout(r, 5));
+await five.p;
 await relay3.stop();
 assert.deepEqual(waits.slice(0, 5), [5, 10, 20, 20, 20]);
 // Revoked (401): straight to the longest wait, and the sidecar is told (setup then says unpaired).
 key = 'hyd_dev_revokedrevokedrevoked00';
-const waits4 = [], auths = [];
-const relay4 = createRelay({ api, runTurn: async () => {}, waitSecs: 1, backoff: [5, 10, 999], slots: ['live'], sleep: fakeSleep(waits4), onAuth: (ok, status) => auths.push([ok, status]) });
+const waits4 = [], auths = [], one = event('a wait after the 401');
+const relay4 = createRelay({ api, runTurn: async () => {}, waitSecs: 1, backoff: [5, 10, 999], slots: ['live'], sleep: fakeSleep(waits4, 1, one.done), onAuth: (ok, status) => auths.push([ok, status]) });
 relay4.start();
-while (waits4.length < 1) await new Promise((r) => setTimeout(r, 5));
+await one.p;
 await relay4.stop();
 assert.equal(waits4[0], 999);
 assert.deepEqual(auths[0], [false, 401]);
 // Unpaired (no key): the loop stops by itself.
 key = null;
-const relay5 = createRelay({ api, runTurn: async () => {}, waitSecs: 1 });
+let unpaired = 0;
+const bothStopped = event('both slots stopping unpaired');
+const relay5 = createRelay({ api, runTurn: async () => {}, waitSecs: 1, log: (k, d) => { if (k === 'relay' && d.stopped === 'unpaired' && ++unpaired === 2) bothStopped.done(); } });
 relay5.start();
-const until5 = Date.now() + 2000;
-while (relay5.running && Date.now() < until5) await new Promise((r) => setTimeout(r, 5));
+await bothStopped.p;
+await new Promise(setImmediate); // the loops' promises settle (microtasks) before this runs
 assert.equal(relay5.running, false, 'no key: the relay stops');
 key = KEY;
 

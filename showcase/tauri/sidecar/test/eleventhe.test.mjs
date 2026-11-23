@@ -139,12 +139,13 @@ const text = (m) => m.message.content.map((c) => c.text).join('');
   assert.match(unansweredNote(agent.unanswered()), /I didn't get to what you added: "and Friday\?"\. Say it again\./);
   assert.equal(unansweredNote([]), '');
   const src = fs.readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
-  const from = src.indexOf('for await (const e of agentEvents(agent.prompt(content)))');
+  const from = src.indexOf('for await (const e of agentEvents(run))'); // the prompt's loop (run = agent.prompt(content), build4efix5)
   const after = src.slice(from, src.indexOf('reply.finish();', from));
   assert.ok(from > 0 && after.includes('unansweredNote(agent?.unanswered?.())'), 'named after the local loop, before the reply ends');
   const caught = src.slice(src.indexOf('} catch (err) {', from), src.indexOf('} finally {', from));
   assert.match(caught, /const msg = `[^\n]*unansweredNote\(agent\?\.unanswered\?\.\(\)\)/, 'named in the error shown');
-  assert.match(caught, /again = \[text, \.\.\.\(agent\?\.unanswered\?\.\(\) \?\? \[\]\)\]/, 'carried along with a retry');
+  // build4efix5: from where the run's tag is now (runStart), not an index taken before the run.
+  assert.match(caught, /const msgs = agent\?\.getMessages\?\.\(\) \?\? \[\];\n\s+const again = retryText\(\{ messages: msgs, from: runStart\(msgs, runTag, runFrom\), text, unanswered: agent\?\.unanswered\?\.\(\) \?\? \[\] \}\);/, 'carried along with a retry, each once (build4efix4)');
   assert.match(caught, /retryNext = \{ text: again,[^\n]*info: \{ text: again,/);
 }
 

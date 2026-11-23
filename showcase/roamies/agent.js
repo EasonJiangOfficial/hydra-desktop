@@ -1019,6 +1019,13 @@
       // Make (x, y) home and move there now, e.g. to restore where the user last left it.
       // Hydra: to its docked spot on this screen (the saved one, else the bottom-right corner).
       dock: () => { if (!DOCKED) return; const d = dockSpot(); api.place(d[0], d[1]); station.dockWH = `${W}x${H}`; },
+      // Dragged out of the Hydra window (host.js orb drag): it rides the cursor while held (the mover follows the pointer
+      // while dragging); let go, the drop spot is home (saved as its dock, as after a drag by hand).
+      carry: (on, x, y) => {
+        if (on && Number.isFinite(x) && Number.isFinite(y)) { m.x = x; m.y = y; }
+        m.dragging = !!on; m.flung = false; m.grabX = 0; m.grabY = 0; m.vx = m.vy = 0;
+        if (!on) { m.mode = 'rest'; m.rest = 1; R.droppedAt = performance.now(); }
+      },
       place: (x, y) => {
         setStation(x, y); m.x = x; m.y = y; m.vx = m.vy = 0; m.mode = 'rest'; m.rest = 1;
         station.moving = false; station.flee = 0; station.quietUntil = now + 1;
@@ -1040,8 +1047,7 @@
         const h = open('speech', '', { stream: true });
         const bb = b;
         bb.input = { placeholder: opts.placeholder ?? 'Listening…', focused: true, caretAt: now, listen: true, level: 0, target: 0, levels: [], processing: false };
-        bb.wait = 0;
-        k.S('listen');
+        bb.wait = 0; // the listen chime plays in the voice helper (cue.swift), only for the owner's own triggers
         return {
           set(text) {
             let i = 0;
@@ -1105,8 +1111,7 @@
           st.status = final ? 'ok' : 'fail'; // silent: the request's end chimes once (host.js toolsRan)
         };
         tool = st;
-        def.start?.(st, C);
-        k.S('toolstart');
+        def.start?.(st, C); // silent: one chime when the owner's turn ends (host.js toolsRan), none per tool
         if (opts.dur) setTimeout(() => st.finish(true), opts.dur * 1000);
         const done = (ok = true) => {
           if (!st.live) return st.finish(ok);

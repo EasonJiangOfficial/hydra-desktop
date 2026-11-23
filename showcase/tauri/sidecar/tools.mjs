@@ -1,5 +1,6 @@
 // The agent's tools: screen capture, reading and working other apps (the "hands" helper), files, web pages and
 // memory. Every file, URL and open goes through safety.mjs first. There is no shell: the agent runs no commands.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -7,7 +8,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isPasswordApp, isYes, planDeletion } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -187,7 +188,8 @@ async function launchApp(name, hands) {
   if (r.err) return false;
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 200));
-    if (await hands('locate', `app:${n}`).then((r) => r?.ok !== false && r?.window, () => false)) { await new Promise((r) => setTimeout(r, 300)); return true; }
+    // resolve: its window on screen, with nothing brought forward or asked while it starts.
+    if (await hands('resolve', `app:${n}`).then((r) => r?.ok !== false && r?.window, () => false)) { await new Promise((r) => setTimeout(r, 300)); return true; }
   }
   return false;
 }
@@ -312,19 +314,6 @@ export function appMatches(w, want) {
   if (['browser', 'web browser', 'my browser'].includes(x)) return names.some((n) => HELPER_BROWSERS.has(n));
   return names.some((a) => a === x || a.includes(x) || x.includes(a));
 }
-/** What this platform's helper itself finds on screen for 'app:X', never more (main.swift appMatches: its own browser
- *  names, no '.exe' taken off; hands-win app_matches: 'browser' by program file name): a window only appMatches takes
- *  (LibreWolf for 'browser' on a Mac) isn't one the helper finds, so it brings a hidden app forward instead (R11i-3). */
-const MAC_BROWSERS = ['Brave Browser', 'Google Chrome', 'Safari', 'Arc', 'Firefox', 'Microsoft Edge', 'Opera', 'Vivaldi', 'Chromium', 'Orion', 'Zen'];
-const WIN_BROWSER_EXES = ['chrome', 'msedge', 'brave', 'firefox', 'opera', 'vivaldi', 'chromium', 'arc', 'zen', 'librewolf', 'waterfox', 'floorp', 'thorium'];
-export function helperFinds(w, want, win = process.platform === 'win32') {
-  const low = (s) => String(s ?? '').toLowerCase().normalize('NFC');
-  const x = win ? low(want).trim().replace(/\.exe$/, '') : low(want).replace(/^[\p{Zs}\t]+|[\p{Zs}\t]+$/gu, '');
-  if (!x) return false;
-  if (['browser', 'web browser', 'my browser'].includes(x)) return win ? WIN_BROWSER_EXES.includes(low(w?.exe)) : MAC_BROWSERS.includes(String(w?.app ?? ''));
-  return [w?.app, ...(win ? [w?.exe] : [])].map(low).filter(Boolean).some((a) => a === x || a.includes(x) || x.includes(a));
-}
-
 export function stepsText(steps, { clipboard } = {}) {
   const q = (t) => JSON.stringify(String(t ?? ''));
   const one = (s) => {
@@ -387,11 +376,15 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const where = !inWhat || inWhat === 'front' ? 'the app in front' : inWhat;
     return `${/^Step \d+/.exec(t)?.[0] ?? 'A step'} didn't work in ${where}. What its window shows isn't passed on until ${userName} says yes to reading it.`;
   }
-  // A relay turn (R11h-4): to find 'app:X' the helpers bring a running app with no window on screen forward (main.swift
-  // resolveWin unhides and activates it; hands-win restores a minimised one), on a Mac the owner isn't at. That's a Mac
-  // action of its own: asked first, naming the app, before any helper call that can do it (hands() checks every one).
-  // forward: the apps said yes to in this request.
-  let forward = { turn: -1, apps: new Set() };
+  // To find 'app:X' with no window on screen the helpers can bring a running app forward (main.swift resolveWin unhides
+  // and activates it; hands-win restores a minimised one). That's a Mac action of its own (R11h-4): asked first, on this
+  // Mac and in a relay turn, naming the app the helper itself picks (resolve, never a guess here: B4-1, B4-2), before
+  // any helper call that can do it (hands() checks every one). The helper does it only for the app passed back in
+  // ROAMIES_FORWARD after that yes, at most once a run. forward: in this request, each name asked for -> the app said
+  // yes to ({ real, call }), until a helper call takes that yes (one yes, one bring-forward) or the tool call that asked
+  // ends without using it (E0-2); a later need asks again.
+  let forward = { turn: -1, apps: new Map() };
+  const toolCall = new AsyncLocalStorage(); // the tool call under way (an object of its own), for forward's yeses
   const TARGET_AT = { locate: 1, ui: 1, 'locate-control': 1, 'ocr-find': 1, capture: 2 };
   const appOf = (args) => {
     if (args[0] === 'act') { try { const p = JSON.parse(args[1]); return p.window == null && p.app ? String(p.app) : null; } catch { return null; } }
@@ -401,20 +394,26 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // look: the question asks to look at its window too (one question, not two). Returns the name said yes to then, for
   // that one read's windowShows only (looked), or null (R11i-1, R11i-5).
   async function bringForward(name, ctx, look = false) {
-    if (!remote() || !String(name ?? '').trim()) return null;
-    if (forward.turn !== turn) forward = { turn, apps: new Set() };
-    const k = String(name).trim().toLowerCase();
-    if (forward.apps.has(k)) return null;
-    // Listed (on screen) as the helper itself finds it: it uses that window as it is. The list couldn't be read: asked,
-    // as for a hidden app.
-    if ((await hands('windows', 'all').catch(() => null))?.windows?.some((w) => helperFinds(w, name))) return null;
-    if (!(await confirm(`Bring ${name} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx))) throw new Error(`${userName} said no, so I didn't bring ${name} forward.`);
-    forward.apps.add(k);
-    return look ? k : null;
+    if (!String(name ?? '').trim()) return null;
+    if (forward.turn !== turn) forward = { turn, apps: new Map() };
+    if (forward.apps.has(name)) return null;
+    // On screen as the helper finds it (it uses that window as it is), or nothing running to bring forward (the call
+    // then fails and asks to open it). Couldn't be read: nothing is brought forward.
+    const r = await hands('resolve', `app:${name}`).catch(() => null);
+    const real = r && !r.window && r.running ? String(r.running) : null;
+    if (!real) return null;
+    // A password manager unhidden puts its vault on screen: Approve all never answers that (as its window's look).
+    if (!(await confirm(`Bring ${real} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx, { deletion: isPasswordApp(real) || isPasswordApp(name) }))) throw new Error(`${userName} said no, so I didn't bring ${real} forward.`);
+    forward.apps.set(name, { real, call: toolCall.getStore() });
+    return look ? real.trim().toLowerCase() : null;
   }
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Hydra app.');
-    if (remote()) await bringForward(appOf(args));
+    const app = appOf(args);
+    if (app != null) await bringForward(app);
+    const fwd = app != null && forward.turn === turn ? forward.apps.get(app)?.real : undefined;
+    // Used up by this call: a yes never brings the app forward again later in the request (after a hide said yes to).
+    if (fwd !== undefined) forward.apps.delete(app);
     // Acting in an app may take the real cursor: meanwhile clicks go through the overlay, even where the Sidekick or
     // its bubble sits on the spot being clicked.
     const acting = args[0] === 'act';
@@ -429,7 +428,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       else if (ev.ev === 'step' && Array.isArray(ev.bounds) && ev.bounds.length === 4 && ev.bounds.every(Number.isFinite)) ui({ kind: 'hands', step: { bounds: ev.bounds, ...(ev.do === 'hover' ? { hover: true } : {}) } });
     } : undefined;
     let r;
-    try { r = await runHands(args, { timeout: 120_000, onLine }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
+    try { r = await runHands(args, { timeout: 120_000, onLine, env: { ...process.env, ROAMIES_FORWARD: fwd ?? '' } }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
     // Every act error goes through actWords (every caller of act: act_in_app, draw's typing).
     const told = (m) => (acting ? actWords(m, (() => { try { return JSON.parse(args[1]).planApp; } catch { return ''; } })()) : m);
     let res;
@@ -454,7 +453,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const [res, all] = await read().catch(async (err) => {
       if (t === 'front' || !/No matching window/.test(String(err?.message ?? err))) throw err;
       // Opening an app isn't a plain read: it asks first (owner's rule, DESIGN.md "Mac actions").
-      if (!(await confirm(`Open ${t} to read its window? It isn't open now.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+      // A password manager opened puts its vault on screen: asked under Approve all too.
+      if (!(await confirm(`Open ${t} to read its window? It isn't open now.`, ctx, { deletion: isPasswordApp(t) }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
       if (!(await launchApp(t, hands))) throw err;
       return read();
     });
@@ -467,10 +467,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
   // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ask asks the
-  // owner, every time; nothing skips it (the old "Skip Allow prompts" setting is gone). BLOCK verdicts never reach here.
+  // owner, every time; the one exception is his own Approve all (owner: "there should be a mode that approves all
+  // actions"), which skips an ask only when it is tagged deletion: false. Every deletion-class ask below says
+  // deletion: true, so it asks whatever the setting (E2). BLOCK verdicts never reach here.
   // `always` tells an agent job's parent that only the owner may answer (answer_agent can't say yes for them).
-  async function confirm(question, ctx) {
-    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true }, ctx?.signal);
+  async function confirm(question, ctx, { deletion = false } = {}) {
+    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true, deletion }, ctx?.signal);
     return isYes(answer);
   }
   /** A tool that asks before it runs: question(args) is the whole question, or throws when it can't say what runs. */
@@ -484,7 +486,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   async function readable(p, ctx, opts) {
     const v = checkRead(p, HOME, { ...opts, own });
     const f = allowed(v);
-    if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
+    // A file that can hold sign-ins (secret) is never answered by Approve all.
+    if (v.level === ASK && !(await confirm(v.reason, ctx, { deletion: !!v.secret }))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
     return f;
   }
   /** What windows show (each one's document, a browser's file:// page, or the app when there's no file) is checked
@@ -503,15 +506,18 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null, blockOnly = false, looked = null } = {}) {
     const asks = whole && !blockOnly ? [whole] : [], key = (w) => JSON.stringify([w?.id, w?.app, w?.title, w?.document, w?.url]);
     const list = [wins].flat();
+    let secret = false; // a password manager or a sign-in file shows: Approve all never answers, no earlier yes covers it
     for (const w of list) {
       const v = checkWindow(w, HOME, { viewers: !remote() });
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
-      if (whole || blockOnly || ok?.has(key(w))) continue;
+      if (blockOnly) continue;
+      if (v.level === ASK && v.secret) { secret = true; if (!asks.includes(v.reason)) asks.push(v.reason); continue; }
+      if (whole || ok?.has(key(w))) continue;
       if (v.level === ASK && v.app && okApp && !remote() && v.app.toLowerCase() === String(okApp).toLowerCase()) continue;
-      if (v.level === ASK && v.app && looked && remote() && v.app.trim().toLowerCase().normalize('NFC') === looked.normalize('NFC')) continue;
+      if (v.level === ASK && v.app && looked && v.app.trim().toLowerCase().normalize('NFC') === looked.normalize('NFC')) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
-    if (asks.length && !(await confirm(asks.join('\n'), ctx))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
+    if (asks.length && !(await confirm(asks.join('\n'), ctx, { deletion: secret }))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
     if (ok) for (const w of list) ok.add(key(w));
   }
 
@@ -594,7 +600,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     return { content: [{ type: 'text', text: `Screenshot of ${what}${dims}.` }, await imageBlock(file, 'image/jpeg')] };
   }
   // target: "screen", "front" (the window you're working in), an app name ("browser", "Safari", "Figma"),
-  // or "window:<id>" from list_windows. Apps that are open but hidden or minimised are brought forward.
+  // or "window:<id>" from list_windows. Apps that are open but hidden or minimised are brought forward after a yes.
   async function screenshot({ target = 'screen' } = {}, ctx) {
     const file = path.join(os.tmpdir(), `sidekick-${Date.now()}.jpg`);
     // Windows without the helper (or when it fails on the whole screen): PowerShell's screenshot below.
@@ -866,7 +872,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       }
     }));
     // Replacing the clipboard loses what was on it and can stage a command: asked, with the whole text (R10-12).
-    for (const m of marks) if (m.kind === 'copy' && !(await confirm(`Put this on your clipboard (it replaces what's there)?\n${m.text}`))) throw new Error(`${userName} said no, so nothing was copied or drawn.`);
+    for (const m of marks) if (m.kind === 'copy' && !(await confirm(`Put this on your clipboard (it replaces what's there)?\n${m.text}`, undefined, { deletion: true }))) throw new Error(`${userName} said no, so nothing was copied or drawn.`);
     for (const b of beats) for (const m of b.marks) {
       if (m.kind === 'copy') { if (!(await toClipboard(m.text))) notes.push("Couldn't copy to the clipboard."); }
       else if (m.kind === 'open') { await tools.find((x) => x.name === 'open').execute({ target: m.url }); }
@@ -875,11 +881,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         if (!HANDS) throw new Error('Typing into apps needs the Hydra app.');
         const src = m.at.src, app = t === 'front' || t === 'screen' ? {} : { app: t };
         const steps = src.text != null ? [{ do: 'fill', field: src.text, text: m.text }]
-          : src.id != null ? [{ do: 'click', id: m.at.live }, { do: 'type', text: m.text }]
+          : src.id != null ? [{ do: 'click', id: m.at.live, ...(m.at.name ? { shown: m.at.name } : {}) }, { do: 'type', text: m.text }]
             : [{ do: 'click_at', x: m.at.rect[0] + m.at.rect[2] / 2, y: m.at.rect[1] + m.at.rect[3] / 2, global: true }, { do: 'type', text: m.text }];
         // Typing is a Mac action: asked every time, with the real app and the whole text (owner's rule).
         const where = await hands('locate', app.app ? `app:${app.app}` : 'front').then((r) => r?.window?.app ?? null, () => null);
-        if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`))) throw new Error(`${userName} said no, so nothing was typed.`);
+        // A fill replaces what the field holds (lost); a password manager brings its vault forward: asked under Approve
+        // all (planDeletion, the same rule as act_in_app).
+        if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`, undefined, { deletion: planDeletion(steps, [where, app.app]) }))) throw new Error(`${userName} said no, so nothing was typed.`);
         const r = await hands('act', JSON.stringify({ steps, ...app, wholeOk: ['plan'], planApp: where ?? app.app ?? '' }));
         if (r?.needsConfirm) throw new Error(`${actWords(r.why, where ?? app.app)} Nothing more was typed; use act_in_app for that.`);
         if (lastShot) lastShot.used = true;
@@ -1150,12 +1158,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               if (tv.level === ASK && !notes.includes(tv.reason)) notes.push(tv.reason);
               typedSoFar.text = joined.slice(-4096);
             }
-            const label = s.do === 'click_text' ? s.text : s.do === 'click' ? s.label : s.do === 'choose' ? s.option : null;
+            // A focus is a click to the helper (it clicks the control's middle): named and checked as one.
+            const label = s.do === 'click_text' ? s.text : ['click', 'focus'].includes(s.do) ? s.label : s.do === 'choose' ? s.option : null;
             // Named in the question too; the helper still stops at each one and asks again with what it really hits.
             if (label && isRiskyClick(label)) notes.push(`"${label}" could delete, pay, send, quit or sign out.`);
             const keyDoes = s.do === 'key' ? riskyKey(s.key) : null;
             if (keyDoes) notes.push(`${s.key} ${keyDoes}.`);
-            if (label && s.do === 'click') s.shown = label; // named in the question; the helper ignores it
+            if (label && ['click', 'focus'].includes(s.do)) s.shown = label; // named in the question; the helper ignores it
             delete s.label;
           }
           // Owner's rule (DESIGN.md "Mac actions"): every plan asks, every time, with the real app and every step in
@@ -1164,7 +1173,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const where = await hands('locate', spec).then((r) => r?.window?.app ?? null, () => null);
           const inWhat = where ?? (appName === 'front' ? 'the app in front' : appName);
           const question = `In ${inWhat}, every step I'd take:\n${stepsText(mapped, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`;
-          if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so nothing ran.`);
+          // Approve all runs a plan unasked only when every step is in the safe set (planDeletion: a selection, a delete
+          // key, cut, copy, paste or a fill makes it a deletion) and nothing in it needs naming; steps in a password
+          // manager bring its vault forward: asked too. tagged: the strongest tag this plan was asked with, which every
+          // re-ask keeps (never weaker).
+          let tagged = notes.length > 0 || planDeletion(mapped, [inWhat, appName]);
+          if (!(await confirm(question, ctx, { deletion: tagged }))) throw new Error(`${userName} said no, so nothing ran.`);
           const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
@@ -1189,7 +1203,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 const v = checkWrite(String(r.document), HOME, { exists: true });
                 const where = r.app ?? (appName === 'front' ? 'the app in front' : appName);
                 if (v.level === BLOCK) throw new Error(`Blocked for safety: ${where} has ${r.document} open, and acting there could change it. ${v.reason}${before.length ? ` (done first: ${told(before)})` : ''}`);
-                if (!(await confirm(`Change ${v.path} in ${where}? What I type or save there goes into that file.`, ctx))) {
+                if (!(await confirm(`Change ${v.path} in ${where}? What I type or save there goes into that file.`, ctx, { deletion: true }))) {
                   throw new Error(`${userName} said no, so I stopped before acting in ${v.path}${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.docOk = [...(plan.docOk ?? []), String(r.document)];
@@ -1201,7 +1215,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               // another one came forward). Asked again with that app's real name.
               if (r.whole === 'plan') {
                 const left = plan.steps.slice(r.step);
-                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}`, ctx))) {
+                // The strongest of the first ask's tag and this one's (the steps left can't make a selection made
+                // before them safe, and the deletion's target changed with the app, so its yes doesn't carry).
+                tagged = tagged || planDeletion(left, [r.app, appName]);
+                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`, ctx, { deletion: tagged }))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []).filter((x) => x !== 'plan'), 'plan'];
@@ -1218,7 +1235,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 // in a file panel it could pick any file (V9-6).
                 const blind = left.find((s) => s.do === 'click_at' || (s.do === 'hover' && !s.text) || (['click', 'focus'].includes(s.do) && !s.shown));
                 if (blind) throw new Error(`Blocked for safety: ${unq(r.why)} There I only click things by their name (click_text), so ${userName} can see what; "${stepsText([blind]).slice(3)}" doesn't say${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
-                if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left, { clipboard })}`, ctx))) {
+                if (!(await confirm(`${r.why}\n\nEvery step I'd take there:\n${stepsText(left, { clipboard })}`, ctx, { deletion: true }))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []), String(r.whole)];
@@ -1226,7 +1243,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 r = await actOnce();
                 continue;
               }
-              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx))) {
+              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx, { deletion: true }))) {
                 throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
               }
               plan.steps = [{ ...plan.steps[r.step], confirmed: true, confirmedLabel: r.label ?? '' }, ...plan.steps.slice(r.step + 1)];
@@ -1243,7 +1260,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             catch (err) {
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
               if (plan.app && /No matching window/.test(String(err?.message ?? err))) {
-                if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
+                if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx, { deletion: isPasswordApp(plan.app) }))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
                 if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); return seen(res); }
               }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
@@ -1288,23 +1305,34 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       execute: async ({ do: what, app, window, layout }, ctx) => {
         if (what !== 'switch' && !allowActions()) throw new Error(actionsOff);
         if (what === 'arrange' && !layout) throw new Error('arrange needs a layout: left, right, top, bottom, full or center.');
-        const spec = { do: what === 'switch' ? 'activate' : what, ...(app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
         // Owner's rule (DESIGN.md "Mac actions"): every app action asks, naming the real app.
         // With a window, the helper acts on that window's own app, whatever app says (R11c-4): that app is named.
         const owner = window != null ? (await hands('locate', `window:${window}`).catch(() => null))?.window?.app : null;
         if (window != null && !owner) throw new Error(`There's no window ${window} now. Use list_windows for its id.`);
-        const name = owner ?? app ?? (await hands('front').catch(() => null))?.app ?? 'the app in front';
+        // With an app, the helper picks a running app by its name first, else by a part of it ("Code" is Xcode); with
+        // neither, the app in front now. That app is named, and the helper acts on exactly it or on nothing (exact,
+        // B4-3), never on whatever app is in front once the owner has answered. pid: that very process, while it keeps
+        // that name, not another app of the same name (Xcode and Xcode-beta, E0-1).
+        const seen = window != null ? null : app ? await hands('resolve', `app:${app}`).catch(() => null) : await hands('front').catch(() => null);
+        const real = app ? seen?.running : seen?.app, pid = app ? seen?.runningPid : seen?.pid;
+        if (window == null && !real) throw new Error(app ? `${app} isn't open.` : 'No app is in front.');
+        const spec = { do: what === 'switch' ? 'activate' : what, ...(real ? { app: String(real), exact: true, ...(Number.isInteger(pid) ? { pid } : {}) } : app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
+        const name = owner ?? real;
         const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
-        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
+        // Brought forward or laid out (shown), a password manager puts its vault on screen: asked under Approve all too.
+        const shows = ['switch', 'arrange'].includes(what) && isPasswordApp(name);
+        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx, { deletion: what === 'force_quit' || shows }))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
         agentChangesScreen();
         let res = await hands('manage', JSON.stringify(spec));
         if (res.needsConfirm) {
-          // Always asked, whatever the Allow settings: this can lose work.
-          const answer = await ask({ placeholder: `${res.why} ${what === 'force_quit' ? 'Force quit' : what === 'close' ? 'Close it' : 'Quit'} anyway?`, choices: ['Allow', "Don't allow"] }, ctx?.signal);
+          // Always asked, Approve all too: this can lose work (a deletion).
+          const answer = await ask({ placeholder: `${res.why} ${what === 'force_quit' ? 'Force quit' : what === 'close' ? 'Close it' : 'Quit'} anyway?`, choices: ['Allow', "Don't allow"], deletion: true }, ctx?.signal);
           if (!isYes(answer)) throw new Error(`${userName} said no, so ${res.app ?? 'the app'} stays open.`);
           res = await hands('manage', JSON.stringify({ ...spec, confirmed: true }));
         }
         if (res.ok === false) throw new Error(res.error || res.why || 'That did not work.');
+        // Hidden or quit now: a bring-forward yes still held for it never undoes that unasked (E0-2).
+        if (['hide', 'minimize', 'quit', 'force_quit'].includes(what)) for (const [k, v] of forward.apps) if (v.real === name) forward.apps.delete(k);
         return `Done: ${res.done}.`;
       },
     }] : []),
@@ -1378,7 +1406,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const v = checkWrite(p, HOME, { exists, own });
         const f = allowed(v);
         // Owner's rule (DESIGN.md "Mac actions"): every write asks, new file or overwrite, with the real path.
-        if (!(await confirm(v.level === ASK ? v.reason : `${exists ? 'Overwrite' : 'Create'} ${f}?`, ctx))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
+        if (!(await confirm(v.level === ASK ? v.reason : `${exists ? 'Overwrite' : 'Create'} ${f}?`, ctx, { deletion: exists }))) throw new Error(`${userName} said no, so I didn't write ${f}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
         // A file that's there is kept in Recently deleted as it was, so the change can be undone (restore_deleted).
         if (exists) await keepOldFile(f).catch(() => null);
@@ -1411,7 +1439,10 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const isLink = /^[a-z][a-z0-9+.-]*:/i.test(t) && !/^[a-z]:\\/i.test(t);
         const shown = isLink ? t : /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t) ? checkRead(expand(t), HOME).path : `the app ${t}`;
         const question = ov.level === ASK ? ov.reason : `Open ${shown}${app ? ` in ${app}` : ''}?`;
-        if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+        // A hidden or app-data file (secret: it can hold sign-ins), or a password manager opened (its vault on screen),
+        // asks under Approve all too.
+        const vault = isPasswordApp(app) || (!isLink && isPasswordApp(path.basename(t)));
+        if (!(await confirm(question, ctx, { deletion: !!ov.secret || vault }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
         agentChangesScreen();
         // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
         const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);
@@ -1457,7 +1488,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
           const old = getCommitment(id);
           if (!old) throw new Error(`No commitment with id ${id}. Call list_commitments to see the ids.`);
           if (!reason?.trim()) throw new Error('Dropping deletes it: say why in reason, so the question shows it.');
-          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
+          if (!(await confirm(`Drop "${old.text}"${old.repeat ? ' and every repeat of it' : ''}?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so "${old.text}" stays.`);
         }
         const ms = due === undefined ? undefined : due === 'none' ? null : parseDue(due);
         if (ms === undefined && due !== undefined) throw new Error(`Couldn't read the time "${due}".`);
@@ -1485,7 +1516,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const had = listFacts().find((x) => x.id === id);
         if (!had) throw new Error(`No fact with id ${id}.`);
         if (!reason?.trim()) throw new Error('Say why in reason, so the question shows it.');
-        if (!(await confirm(`Forget "${had.text}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so I still remember it.`);
+        if (!(await confirm(`Forget "${had.text}"?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so I still remember it.`);
         const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text} (it can be put back from Recently deleted)`;
       },
     },
@@ -1504,13 +1535,14 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         if (!x) throw new Error(`Nothing in Recently deleted has the id ${id}. Call list_deleted to see the ids.`);
         // Each was deleted with the owner's yes (or by them), so putting one back asks too, every time, saying in full
         // what comes back (ninth review V9-2, V9-3, V9-11). The rules it was made under are checked again first.
-        let question = `Put back the ${binKind(x.kind).toLowerCase()} "${x.title}"?`;
+        let question = `Put back the ${binKind(x.kind).toLowerCase()} "${x.title}"?`, deletion = false;
         if (x.kind === 'file') {
           // Putting a file back writes it: the same rules as write_file (a file that's gone is a new file there).
           if (!allowActions()) throw new Error(actionsOff);
           const there = await fs.lstat(x.data.path).then(() => true, () => false);
           const v = checkWrite(x.data.path, HOME, { exists: there });
           allowed(v);
+          deletion = there; // what is in it now is replaced
           question = there ? `Put back ${v.path} as it was before it was changed? What's in it now goes to Recently deleted.` : `Put back ${v.path} as it was before it was changed? It isn't there now, so this makes it again.`;
         }
         if (x.kind === 'connection') {
@@ -1522,7 +1554,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
           question = `Put back the ${x.data.name} connection and connect it? ${v.reason}`;
         }
         if (x.kind === 'job') question = `Put back the scheduled job "${x.data?.title}" (paused)? Its brief: ${x.data?.brief ?? ''}`;
-        if (!(await confirm(question, ctx))) throw new Error(`${userName} said no, so it stays in Recently deleted.`);
+        if (!(await confirm(question, ctx, { deletion }))) throw new Error(`${userName} said no, so it stays in Recently deleted.`);
         const said = await restoreFromBin(id);
         if (x.kind === 'commitment') onCommitments(null);
         if (x.kind === 'job') jobs?.changed(null);
@@ -1592,7 +1624,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async ({ id, action, due, repeat, reason }, ctx) => {
         if (!getJob(id)) throw new Error(`No scheduled job with id ${id}. Call list_jobs to see the ids.`);
         if (action === 'remove' && !reason?.trim()) throw new Error('Removing deletes it: say why in reason, so the question shows it.');
-        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so the job stays.`);
+        if (action === 'remove' && !(await confirm(`Remove the scheduled job "${getJob(id).title}"?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so the job stays.`);
         if (action === 'remove') { const j = await removeJob(id); jobs.changed(null); return `Removed the job "${j.title}".`; }
         // Every other change asks too, saying what changes; running it now shows the brief it runs (R10-7).
         const job = getJob(id);
@@ -1642,7 +1674,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
           ? `Install the skill "${list[0].name}" from ${list[0].from}? ${whole(list[0])}${replacing.length ? '\n\nIt replaces the one you have.' : ''}`
           : `Install ${list.length} skills from ${list[0].from.split('/').slice(0, 3).join('/')}: ${list.map((k) => k.name).join(', ')}?${replacing.length ? ` It replaces ${replacing.join(', ')}.` : ''}\n\n${list.map((k) => `${k.name}: ${whole(k)}`).join('\n\n')}`;
         // Always asked: a skill is instructions the agent will follow later.
-        if (!isYes(await ask({ placeholder: question, choices: ['Install', "Don't install"] }, ctx?.signal))) throw new Error(`${userName} said no, so nothing was installed.`);
+        if (!isYes(await ask({ placeholder: question, choices: ['Install', "Don't install"], deletion: replacing.length > 0 }, ctx?.signal))) throw new Error(`${userName} said no, so nothing was installed.`);
         const done = [];
         for (const k of list) {
           const r = await installSkill(k);
@@ -1658,7 +1690,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async (args, ctx) => {
         // Owner's rule (DESIGN.md "Mac actions"): a skill change asks, every time, showing the whole skill.
         const replacing = skillExists(args.name);
-        if (!(await confirm(`${replacing ? 'Replace' : 'Save'} the skill "${args.name}"${replacing ? ' with new steps' : ''}? ${args.description}\n\nIts steps:\n${args.steps}`, ctx))) throw new Error(`${userName} said no, so ${replacing ? 'the skill stays as it was' : 'nothing was saved'}.`);
+        if (!(await confirm(`${replacing ? 'Replace' : 'Save'} the skill "${args.name}"${replacing ? ' with new steps' : ''}? ${args.description}\n\nIts steps:\n${args.steps}`, ctx, { deletion: replacing }))) throw new Error(`${userName} said no, so ${replacing ? 'the skill stays as it was' : 'nothing was saved'}.`);
         const s = await saveSkill(args);
         skills.changed?.(s);
         return `${s.created ? 'Learned' : 'Updated'} the skill ${s.slug}. It shows on the Abilities page's Skills tab.`;
@@ -1669,7 +1701,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async ({ name, reason }, ctx) => {
         if (!readSkill(name)) throw new Error(`No skill called "${name}".`);
         if (!reason?.trim()) throw new Error('Say why in reason, so the question shows it.');
-        if (!(await confirm(`Delete the skill "${name}"?${why(reason)}`, ctx))) throw new Error(`${userName} said no, so the skill stays.`);
+        if (!(await confirm(`Delete the skill "${name}"?${why(reason)}`, ctx, { deletion: true }))) throw new Error(`${userName} said no, so the skill stays.`);
         const s = await deleteSkill(name); if (!s) throw new Error(`No skill called "${name}".`); skills.changed?.(null); return `Removed the skill ${s.slug}.`;
       },
     }] : []),
@@ -1704,6 +1736,15 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     const r = await Promise.race([hands('locate', 'front').catch(() => null), new Promise((res) => setTimeout(() => res(null), 1500))]);
     const b = r?.window?.bounds;
     return Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) ? b : null;
+  }
+  // Each tool call runs as its own context: a bring-forward yes it asked for and didn't use ends with it (E0-2).
+  for (const t of tools) {
+    const run = t.execute;
+    if (typeof run !== 'function') continue;
+    t.execute = (...a) => {
+      const call = {};
+      return toolCall.run(call, async () => { try { return await run(...a); } finally { for (const [k, v] of forward.apps) if (v.call === call) forward.apps.delete(k); } });
+    };
   }
   return { tools, hands, whereNow, frontNow, frontBounds, ink: inkEvents, nextTurn: () => ++turn };
 }

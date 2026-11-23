@@ -172,6 +172,51 @@ export function parseKey(combo) {
   const k = keys[0];
   return { mods, key: k === 'enter' ? 'return' : k === 'backspace' ? 'delete' : k };
 }
+// Approve all's one rule for a plan of steps (act_in_app, draw's typing): it runs unasked only when EVERY step is in
+// this safe set. Any other step (a selection: cmd+a, shift or cmd+shift with a key, a "Select All" click; a delete key
+// or chord: Backspace, Delete, ctrl+h, ctrl+d, ctrl+k; cut, copy, paste; fill, set, choose; any key or step kind not
+// listed) makes the whole plan deletion-class, so it asks as with Approve all off. A whitelist, never a list of
+// dangerous keys: what isn't known to be safe asks. Typing is safe only with no selection made before it in the plan
+// (stepsLose): a step that may select (selects) makes any later typing a deletion.
+const SAFE_KINDS = new Set(['click', 'click_text', 'click_at', 'hover', 'scroll', 'focus', 'wait', 'type', 'read_window', 'take_screenshot', 'screenshot']);
+const ARROWS = new Set(['left', 'right', 'up', 'down']);
+// A control clicked by its name that selects, moves or edits text (the Edit menu's items).
+const EDIT_CLICK = /^\s*(?:select(?: all)?|cut|copy|paste(?: and match style)?|delete|clear|replace|undo|redo)\b/i;
+// Typed characters that are keys, not text (the helper sends typed text as it is): C0 controls but a line break (Return,
+// in the safe set), DEL and the Mac's function-key characters. In Cocoa 0x7F and 0x08 delete back, U+F728 forward,
+// 0x0B kills the line, a tab moves to the next field (selecting its text).
+const KEY_CHARS = /[\x00-\x09\x0B\x0C\x0E-\x1F\x7F\uF700-\uF8FF]/;
+// A step after which typing can replace a selection it made: Tab or shift+Tab (focus moving into a field selects its
+// whole text), a click at a spot or on a control with no name (it may be the Edit menu's Select All).
+const selects = (s) => s?.do === 'click_at' || (['click', 'focus'].includes(s?.do) && !String(s.shown ?? s.label ?? '').trim())
+  || (s?.do === 'key' && parseKey(s.key)?.key === 'tab');
+function safeStep(s) {
+  if (s?.do === 'type') return !KEY_CHARS.test(String(s.text ?? ''));
+  if (!SAFE_KINDS.has(s?.do)) {
+    if (s?.do !== 'key') return false;
+    const p = parseKey(s.key);
+    if (!p) return false;
+    // Arrows move the caret (with cmd, opt or ctrl too); with shift they select.
+    if (ARROWS.has(p.key)) return !p.mods.has('shift');
+    // Return, Tab and Escape, alone or with shift (a new line, the field before).
+    return ['return', 'tab', 'escape', 'esc'].includes(p.key) && [...p.mods].every((m) => m === 'shift');
+  }
+  return !['click', 'click_text', 'hover', 'focus'].includes(s.do) || !EDIT_CLICK.test(String(s.text ?? s.shown ?? s.label ?? ''));
+}
+/** A plan that can lose what's there (any step outside the safe set, or typing after a step that may select): its ask
+ *  is a deletion. */
+export function stepsLose(steps) {
+  if (!Array.isArray(steps)) return true;
+  let selected = false;
+  for (const s of steps) {
+    if (!safeStep(s) || (s?.do === 'type' && selected)) return true;
+    if (selects(s)) selected = true;
+  }
+  return false;
+}
+/** Approve all's tag for a plan: a deletion when it can lose what's there (stepsLose) or runs in a password manager
+ *  (its vault comes forward). The one place act_in_app and draw's typing take it from. */
+export const planDeletion = (steps, apps = []) => stepsLose(steps) || apps.some(isPasswordApp);
 export function riskyKey(combo) {
   const p = parseKey(combo);
   if (!p || !p.mods.has('cmd')) return null;
@@ -233,7 +278,8 @@ function readCheck(p, home, { recursive = false } = {}) {
   // A denylist always has gaps, so hidden files and folders (settings and sign-ins of every tool) and app data in the
   // home folder are read only with a yes, every time, naming the real path.
   const hidden = (a) => homes.some((h) => { const r = rel(a, h); return r !== a && r.split('/').some((x) => x.startsWith('.')); });
-  if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true };
+  // secret: it can hold sign-ins, so Approve all never answers it (tools.mjs readable).
+  if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true, secret: true };
   return { ...verdict(SAFE), path: real };
 }
 
@@ -291,6 +337,18 @@ const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) 
   const first = name.split(/\s+/)[0];
   return [name, first, dir, ...(dir && name ? [`${dir}/${name}`, `${dir}/${first}`] : [])].filter(Boolean);
 });
+// Password managers and 2FA code apps, with a Beta, Nightly, Desktop or version after the name ("1Password Beta",
+// "Authy Desktop", "Secrets 4"). ponytail: names from memory, not read off a Mac; add any the owner uses.
+const PASSWORD_APPS = /^(?:1password|bitwarden|lastpass|dashlane|keeper(?: password manager)?|keepass\w*|keeweb|macpass|kypass|minikeepass|strongbox|enpass|proton pass|nordpass|roboform|(?:apple )?passwords|keychain access|secrets|codebook|buttercup|padloc|psono|passbolt|sticky password|myki|authy|(?:google |microsoft )?authenticator|2fas(?: auth)?|ente auth|step two|otp auth|raivo(?: otp)?|aegis)(?:[ -](?:beta|nightly|desktop|\d+(?:\.\d+)*))*$/i;
+// Any other name or bundle id with one of these in it ("Passwords Pro", com.agilebits.onepassword7, "OTP Manager").
+const PASSWORD_WORDS = /password|vault|keychain|authenticator|(?:^|[^a-z0-9])otp|2fa/i;
+/** A password manager or 2FA app (its window shows sign-ins), by name or bundle id: bringing it forward asks under
+ *  Approve all too (tools.mjs). */
+export const isPasswordApp = (app) => { const a = String(app ?? '').trim().replace(/\.app$/i, ''); return PASSWORD_APPS.test(a) || PASSWORD_WORDS.test(a); };
+// A window whose title or address names a vault or a password page: a web vault in a browser (Bitwarden Web Vault,
+// 1Password's sign-in, passwords.google.com), a note called Passwords. The managers' own names count too.
+const VAULT_SHOWN = /\b(?:1password|bitwarden|lastpass|dashlane|keeper|nordpass|proton pass|roboform|enpass|keepass\w*|authy)\b/i;
+const vaultShown = (win) => { const t = `${win?.title ?? ''} ${win?.url ?? ''}`; return PASSWORD_WORDS.test(t) || VAULT_SHOWN.test(t); };
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -306,7 +364,7 @@ export function checkWindow(win, home, { viewers = true } = {}) {
   for (const f of files) {
     const v = checkRead(f, home);
     if (v.level === BLOCK) return verdict(BLOCK, `${app || 'That window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
-    if (v.level === ASK) worst = verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`);
+    if (v.level === ASK) worst = { ...verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`), ...(v.secret ? { secret: true } : {}) };
   }
   // A relay turn (viewers off, R11b-B): a file frees a window only in an app that just shows or edits it, never
   // Terminal, Finder, a browser or a chat app (their window shows more than the file).
@@ -318,6 +376,14 @@ export function checkWindow(win, home, { viewers = true } = {}) {
     const none = BROWSER_APPS.test(app) && !win?.url ? "I couldn't read which page or file it shows" : 'It has no file I can check';
     worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a password, a message, a terminal).`), app };
   }
+  // A password manager's window, or one showing a vault or a password page, shows sign-ins: always asked, Approve all
+  // never answers it (secret), and no earlier yes covers it.
+  const vault = vaultShown(win);
+  if (worst.level === SAFE && vault) {
+    const title = String(win?.title ?? '').trim();
+    worst = { ...verdict(ASK, `Look at ${app ? `the ${app} window` : 'that window'}${title ? ` "${title}"` : ''}? It looks like a password manager or a sign-in page, so it could show passwords.`), app };
+  }
+  if (worst.level === ASK && (isPasswordApp(app) || vault)) worst = { ...worst, secret: true };
   return worst;
 }
 
@@ -433,7 +499,8 @@ export function checkOpen(target, home, { executable = false, app = null } = {})
     if (!inApps && all.some((a) => !mine(a) && SYSTEM_ROOTS.some((d) => a === d || a.startsWith(d + '/')))) return verdict(BLOCK, `${t} is a system file, so I won't open it.`);
     // A startup or settings file, or a hidden or app-data one, opens only with a yes: in an editor the hands tools
     // could change it (seventh review F1), and on screen it can be read.
-    if (r.level === ASK || (!appBundle && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true };
+    // secret: a hidden or app-data one can hold sign-ins (readCheck), and on screen they're read: Approve all never answers.
+    if (r.level === ASK || (!appBundle && hits(NO_WRITE, all, homes))) return { ...verdict(ASK, `Open ${r.path}${inApp ? ` in ${inApp}` : ''}? It's a settings, startup, hidden or app-data file.`), always: true, ...(r.secret ? { secret: true } : {}) };
     if (inApp && !VIEWERS.test(inApp)) return { ...verdict(ASK, `Open ${r.path} in ${inApp}?`), always: true };
     if (all.some((a) => ACTIVE.test(bare(a.split('/').at(-1) ?? '')))) return { ...verdict(ASK, `Open ${r.path}? A page like that can run script when it opens.`), always: true, page: true };
     return verdict(SAFE);
@@ -618,6 +685,18 @@ export function checkMcpServer({ name, command, args = [], url } = {}) {
 
 // Verbs that act on the world: a tool named like this always asks, whatever the server says about it.
 const MCP_RISKY = /(?:^|_)(send|delete|remove|trash|destroy|erase|wipe|drop|purge|truncate|pay|payment|payments|purchase|buy|charge|transfer|withdraw|refund|publish|post|tweet|reply|forward|invite|share|cancel|revoke|unsubscribe|deploy|kill|terminate|execute|exec|sql|migration|migrate|reset|merge|archive)(?:_|$)/;
+// Verbs that overwrite or take away what is there (a file written over, a draft or event changed, labels removed).
+const MCP_OVERWRITE = /(?:^|_)(write|edit|update|overwrite|replace|clear|discard|modify|unlabel|patch|set|move|rename|batch)(?:_|$)/;
+/** E2 approve-all: a connected server's call (an MCP tool or a claude.ai connector) that is deletion-class, so it asks
+ *  even with Approve all on. A call the Mac can't classify is one (the contract: unknown is a deletion): only a server
+ *  that says the tool only reads (readOnlyHint) or doesn't destroy (destructiveHint false) frees it, and never one named
+ *  to delete, trash, send, pay (MCP_RISKY) or to overwrite (MCP_OVERWRITE). claude.ai's connectors send no hints, so
+ *  every one of their asks is a deletion. A tag from the call itself, never from the question's words. */
+export const deletesCall = ({ name, annotations } = {}) => annotations?.destructiveHint === true || MCP_RISKY.test(snake(name)) || MCP_OVERWRITE.test(snake(name))
+  || !(annotations?.readOnlyHint === true || annotations?.destructiveHint === false);
+/** E2: the owner's Approve all says yes for this ask: a yes/no (choices) whose deletion tag is exactly false. A deletion,
+ *  an ask with no tag and a typed prompt still ask. Off: every ask asks. */
+export const approveAllSays = (approveAll, opts) => approveAll === true && Array.isArray(opts?.choices) && opts.deletion === false;
 // Every string in a call's arguments at any depth, each line of it on its own too (V8-6: nothing is skipped). More than
 // LIMIT strings, or one line longer than MAX_ARG, is too much to check: such a call is never SAFE.
 const MAX_ARG = 4096, LIMIT = 2000;
@@ -674,9 +753,10 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
     const v2 = u && u.host ? read(decodeURIComponent(u.pathname), home, { recursive }) : null;
     if (v2?.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v2.reason}`);
     if (v.level === BLOCK) return verdict(BLOCK, `It would send ${s}: ${v.reason}`);
-    if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}${named && v.reason.includes('outside') ? ', outside your Documents, Desktop and Downloads folders' : ', a hidden or app-data file that can hold sign-ins'}.`), always: true };
+    // secret: a hidden or app-data file can hold sign-ins, so Approve all never answers it (as read_file's).
+    if (v.level === ASK) pathAsk = { ...verdict(ASK, `It reaches ${v.path}${named && v.reason.includes('outside') ? ', outside your Documents, Desktop and Downloads folders' : ', a hidden or app-data file that can hold sign-ins'}.`), always: true, ...(v.secret || pathAsk?.secret ? { secret: true } : {}) };
   }
-  if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true };
+  if (a.destructiveHint === true || MCP_RISKY.test(snake(name))) return { ...verdict(ASK, 'It can change, send or delete things.'), always: true, ...(pathAsk?.secret ? { secret: true } : {}) };
   // An allowlist: readOnlyHint (the server's own claim) makes a call SAFE only when its name reads (a read verb in it)
   // and nothing in it writes. Everything else asks.
   const words = snake(name).split('_').filter(Boolean);
@@ -688,5 +768,5 @@ export function checkMcpCall({ name, annotations, args, home = os.homedir() } = 
     return pathAsk ?? { ...verdict(ASK, 'It only reads, but what it reads goes to the model.'), always: true };
   }
   // Owner: anything that might change, send or delete asks every time.
-  return { ...verdict(ASK, "The server doesn't say it only reads."), always: true };
+  return { ...verdict(ASK, "The server doesn't say it only reads."), always: true, ...(pathAsk?.secret ? { secret: true } : {}) };
 }

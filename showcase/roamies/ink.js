@@ -2240,7 +2240,7 @@
     for (const i of all) {
       const was = before.get(i.id);
       if (REM.known && !was) { fresh = true; REM.shown.set(i.id, t); }
-      if (was && was.done !== i.done) { if (i.done) { REM.ticked.set(i.id, t); sfx('done'); } else REM.ticked.delete(i.id); }
+      if (was && was.done !== i.done) { if (i.done) REM.ticked.set(i.id, t); /* silent: a list push (the phone, a job) is not the owner's tick here */ else REM.ticked.delete(i.id); }
     }
     const ids = new Set(all.map((i) => i.id));
     for (const map of [REM.shown, REM.ticked, REM.rings, REM.checks]) for (const id of [...map.keys()]) if (!ids.has(id)) map.delete(id);

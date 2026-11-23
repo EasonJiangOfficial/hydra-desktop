@@ -226,6 +226,29 @@ const SOUNDS = {
   },
 };
 
+// While Hydra works (thinking or running tools): a soft, low F - C dyad that swells and settles once every 2.4 s,
+// looped seamlessly by the voice helper (cue.swift) under the spoken progress lines. Every partial has a whole number
+// of cycles in the loop, and the swell is periodic, so the loop point has no click. No attack: it fades in and out.
+// Peak about -24 dBFS (owner: quiet, premium, no harsh transients). The overlay orb pulses on the same 2.4 s.
+const PENDING_S = 2.4;
+function pending() {
+  const n = Math.round(PENDING_S * SR), b = blank(PENDING_S);
+  const cyc = (f) => Math.round(f * PENDING_S) / PENDING_S; // nearest frequency that loops cleanly
+  const P = [[cyc(174.61), 0.5, -0.25], [cyc(261.63), 0.36, 0.25], [cyc(349.23), 0.16, 0], [cyc(523.25), 0.05, 0]];
+  for (let i = 0; i < n; i++) {
+    const t = i / SR, swell = 0.42 + 0.58 * (0.5 - 0.5 * Math.cos((2 * Math.PI * t) / PENDING_S)) ** 1.6;
+    for (const [f, g, pan] of P) {
+      const v = Math.sin(2 * Math.PI * f * t) * g * swell, a = ((pan + 1) * Math.PI) / 4;
+      b.L[i] += v * Math.cos(a); b.R[i] += v * Math.sin(a);
+    }
+  }
+  let pk = 0; for (const c of [b.L, b.R]) for (const v of c) pk = Math.max(pk, Math.abs(v));
+  const g = 10 ** (-24 / 20) / pk;
+  for (const c of [b.L, b.R]) for (let i = 0; i < n; i++) c[i] *= g;
+  return b;
+}
+SOUNDS.pending = pending;
+
 function wav24(buf) {
   const n = buf.L.length, data = n * 2 * 3, b = Buffer.alloc(44 + data);
   b.write('RIFF', 0); b.writeUInt32LE(36 + data, 4); b.write('WAVE', 8); b.write('fmt ', 12);

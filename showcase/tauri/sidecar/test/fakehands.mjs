@@ -1,6 +1,9 @@
 // A fake hands helper for tests: sends what hands/main.swift (or, with win: true, hands-win main.rs) sends, command by
 // command, from a state file the test writes. Never touches the Mac: it only reads that file and appends to a log.
-// In a test: const fake = fakeHands(dir); then fake.set({ wins, frontPid, hidden, win, act }), fake.calls().
+// In a test: const fake = fakeHands(dir); then fake.set({ wins, frontPid, hidden, running, win, act }), fake.calls().
+// running: the regular apps running, in order (default: every window's app), each a name or { app, pid } (a name's pid:
+// that of a window of its app not taken by an earlier one); hidden: apps running with no window on screen (hands-win:
+// minimised). Bringing one forward is logged as ['UNHIDE', app], an app managed as ['MANAGE', do, app].
 // Run as the helper itself (ROAMIES_HANDS points here): node fakehands.mjs <command> <args…>.
 // A window: { id, pid, app, exe?, title, doc?, url?, text (lines), bounds?, listed? (false: a panel above layer 0 or
 // 80x60 and smaller, which 'windows' and find-text leave out but the screen's pixels show) }.
@@ -44,31 +47,72 @@ function main(a) {
   const BROWSER_EXES = ['chrome', 'msedge', 'brave', 'firefox', 'opera', 'vivaldi', 'chromium', 'arc', 'zen', 'librewolf', 'waterfox', 'floorp', 'thorium'];
   // hands-win's exe: the program's file name without .exe (win.rs proc_names).
   const exe = (w) => String(w.exe ?? w.app.toLowerCase()).replace(/\.exe$/i, '');
+  // Swift's String (main.swift): compared Character by Character (grapheme clusters, each up to canonical equivalence),
+  // so "Finder‍ Mail" doesn't contain "finder" (r and the joiner are one Character); lowercased scalar by scalar
+  // (no final-sigma rule); trimmed of .whitespaces (Zs, tab and U+200B: Apple's set still holds it, main.swift's
+  // self-test checks it); "x".contains("") is false.
+  const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  const chars = (s) => [...seg.segment(String(s))].map((g) => g.segment.normalize('NFC'));
+  const sEq = (a, b) => { const x = chars(a), y = chars(b); return x.length === y.length && x.every((c, i) => c === y[i]); };
+  const sHas = (a, b) => { const x = chars(a), y = chars(b); for (let i = 0; y.length && i + y.length <= x.length; i++) if (y.every((c, j) => c === x[i + j])) return true; return false; };
+  const sLow = (s) => [...String(s)].map((c) => c.toLowerCase()).join('');
+  const sTrim = (s) => s.replace(/^[\p{Zs}\t\u200B]+|[\p{Zs}\t\u200B]+$/gu, '');
+  // main.swift appMatches(app, want), word for word.
+  const macMatches = (app, want) => {
+    const w = sTrim(sLow(want));
+    if (['browser', 'web browser', 'my browser'].some((b) => sEq(b, w))) return BROWSERS.some((b) => sEq(b, app));
+    const x = sLow(app);
+    return sEq(x, w) || sHas(x, w) || sHas(w, x);
+  };
   // appMatches (main.swift: its browser names) / app_matches (logic.rs: the exe too, '.exe' off what's asked, 'browser'
   // by exe).
   const matches = (w, want) => {
-    const x = win ? want.trim().toLowerCase().replace(/\.exe$/, '') : want.trim().toLowerCase();
+    if (!win) return macMatches(w.app, want);
+    // Rust's str::trim: White_Space (U+0085 too, never U+FEFF), not JS trim (E0-3).
+    const x = want.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '').toLowerCase().replace(/\.exe$/, '');
     if (!x) return false;
-    if (['browser', 'web browser', 'my browser'].includes(x)) return win ? BROWSER_EXES.includes(exe(w).toLowerCase()) : BROWSERS.includes(w.app);
-    return [w.app, win ? exe(w) : ''].map((n) => n.toLowerCase()).some((n) => n && (n === x || n.includes(x) || x.includes(n)));
+    if (['browser', 'web browser', 'my browser'].includes(x)) return BROWSER_EXES.includes(exe(w).toLowerCase());
+    return [w.app, exe(w)].map((n) => n.toLowerCase()).some((n) => n && (n === x || n.includes(x) || x.includes(n)));
   };
+  // main.swift pickRunning over the regular apps running (exact: that very name only); hands-win: the first minimised
+  // window's app that app_matches.
+  const taken = new Set();
+  const procs = (st.running ?? [...new Set(st.wins.map((w) => w.app))]).map((r) => {
+    if (typeof r !== 'string') return r;
+    const w = st.wins.find((x) => x.app === r && !taken.has(x.pid));
+    if (w) taken.add(w.pid);
+    return { app: r, pid: w?.pid };
+  });
+  const pickProc = (want, exact = false) => (exact ? procs.find((p) => sEq(p.app, want))
+    : procs.find((p) => sEq(sLow(p.app), sTrim(sLow(want)))) ?? procs.find((p) => macMatches(p.app, want))) ?? null;
+  const pickRunning = (want, exact = false) => pickProc(want, exact)?.app ?? null;
+  // main.swift reads a spec with JSONSerialization, which drops one leading U+FEFF from each string; hands-win's serde
+  // keeps it (E0-3).
+  const spec = (s) => JSON.parse(s, win ? undefined : (k, v) => (typeof v === 'string' && v[0] === '\uFEFF' ? v.slice(1) : v));
+  const pick = (want) => (win ? st.wins.find((x) => hidden.has(x.app) && matches(x, want))?.app ?? null : pickRunning(want));
+  // ROAMIES_FORWARD: the app said yes to (main.swift mayBringForward, logic.rs may_bring_forward).
+  const forward = process.env.ROAMIES_FORWARD || '';
   const info = (w) => ({ id: w.id, app: w.app, title: w.title, bounds: B(w) });
   // winShows: the file (AXDocument) and, unless url: false, a browser's address. hands-win: win_info only.
   const shows = (w, url = true) => (win ? info(w) : { ...info(w), ...(w.doc ? { document: w.doc } : {}), ...(url && w.url ? { url: w.url } : {}) });
   const mainWindow = (ws) => ws[0] ?? null;
-  // resolveWin: 'app:X' with no window on screen but running hidden brings it forward (UNHIDE logged) and looks again:
-  // on a Mac the app named X itself first, then the fuzzy match (pickRunning); hands-win the first minimised match.
+  // resolveWin: 'app:X' with no window on screen brings the running app it picks forward (UNHIDE logged) and looks
+  // again, only when that app is the one in ROAMIES_FORWARD; else no window. Once a run at most (main.swift
+  // takeForward, win.rs TAKEN): once it's forward, the rest of the run finds its window.
   const resolve = (t) => {
     if (t === 'front') return mainWindow(listed.filter((w) => w.pid === st.frontPid)) ?? listed[0] ?? null;
     if (t.startsWith('window:')) return listed.find((w) => w.id === +t.slice(7)) ?? null;
     if (!t.startsWith('app:')) return null;
     const name = t.slice(4), w = mainWindow(listed.filter((x) => matches(x, name)));
     if (w) return w;
-    const h = (!win && st.wins.find((x) => hidden.has(x.app) && x.app.toLowerCase() === name.trim().toLowerCase())) || st.wins.find((x) => hidden.has(x.app) && matches(x, name));
-    if (!h) return null;
-    log(['UNHIDE', h.app]);
-    fs.writeFileSync(file, JSON.stringify({ ...st, hidden: [...hidden].filter((n) => n !== h.app) }));
-    return h;
+    const app = pick(name);
+    if (!app || !(win ? app === forward : sEq(app, forward))) return null;
+    log(['UNHIDE', app]);
+    const back = st.wins.filter((x) => x.app === app && hidden.has(x.app));
+    hidden.delete(app);
+    onScreen.unshift(...back); listed.unshift(...back.filter((x) => x.listed !== false));
+    fs.writeFileSync(file, JSON.stringify({ ...st, hidden: [...hidden] }));
+    return back[0] ?? null;
   };
   const noWindow = (t) => `No matching window is open${t.startsWith('app:') ? ` for ${t.slice(4)}` : ''}.`;
   const score = (low, q) => (low === q ? 0 : new RegExp(`(?<![\\p{L}\\p{N}_./:@\\\\])${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u').test(low) ? 1 : 2);
@@ -80,9 +124,37 @@ function main(a) {
       done({ ok: true, ...(win ? {} : { all: every }), windows: (every ? listed : listed.slice(0, 30)).map((w) => ({ ...shows(w, false), ...(win ? { exe: exe(w) } : {}), ...(w.pid === st.frontPid ? { frontApp: true } : {}) })) });
     }
     case 'front': {
-      const w = resolve('front');
-      if (!w) done({ ok: true });
-      done({ ok: true, app: w.app, ...(win ? { exe: exe(w) } : {}), ...(w.title ? { title: w.title } : {}), ...(w.url ? { url: w.url } : {}), ...(!win && w.doc ? { document: w.doc } : {}) });
+      if (win) {
+        const w = resolve('front');
+        if (!w) done({ ok: true });
+        done({ ok: true, app: w.app, exe: exe(w), ...(w.title ? { title: w.title } : {}), ...(w.url ? { url: w.url } : {}) });
+      }
+      // main.swift: the front app (frontPid) even with no window on screen, its pid too; the first window's app only
+      // when none is known in front (E0-3).
+      const pid = st.frontPid ?? listed[0]?.pid, w = mainWindow(listed.filter((x) => x.pid === pid));
+      const app = w?.app ?? procs.find((p) => p.pid === pid)?.app ?? st.wins.find((x) => x.pid === pid)?.app;
+      if (pid == null || !app) done({ ok: true });
+      done({ ok: true, app, pid, ...(w?.title ? { title: w.title } : {}), ...(w?.url ? { url: w.url } : {}), ...(w?.doc ? { document: w.doc } : {}) });
+    }
+    case 'resolve': {
+      // The window 'app:X' uses on screen, and the app it would bring forward (main.swift: the running pick always;
+      // hands-win: the minimised pick when no window is on screen), doing neither.
+      const name = String(a[1]).slice(4), w = mainWindow(listed.filter((x) => matches(x, name))), app = win && w ? null : pick(name);
+      const pid = win ? null : pickProc(name)?.pid;
+      done({ ok: true, ...(w ? { window: info(w) } : {}), ...(app ? { running: app } : {}), ...(pid != null ? { runningPid: pid } : {}) });
+    }
+    case 'manage': {
+      // main.swift manage: the window's own app, else the process pid while it has that very name, else the running app
+      // picked for app (exact: that very name), else the front app. Force quit needs confirmed.
+      const s = spec(a[1]), name = sTrim(String(s.app ?? ''));
+      let app = null;
+      if (s.window != null) { app = listed.find((x) => x.id === s.window)?.app; if (!app) fail(`No window with id ${s.window} (it may have closed). Call list_windows again.`); }
+      else if (s.pid != null) { const p = procs.find((x) => x.pid === s.pid) ?? (st.running ? null : st.wins.find((x) => x.pid === s.pid)); app = p && sEq(p.app, name) ? p.app : null; }
+      else app = name ? pickRunning(name, s.exact === true) : resolve('front')?.app ?? null;
+      if (!app) fail(name ? `${name} isn't open.` : 'No app is in front.');
+      if (s.do === 'force_quit' && !s.confirmed) done({ ok: false, needsConfirm: true, why: `Force quitting ${app} loses anything unsaved.`, app });
+      log(['MANAGE', s.do, app]);
+      done({ ok: true, done: { quit: `asked ${app} to quit`, force_quit: `force quit ${app}`, hide: `hid ${app}`, activate: `switched to ${app}`, close: `closed a ${app} window`, minimize: `minimised a ${app} window`, arrange: `put the ${app} window on the ${s.layout}` }[s.do] ?? s.do });
     }
     case 'locate': {
       if (a[1] === 'screen') done({ ok: true, what: 'screen' });
@@ -125,7 +197,7 @@ function main(a) {
     }
     case 'refine': done({ ok: true, boxes: JSON.parse(a[1]).map(() => null) });
     case 'act': {
-      const plan = JSON.parse(a[1]);
+      const plan = spec(a[1]);
       const t = plan.window != null ? `window:${plan.window}` : plan.app ? `app:${plan.app}` : 'front';
       if (!resolve(t)) fail(noWindow(t));
       done(st.act ?? { ok: true, done: [], window: shows(resolve(t)) });

@@ -51,6 +51,11 @@ const RECENT = 8; // a beat isn't picked again until this many others have playe
 // own voice when no answer has started within about 1.1 s or a tool starts; never the same twice in a row, never part
 // of the answer (not stored, not shown), not when muted or once the answer is streaming.
 export const FILLERS = ['Let me check.', 'One sec.', 'Let me see.', 'Checking that now.', 'Give me a second.', 'Let me look.', 'Hang on.', 'Just a moment.', 'Let me pull that up.'];
+// Hydra's progress lines (owner: "it's still not saying phrases like "still checking" "almost there""): one each time
+// about 5.5 s pass in a working turn with nothing new (voiceturn.mjs startProgress), never the same twice in a row. The web
+// keeps the same list (src/components/agent/words.ts PROGRESS; docs/BRIDGE.md, Voice) so every surface says the same.
+// Build 4 E4 (owner: "those phrases like "checking it now" "almost there" "looking at it now" ect every few seconds").
+export const PROGRESS = ['Checking it now.', 'Looking at it now.', 'Almost there.', 'Still on it.', 'One more second.', 'Still checking.', 'Nearly there.', 'Still working on it.'];
 /** A filler, never the one said last. */
 export function pickFiller(last, list = FILLERS, random = Math.random) {
   const pool = list.filter((f) => f !== last);
@@ -221,7 +226,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     stopAll();
     lastReq = now(); keepWarm();
     const id = `s${++seq}`, said = [], kinds = [], t0 = Date.now();
-    let heard = false, done = false, v = null, filled = false;
+    let heard = false, done = false, v = null, filled = false, asks = 0;
     const finish = (whole = false) => {
       if (done) return;
       done = true;
@@ -241,6 +246,18 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         log('speech_beat', { id, ms: Date.now() - t0, filler: true });
         v.say(lastFiller);
         return true;
+      },
+      // A progress line or an ask said in the turn (voiceturn.mjs): allowed after the answer began, never once it ended.
+      // An ask returns its mark, sent after the last audio of its sentence (VoiceStudio says when each one is done), so
+      // the player reports when it has played it (voice_played); a progress line, true.
+      progress(line, kind = 'progress') {
+        if (done || !String(line ?? '').trim()) return false;
+        kinds.push(true);
+        log('speech_beat', { id, ms: Date.now() - t0, [kind]: true });
+        if (kind !== 'ask') { v.say(line); return true; }
+        const m = `${id}q${++asks}`;
+        v.say(line, () => { if (!done) emit({ kind: 'speech', id, mark: m }); });
+        return m;
       },
       end() { if (!done) v.end(); },
       abort() { if (done) return; done = true; v?.abort(); if (current === me) current = null; },
@@ -308,7 +325,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     if (!key) return null;
     stopAll();
     const id = `s${++seq}`, said = [];
-    let ended = false, tries = 0, v = null, heard = false, done = false, beat = false, t0 = Date.now();
+    let ended = false, heard = false, done = false, beat = false, t0 = Date.now(), asks = 0;
     // The face follows the voice: a sentence whose feeling differs from the last one's (speech.mjs cueFeel) is marked
     // with where it starts, in characters spoken so far (cues left out); the overlay times it by the audio played.
     let spoken = 0, feel = null;
@@ -317,9 +334,27 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
       if (f !== feel) { feel = f; emit({ kind: 'speech', id, feel: f, at: spoken }); }
       spoken += s.replace(/\[[^\]]*\]\s*/g, '').length + 1;
     };
+    const play = (rate, pcm) => emit({ kind: 'speech', id, rate, pcm });
+    // The reply's sockets, oldest first. An ask's question ends the socket that says it (sealed), so that socket's end
+    // is exactly when all of the question's audio has come: its mark ({ kind: 'speech', id, mark }) follows its last
+    // chunk, and the player reports when it has played it (voice_played). The reply goes on in a new socket, whose
+    // audio waits (held) until the older ones have ended, so it plays in the order said. Each: { v, said (for a
+    // retry), held, tries, heard, sealed, over, mark }.
+    const segs = [];
+    const seg = () => segs.at(-1);
+    const out = (s, rate, pcm) => { if (segs[0] === s) play(rate, pcm); else s.held.push([rate, pcm]); };
+    const over = (s) => {
+      s.over = true;
+      while (segs[0]?.over) {
+        const o = segs.shift();
+        if (o.mark) emit({ kind: 'speech', id, mark: o.mark });
+        if (!segs.length) return finish(true);
+        for (const [r, p] of segs[0].held.splice(0)) play(r, p);
+      }
+    };
     const me = {
       id,
-      say(s) { if (done) return; mark(s); said.push(s); v.say(s); },
+      say(t) { if (done) return; mark(t); said.push(t); seg().said.push(t); seg().v.say(t); },
       /** Something slow is starting: a short beat, unless it's already said something. */
       beat() {
         if (done || beat || said.length || heard) return false;
@@ -328,46 +363,62 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         if (!shippedBeat && !chunks) { me.say(phrase); return true; }
         log('speech_beat', { id, ms: Date.now() - t0 });
         spoken += phrase.length + 1; // played ahead of the reply, so the feelings after it start later
-        if (shippedBeat) emit({ kind: 'speech', id, rate: shippedBeat.rate, pcm: shippedBeat.pcm });
-        else for (const pcm of chunks) emit({ kind: 'speech', id, rate: P.play ?? P.rate, pcm });
+        if (shippedBeat) out(seg(), shippedBeat.rate, shippedBeat.pcm);
+        else for (const pcm of chunks) out(seg(), P.play ?? P.rate, pcm);
         return true;
       },
-      end() { if (done || ended) return; ended = true; v.end(); },
-      abort() { if (done) return; done = true; v?.abort(); if (current === me) current = null; },
+      // A progress line or an ask said in the turn (voiceturn.mjs): allowed after the answer began, never once it ended.
+      // An ask returns its mark (the socket that said it is sealed); a progress line, true.
+      // ponytail: its audio counts as answer audio in the heard track; a filler flag per chunk would make that exact.
+      progress(line, kind = 'progress') {
+        if (done || ended || !String(line ?? '').trim()) return false;
+        log('speech_beat', { id, ms: Date.now() - t0, [kind]: true });
+        const s = seg();
+        mark(line); s.said.push(line); s.v.say(line);
+        if (kind !== 'ask') return true;
+        s.mark = `${id}q${++asks}`; s.sealed = true; s.v.end();
+        connect({ said: [], held: [], tries: 0 }, model, true);
+        return s.mark;
+      },
+      end() { if (done || ended) return; ended = true; const s = seg(); s.sealed = true; s.v.end(); },
+      abort() { if (done) return; done = true; for (const s of segs) s.v?.abort(); if (current === me) current = null; },
     };
     // A reply that played to its end also says how much it said (without the voice cues), so the overlay can learn
     // how fast the voice talks and pace drawings to it.
     const finish = (whole = false) => {
       if (done) return;
       done = true;
+      for (const s of segs) s.v?.abort();
       const chars = whole && heard ? said.join(' ').replace(/\[[^\]]*\]\s*/g, '').length : 0;
       emit({ kind: 'speech', id, end: true, ...(chars ? { chars } : {}) });
       if (current === me) current = null;
     };
-    const connect = (m) => {
-      tries++;
+    // lazy: a socket for after an ask opens with its first sentence (it may wait a minute for the answer).
+    const connect = (s, m, lazy = false) => {
+      s.tries++;
       const cbs = {
         onAudio: (pcm) => {
           if (done) return;
+          s.heard = true;
           if (!heard) { heard = true; if (m !== model) model = m; log('speech_first_audio', { id, model: m, ms: Date.now() - t0 }); }
-          emit({ kind: 'speech', id, rate: P.play ?? P.rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64') });
+          out(s, P.play ?? P.rate, Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'));
         },
-        onEnd: () => finish(true),
+        onEnd: () => { if (!done) over(s); },
         onError: async (err) => {
           if (done) return;
           log('speech_error', { id, model: m, heard: err.heard, message: err.message });
-          if (!err.heard && !heard) {
+          if (!err.heard && !s.heard) {
             // Is it the key? Asked whether or not there's another model to try (Gemini has just the one).
             const a = await check();
             if (done) return;
             if (!a.ok && a.reason === 'key') { onProblem('key'); return finish(); }
-            if (tries < chain().length) {
+            if (s.tries < chain().length) {
               // Retry: the free tier when there's no credit, else the next model down (the free one again once at the bottom).
               const c = chain();
               const next = a.ok && P.freeModel && model === P.freeModel ? P.freeModel : c[Math.min(c.indexOf(m) + 1, c.length - 1)];
-              connect(next);
-              for (const s of said) v.say(s);
-              if (ended) v.end();
+              connect(s, next);
+              for (const t of s.said) s.v.say(t);
+              if (s.sealed) s.v.end();
               return;
             }
             onProblem(err.message);
@@ -376,12 +427,13 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         },
       };
       // The first try takes the socket opened ahead of the reply, if it's still the one this reply needs.
-      const warm = tries === 1 ? takePrewarm(m) : null;
-      if (warm?.rebind(cbs)) v = warm;
-      else { warm?.abort?.(); v = new P.Voice({ key, voice, model: m, ...cbs }).open(); }
+      const warm = s.tries === 1 && !segs.length ? takePrewarm(m) : null;
+      if (!segs.includes(s)) segs.push(s);
+      if (warm?.rebind(cbs)) s.v = warm;
+      else { warm?.abort?.(); s.v = new P.Voice({ key, voice, model: m, ...cbs }); if (!lazy) s.v.open(); }
     };
     log('speech_start', { id, model });
-    connect(model);
+    connect({ said: [], held: [], tries: 0 }, model);
     current = me;
     return me;
   }

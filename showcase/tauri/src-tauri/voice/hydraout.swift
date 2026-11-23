@@ -93,6 +93,28 @@ enum Resample {
     }
 }
 
+/// Marks in what plays (an ask's question, W5): each is due once every buffer scheduled before it has played, never on
+/// a guess from how long it should take. reset() when the queue is dropped (a stop, a new reply): those never play.
+struct PlayMarks {
+    private(set) var scheduled = 0, played = 0
+    private var marks: [(String, Int)] = []
+    mutating func reset() { scheduled = 0; played = 0; marks = [] }
+    mutating func schedule() { scheduled += 1 }
+    /// A mark after what is scheduled now: returned at once when all of that has already played, else kept.
+    mutating func add(_ m: String) -> String? {
+        if played >= scheduled { return m }
+        marks.append((m, scheduled))
+        return nil
+    }
+    /// One buffer played: the marks now due, in order.
+    mutating func playedOne() -> [String] {
+        played += 1
+        let due = marks.filter { $0.1 <= played }.map { $0.0 }
+        marks.removeAll { $0.1 <= played }
+        return due
+    }
+}
+
 /// The player. attach(engine) puts it in the barge-in mic's engine before that starts; otherwise play() makes an
 /// output-only engine of its own. Main thread only.
 final class HydraOut {
@@ -112,6 +134,9 @@ final class HydraOut {
     var onOwnEngine: Bool { host != nil && host === own }
     var onBands: ([Float]) -> Void = { _ in }
     var onFail: (String) -> Void = { _ in }
+    /// A mark of the reply playing now has played: (reply id, mark).
+    var onPlayed: (String, String) -> Void = { _, _ in }
+    private var marks = PlayMarks()
 
     func attach(_ eng: AVAudioEngine) {
         detach()
@@ -138,7 +163,7 @@ final class HydraOut {
         if let p = player { eng.detach(p) }
         player = nil; host = nil
         let was = pending > 0
-        pending = 0; current = nil
+        pending = 0; current = nil; marks.reset()
         if eng === own { eng.stop(); own = nil }
         if was { onBands([Float](repeating: 0, count: Spectrum.count)) }
     }
@@ -155,23 +180,33 @@ final class HydraOut {
         f.withUnsafeBufferPointer { src in buf.floatChannelData![0].update(from: src.baseAddress!, count: f.count) }
         // Hydra's own voice is never muted by mute-while-listening.
         OutputMute.end()
-        pending += 1
+        pending += 1; marks.schedule()
         let gen = generation
-        p.scheduleBuffer(buf) { [weak self] in
+        // Called once the buffer has really been played out (not just handed to the output), so a mark after it is
+        // reported when it was heard.
+        p.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self, self.generation == gen else { return }
                 self.pending = max(0, self.pending - 1)
+                for m in self.marks.playedOne() { self.onPlayed(id, m) }
                 if self.pending == 0 { self.idle() }
             }
         }
         if !paused && !p.isPlaying { p.play() }
     }
 
+    /// A mark after this reply's chunks so far (an ask's question): reported (onPlayed) once they have all played. A
+    /// reply that was stopped or replaced never reports it.
+    func mark(id: String, mark: String) {
+        guard id == current else { return }
+        if let m = marks.add(mark) { onPlayed(id, m) }
+    }
+
     func stop() {
         guard pending > 0 || current != nil else { return }
         generation += 1
         player?.stop()
-        pending = 0; current = nil
+        pending = 0; current = nil; marks.reset()
         onBands([Float](repeating: 0, count: Spectrum.count))
         idle()
     }
@@ -233,6 +268,17 @@ enum OutTest {
         check("at most 30 sends a second (\(sent))", sent <= 30 && sent >= 28, &bad)
         let up = Resample.linear([0, 1, 0, -1], from: 22050, to: 44100)
         check("22.05 kHz doubles to 44.1 kHz (\(up.count))", up.count == 8 && abs(up[1] - 0.5) < 1e-6, &bad)
+        // An ask's mark is due only once every buffer before it has played; one with nothing left to play, at once.
+        var m = PlayMarks()
+        check("a mark with nothing queued is due at once", m.add("q0") == "q0", &bad)
+        m.schedule(); m.schedule()
+        check("a mark after two buffers waits", m.add("q1") == nil, &bad)
+        m.schedule()
+        check("not due after the first buffer", m.playedOne().isEmpty, &bad)
+        check("due once the second has played", m.playedOne() == ["q1"], &bad)
+        check("never again", m.playedOne().isEmpty, &bad)
+        m.schedule(); _ = m.add("q2"); m.reset()
+        check("a stopped reply's mark is dropped", m.playedOne().isEmpty && m.add("q3") == "q3", &bad)
         let pcm = Data([0x00, 0x80, 0xff, 0x7f, 0x00, 0x00])
         let s = Resample.int16(pcm)
         check("16-bit PCM reads as -1...1", s.count == 3 && s[0] == -1 && abs(s[1] - 32767 / 32768) < 1e-6 && s[2] == 0, &bad)

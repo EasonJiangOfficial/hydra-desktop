@@ -1,6 +1,6 @@
 // Hydra's shared agent settings (W5 voice contract section 1, W6 settings contract): the server is the source of truth.
 // GET /api/agent/state (device key) returns agent_settings: wake_phrase, sleep_word, clap_sensitivity, model,
-// effort_live, effort_routine. Every brain reads its model and effort from here (the Mac at start, on a change push and
+// effort_live, effort_routine, approve_all. Every brain reads its model and effort from here (the Mac at start, on a change push and
 // every 60 s; the server brain per turn), so nothing hard-codes a model. Defaults (the contract's, used until the server
 // answers): Opus 5.5, live low, routine medium. An older server may not send the voice fields: `served` says which
 // ones it did, and the Mac keeps its own values for the rest. PATCH /api/agent/state saves a change made on the Mac.
@@ -8,7 +8,7 @@ export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5
 export const EFFORTS = ['low', 'medium', 'high'];
 /** The clap sensitivity as the server keeps it, and as the voice helper takes it (0 only loud claps ... 1 soft ones). */
 export const CLAP_LEVELS = Object.freeze({ low: 0.2, medium: 0.5, high: 0.8 });
-export const SETTINGS_DEFAULTS = Object.freeze({ wakePhrase: 'Hey Hydra', sleepWord: null, clapSensitivity: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium' });
+export const SETTINGS_DEFAULTS = Object.freeze({ wakePhrase: 'Hey Hydra', sleepWord: null, clapSensitivity: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium', approveAll: false });
 const VOICE_FIELDS = [['wakePhrase', 'wake_phrase'], ['sleepWord', 'sleep_word'], ['clapSensitivity', 'clap_sensitivity']];
 export const SETTINGS_EVERY_MS = 60_000;
 
@@ -27,7 +27,7 @@ const settingsOf = (raw) => (raw && typeof raw === 'object' ? (raw.settings && t
 export function cleanSettings(raw, before = SETTINGS_DEFAULTS) {
   const s = settingsOf(raw);
   const model = pick(s, 'model'), live = pick(s, 'effortLive', 'effort_live'), routine = pick(s, 'effortRoutine', 'effort_routine');
-  const sleep = pick(s, 'sleepWord', 'sleep_word'), clap = pick(s, 'clapSensitivity', 'clap_sensitivity');
+  const sleep = pick(s, 'sleepWord', 'sleep_word'), clap = pick(s, 'clapSensitivity', 'clap_sensitivity'), approveAll = pick(s, 'approveAll', 'approve_all');
   return {
     wakePhrase: cleanWakePhrase(pick(s, 'wakePhrase', 'wake_phrase')) ?? before.wakePhrase,
     sleepWord: typeof sleep === 'string' ? sleep.trim().replace(/\s+/g, ' ').slice(0, 40) : before.sleepWord,
@@ -35,6 +35,8 @@ export function cleanSettings(raw, before = SETTINGS_DEFAULTS) {
     model: MODELS.includes(model) ? model : before.model,
     effortLive: EFFORTS.includes(live) ? live : before.effortLive,
     effortRoutine: EFFORTS.includes(routine) ? routine : before.effortRoutine,
+    // Approve all (owner: "there should be a mode that approves all actions"): only a real boolean; deletions still ask.
+    approveAll: typeof approveAll === 'boolean' ? approveAll : before.approveAll ?? false,
   };
 }
 /** The voice fields an answer really had (valid ones), by their camelCase names. */

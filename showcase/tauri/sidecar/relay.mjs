@@ -30,12 +30,26 @@
 //   session, then calls done() again. At most HOLD_MAX holds; past that it says so and ends the turn with an error
 //   (Hydra keeps his words in the thread), never a loop and never a dropped addition.
 // Offline or refused between turns: it backs off (1 s up to a minute), never a busy loop.
-import { delay, waitApproval } from './hydramcp.mjs';
+import { DANGER, delay, waitApproval } from './hydramcp.mjs';
 import { agentEvents } from './agentstream.mjs';
 // The server's shapes and limits (src/lib/agent/relay-schema.ts, copied verbatim).
 import { z } from 'zod';
 import fs from 'node:fs';
 import { ADDED_PREFIX, LIMITS, localTurnSchema, relayEventSchema, scopeSchema } from './relayschema.mjs';
+/** E2: this build sends a structured deletion tag on every relay approval (POST /api/agent/relay/approval). */
+export const APPROVE_CAPS = Object.freeze({ approveAllDeletionTags: 1 });
+/**
+ * A relay turn's ask (W3 contract-fixes 6): a yes/no becomes a server approval the owner answers on any surface
+ * (approve, below); 'yes' only when he approved. A typed question has nobody to answer it on this Mac: no answer.
+ * deletion (E2): the ask's own structured tag, never its words; an untagged ask is sent as a deletion, so the server's
+ * Approve all never skips it. A deletion is dangerous too.
+ */
+export const askAsApproval = (approve, log = () => {}) => async (opts) => {
+  if (!opts?.choices) { log('relay_ask', { typed: true }); return null; }
+  const summary = String(opts.placeholder ?? opts.prompt ?? '').trim();
+  const deletion = opts.deletion !== false;
+  return (await approve({ summary, danger: deletion || DANGER.test(summary), deletion })) === 'approved' ? 'yes' : null;
+};
 import { SAFE, checkMcpCall } from './safety.mjs';
 
 const BACKOFF = [1000, 2000, 5000, 10_000, 30_000, 60_000];
@@ -194,16 +208,21 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
   const { emit, signal, onInput = () => {}, done } = h;
   const usage = {};
   let prompt = text, again = 0;
-  // carried: this run's prompt is the owner's additions (missed, or held at done), already counted seen: a run cut
-  // short (an error, max turns) leaves them unanswered too, and says so (R11i-6).
-  let carried = false, told = false;
-  const unsaid = () => { if (!told) emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' }); told = true; };
+  // carried: this run's prompt is the owner's additions (missed, or held at done), already counted seen. Each run whose
+  // own prompt didn't get its answer (an error, max turns, a stream that just ended) says so, once for that run's words;
+  // one that answered them never does (R11i-6, B4-4..B4-7). Words a run left (missed) are named by the run they're
+  // carried into, by TOO_MANY_ADDED, or by the error. Words named are never sent again (agent.forget): a run that left
+  // them with no reply at all would otherwise have them in the next run's first message.
+  let carried = false;
+  const unsaid = () => emit({ type: 'text', delta: '\n(I could not answer what you added in this turn. Say it again.)\n' });
   // R11-2: words the session took (so Hydra counts them seen) but ended before answering (max turns, an error).
   const left = () => (typeof agent.unanswered === 'function' ? agent.unanswered() : []);
   for (;;) {
     const stream = agent.prompt(prompt);
     onInput((t) => agent.addInput(`${INPUT_PREFIX}${t}`));
     let cut = false;
+    // Whether this run's own prompt got its answer: Claude Code says (answered()); another agent knows only max turns.
+    const answered = () => (typeof agent.answered === 'function' ? agent.answered() : !cut);
     try {
       for await (const e of agentEvents(stream)) {
         if (e.type === 'agent_done') for (const [k, v] of Object.entries(e.totalUsage ?? {})) if (Number.isFinite(v)) usage[k] = (usage[k] ?? 0) + v;
@@ -211,17 +230,18 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
         onEvent(e);
       }
     } catch (e) {
-      if (signal?.aborted || (!carried && !left().length)) throw e;
+      cut = true;
+      if (signal?.aborted || ((!carried || answered()) && !left().length)) throw e;
       throw Object.assign(new Error(`${String(e?.message ?? e).slice(0, 400)} What you added while I worked was not answered. Say it again.`), e?.code ? { code: e.code } : {});
     }
     if (signal?.aborted) throw new Error('Stopped.');
     onRound();
-    if (carried && cut) unsaid();
+    if (carried && !answered()) { unsaid(); agent.forget?.(); }
     // Taken but not answered (it hit max turns): answered in the same session before the turn ends, capped.
     const missed = left();
     if (missed.length) {
-      if (++again <= HOLD_MAX) { prompt = missed.join('\n\n'); carried = true; continue; }
-      unsaid();
+      // Carried as the next prompt's own words: their copies in the history go first, so they're there once.
+      if (++again <= HOLD_MAX) { agent.carryLeft?.(); prompt = missed.join('\n\n'); carried = true; continue; }
       emit(TOO_MANY_ADDED);
       return;
     }
@@ -390,8 +410,10 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       else timer ??= setTimeout(flush, flushMs);
     };
     // A Mac-side ask (a connector send, a Mac tool, a risky click) as a server approval: 'approved', 'declined' or
-    // 'expired'. Anything that goes wrong is not a yes.
-    const approve = async ({ summary, danger = true } = {}) => {
+    // 'expired'. Anything that goes wrong is not a yes. deletion (E2): the ask's structured tag, sent so the server's
+    // Approve all never skips a deletion; an ask that doesn't say is a deletion. approveAllDeletionTags: 1 declares
+    // that this build tags every ask (APPROVE_CAPS).
+    const approve = async ({ summary, danger = true, deletion = true } = {}) => {
       if (lost || closed || turnCtrl.signal.aborted) return 'expired';
       // Never cut (tenth review R10-1): a yes must cover only what was shown. A question longer than the server takes
       // isn't asked there at all; the owner is told to ask on the Mac, where it shows whole.
@@ -405,7 +427,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       // 429: not made yet, so asked again after its Retry-After. A 5xx may have made it: never asked twice.
       for (let i = 0; ; i++) {
         try {
-          r = await api.req('/api/agent/relay/approval', { method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), summary: s, danger: !!danger }, signal: turnCtrl.signal, timeout: 20_000 });
+          r = await api.req('/api/agent/relay/approval', { method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), summary: s, danger: !!danger, deletion: deletion !== false, ...APPROVE_CAPS }, signal: turnCtrl.signal, timeout: 20_000 });
         } catch { return 'expired'; }
         if (r.status !== 429 || i >= retry.length) break;
         await sleep(retryAfterMs(r, retry[i]), turnCtrl.signal).catch(() => {});

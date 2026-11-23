@@ -9,6 +9,11 @@
 //   and Hydra's voice plays in it (hydraout.swift), so barge-in is only one more consumer; the rest of the time it's
 //   the plain mic, so claps and the wake phrase aren't put through noise suppression;
 // - a mic plugged in or out, or the default changing, rebuilds it once, half a second after the last change.
+// Build 4 C7: echo cancellation failed to start on the owner's Mac (118 lines of -10875, kAUInitialize on the output
+// node, as the engine switched from the plain mic), so barge-in never ran. Now: it isn't tried when the output device
+// has no usable format (the other -10875 his log shows); a kAUInitialize failure waits a moment for the engine that
+// just let go and tries once more; a failure that stays waits 30 s, then 60 s, then gives up until the mic changes;
+// and each open logs one line, however many mics and tries it took.
 // The file-input harness (--bench) feeds recordings through deliver(), the same path the tap uses.
 import AVFoundation
 import CoreAudio
@@ -66,21 +71,37 @@ final class MicHub {
         if running, self.device == device, echoCancel == wantEcho { return true }
         if device != self.device { echoFails = 0; echoRetryAt = 0 }
         if engine != nil { close(why: "switching") }
-        var sawNoEcho = false
+        var sawNoEcho = false, settled = false, failures: [String] = []
         let opened = InputDevice.firstOpening(InputDevice.tries(picked: device, current: InputDevice.current(), builtIn: InputDevice.builtIn())) { dev -> (AVAudioEngine, Bool)? in
             if wantEcho, #available(macOS 14, *) {
-                switch start(dev, echo: true) {
-                case .ok(let e): return (e, true)
-                case .noEcho: sawNoEcho = true
-                case .failed: break // voice processing that won't start on this mic: the plain mic, and again later
+                // Voice processing that won't start on this mic: the plain mic, and again later.
+                tries: while true {
+                    switch start(dev, echo: true) {
+                    case .ok(let e): return (e, true)
+                    case .noEcho: sawNoEcho = true; break tries
+                    case .failed(let why, let initFailed):
+                        failures.append(why)
+                        // kAUInitialize right after another engine let go: give it a moment, then once more (once per open).
+                        guard initFailed, !settled else { break tries }
+                        settled = true
+                        Thread.sleep(forTimeInterval: Self.settle)
+                    }
                 }
             }
-            if case .ok(let e) = start(dev, echo: false) { return (e, false) }
+            switch start(dev, echo: false) {
+            case .ok(let e): return (e, false)
+            case .failed(let why, _): failures.append(why)
+            case .noEcho: break
+            }
             return nil
         }
-        guard let (eng, echo) = opened else { log("mic couldn't open\(device.map { " (device \($0))" } ?? "")"); return false }
+        guard let (eng, echo) = opened else { log("mic couldn't open\(device.map { " (device \($0))" } ?? ""): \(Self.summary(failures))"); return false }
         engine = eng; self.device = device; echoCancel = echo; opens += 1; openedAt = uptime()
-        if wantEcho && !echo { if sawNoEcho { onNoEchoCancel() } else { echoFailed(now: uptime()) } }
+        var note = ""
+        if wantEcho && !echo {
+            if sawNoEcho { onNoEchoCancel(); note = " (no echo cancellation on this mic)" }
+            else { echoFailed(now: uptime()); note = " (echo cancellation couldn't start: \(Self.summary(failures)); \(echoFails < Self.echoTries ? "next try in \(Int(echoRetryAt - uptime())) s" : "not tried again until the mic changes"))" }
+        }
         if echo { echoFails = 0 }
         configObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: eng, queue: .main) { [weak self] _ in
             // An engine reports a change of its own as it settles (voice processing's aggregate device, a switch to the
@@ -89,31 +110,50 @@ final class MicHub {
             log("mic: audio devices changed")
             self.changed()
         }
-        log("mic open\(echo ? " (echo cancellation)" : "")\(device.map { " on device \($0)" } ?? "")")
+        log("mic open\(echo ? " (echo cancellation)" : "")\(device.map { " on device \($0)" } ?? "")\(note)")
         return true
     }
 
-    private enum Start { case ok(AVAudioEngine), noEcho, failed }
+    /// How long a kAUInitialize failure waits before its one more try (the engine that just let go settling).
+    static let settle = 0.25
+    /// The tries an open made, as one short line: each distinct failure once, with how many times.
+    static func summary(_ failures: [String]) -> String {
+        var seen: [(String, Int)] = []
+        for f in failures { if let i = seen.firstIndex(where: { $0.0 == f }) { seen[i].1 += 1 } else { seen.append((f, 1)) } }
+        return seen.isEmpty ? "no reason given" : seen.map { $0.1 > 1 ? "\($0.0) x\($0.1)" : $0.0 }.joined(separator: "; ")
+    }
+    /// A CoreAudio error as a few words: its code and the call or condition that failed.
+    static func short(_ error: Error) -> (String, initFailed: Bool) {
+        let ns = error as NSError
+        let what = (ns.userInfo["failed call"] as? String) ?? (ns.userInfo["false condition"] as? String) ?? ""
+        let call = what.replacingOccurrences(of: "err = ", with: "").replacingOccurrences(of: "PerformCommand", with: "")
+        return ("\(ns.code)\(call.isEmpty ? "" : " \(call)")", ns.code == -10875 && what.contains("kAUInitialize"))
+    }
+
+    private enum Start { case ok(AVAudioEngine), noEcho, failed(String, initFailed: Bool) }
     private func start(_ dev: AudioDeviceID?, echo: Bool) -> Start {
         let eng = AVAudioEngine()
         let input = eng.inputNode
-        if let dev, !InputDevice.use(dev, on: input) { return .failed }
+        if let dev, !InputDevice.use(dev, on: input) { return .failed("device \(dev) wouldn't take", initFailed: false) }
         if echo, #available(macOS 14, *) {
+            // Voice processing works the output too: with no usable output format it can't start (-10875).
+            let hw = eng.outputNode.outputFormat(forBus: 0)
+            guard hw.sampleRate > 0, hw.channelCount > 0 else { return .failed("the output device has no usable format", initFailed: false) }
             do { try input.setVoiceProcessingEnabled(true) } catch { log("mic: no echo cancellation (\(error))"); return .noEcho }
             guard input.isVoiceProcessingEnabled else { return .noEcho }
             // Voice processing turns other sound down by default: that would duck Hydra's own voice.
             input.voiceProcessingOtherAudioDuckingConfiguration = Ducking.configuration
         }
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { return .failed }
+        guard format.sampleRate > 0, format.channelCount > 0 else { return .failed("the mic has no usable format", initFailed: false) }
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in self?.deliver(buffer) }
         if echo { out?.attach(eng) }
         do { eng.prepare(); try eng.start(); return .ok(eng) } catch {
             if echo { out?.detach() }
             input.removeTap(onBus: 0)
             if echo, #available(macOS 14, *) { try? input.setVoiceProcessingEnabled(false) }
-            log("mic couldn't start\(dev.map { " on device \($0)" } ?? "")\(echo ? " with echo cancellation" : ""): \(error)")
-            return .failed
+            let (why, initFailed) = Self.short(error)
+            return .failed("\(dev.map { "device \($0): " } ?? "")\(why)", initFailed: initFailed)
         }
     }
 
@@ -140,15 +180,17 @@ final class MicHub {
     /// Another mic picked, or the default input changed: rebuilt on it, and it may take voice processing.
     func newMic() { echoFails = 0; echoRetryAt = 0; changed() }
 
-    /// Voice processing that failed to start (kAUInitialize): tried again 30 s later, while it's still wanted, three
-    /// times at most on one mic; then barge-in is off until the mic changes. Before, every 30 s for ever, each time
-    /// closing the working mic.
+    /// Voice processing that failed to start (kAUInitialize, after its one settle-and-retry): tried again 30 s later,
+    /// then 60 s, while it's still wanted, three times at most on one mic; then barge-in is off until the mic changes.
+    /// Before, every 30 s for ever, each time closing the working mic.
     private(set) var echoFails = 0
     private var echoRetryAt = 0.0
-    func echoAllowed(now: Double) -> Bool { echoFails < 3 && now >= echoRetryAt }
+    static let echoTries = 3
+    static func echoBackoff(_ fails: Int) -> Double { 30 * pow(2, Double(max(0, fails - 1))) }
+    func echoAllowed(now: Double) -> Bool { echoFails < Self.echoTries && now >= echoRetryAt }
     func echoFailed(now: Double) {
-        echoFails += 1; echoRetryAt = now + 30
-        if echoFails == 3 { log("mic: echo cancellation failed 3 times on this mic: not tried again until it changes"); onNoEchoCancel() }
+        echoFails += 1; echoRetryAt = now + Self.echoBackoff(echoFails)
+        if echoFails == Self.echoTries { log("mic: echo cancellation failed \(Self.echoTries) times on this mic: not tried again until it changes"); onNoEchoCancel() }
     }
 
     private var retryAt = 0.0
@@ -224,6 +266,15 @@ enum MicTest {
         check("the engine reporting a change of its own doesn't", !hub.echoAllowed(now: 1000))
         hub.newMic()
         check("another mic tries again", hub.echoAllowed(now: 1000))
+        // Build 4 C7: the backoff, and one line per open however many tries it took.
+        check("the next try waits 30 s, then 60 s", MicHub.echoBackoff(1) == 30 && MicHub.echoBackoff(2) == 60)
+        let failed = NSError(domain: "com.apple.coreaudio.avfaudio", code: -10875, userInfo: ["failed call": "err = PerformCommand(*outputNode, kAUInitialize, NULL, 0)"])
+        let short = MicHub.short(failed)
+        check("the owner's -10875 reads as a kAUInitialize failure, tried once more after \(MicHub.settle) s (\(short.0))", short.initFailed && short.0 == "-10875 (*outputNode, kAUInitialize, NULL, 0)" && MicHub.settle > 0 && MicHub.settle <= 0.3)
+        let format = NSError(domain: "com.apple.coreaudio.avfaudio", code: -10875, userInfo: ["false condition": "IsFormatSampleRateAndChannelCountValid(outputHWFormat)"])
+        check("a bad output format isn't tried again at once", !MicHub.short(format).initFailed)
+        let line = MicHub.summary([short.0, short.0, short.0, short.0, "the output device has no usable format"])
+        check("two mics tried twice each: one line, each failure once with its count (\(line))", line == "-10875 (*outputNode, kAUInitialize, NULL, 0) x4; the output device has no usable format")
         return bad == 0 ? 0 : 1
     }
 }

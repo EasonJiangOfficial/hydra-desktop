@@ -6,6 +6,8 @@
 //   roamies-hands front                        the app, window title and (for a browser) address in front
 //   roamies-hands capture <out.jpg> front|app:<name>|window:<id>|screen [max] [thumb thumbMax]
 //   roamies-hands locate front|app:<name>|window:<id>|screen
+//   roamies-hands resolve app:<name>           its window on screen, or the minimised app it would bring back, doing neither
+//                                              (only the app named in ROAMIES_FORWARD is ever brought back for app:<name>)
 //   roamies-hands select <out.png>             drag to choose an area (Esc cancels)
 //   roamies-hands ui front|app:<name>|window:<id> [controls]
 //   roamies-hands locate-control <target> <id>
@@ -123,6 +125,19 @@ fn windows_main(cmd: &str, args: &[String]) -> ! {
                 }
             }
             out(o)
+        }
+        // Which window 'app:X' uses on screen, or the minimised app it would bring back, doing neither: the sidecar names
+        // that app when it asks, then passes it back in ROAMIES_FORWARD.
+        "resolve" => {
+            let Some(name) = arg(1).and_then(|t| t.strip_prefix("app:")) else { fail("usage: resolve app:<name>") };
+            let mine: Vec<logic::Win> = windows().into_iter().filter(|w| app_matches(&w.app, &w.exe, name)).collect();
+            if let Some(w) = logic::main_window(&mine) {
+                out(json!({ "ok": true, "window": win_info(w) }));
+            }
+            match win::minimised(name) {
+                Some((_, w)) => out(json!({ "ok": true, "running": w.app })),
+                None => out(json!({ "ok": true })),
+            }
         }
         "locate" => {
             let Some(t) = arg(1) else { fail("usage: locate <target>") };

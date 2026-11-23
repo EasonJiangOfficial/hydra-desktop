@@ -52,6 +52,11 @@ pub(crate) fn start_voice(app: &AppHandle) {
     if let Ok(dir) = app.path().resource_dir() {
         cmd.arg("--ort").arg(dir.join(if cfg!(windows) { "onnxruntime.dll" } else { "libonnxruntime.so" }));
     }
+    // Hydra's cues (voice/cue.swift): the overlay's rendered chimes, bundled as a resource (tauri.macos.conf.json).
+    #[cfg(target_os = "macos")]
+    if let Ok(dir) = app.path().resource_dir() {
+        cmd.arg("--sounds").arg(dir.join("sounds"));
+    }
     // Debug builds: ROAMIES_TEST_AUDIO=<wav> stands in for the microphone, to test talking with no mic (CI, Docker).
     #[cfg(debug_assertions)]
     if let Some(wav) = std::env::var_os("ROAMIES_TEST_AUDIO") {
@@ -254,12 +259,16 @@ pub(crate) fn set_esc(app: &AppHandle, label: &str, on: bool) {
 }
 
 /// Hydra's own voice through the voice helper (W5 contract 6): the sidecar's speech messages as the helper's commands.
-/// A chunk of 16-bit mono PCM (base64) plays; stop, pause and volume go along. Anything else is not for the helper.
+/// A chunk of 16-bit mono PCM (base64) plays; stop, pause and volume go along; a mark (an ask's question, after its
+/// last chunk) comes back as `played` once everything before it has played. Anything else is not for the helper.
 pub(crate) fn play_cmd(msg: &Value) -> Option<Value> {
     if msg.get("stop").and_then(Value::as_bool) == Some(true) { return Some(json!({ "cmd": "play_stop" })); }
     if let Some(on) = msg.get("paused").and_then(Value::as_bool) { return Some(json!({ "cmd": "play_pause", "on": on })); }
     if let Some(v) = msg.get("volume").and_then(Value::as_f64) { return Some(json!({ "cmd": "play_volume", "v": v.clamp(0.0, 1.0) })); }
     let id = msg.get("id").and_then(Value::as_str).filter(|i| (1..=64).contains(&i.len()))?;
+    if let Some(mark) = msg.get("mark").and_then(Value::as_str).filter(|m| (1..=64).contains(&m.len())) {
+        return Some(json!({ "cmd": "play_mark", "id": id, "mark": mark }));
+    }
     let pcm = msg.get("pcm").and_then(Value::as_str).filter(|p| !p.is_empty() && p.len() <= 16_000_000)?;
     let rate = msg.get("rate").and_then(Value::as_f64).filter(|r| (8000.0..=96000.0).contains(r)).unwrap_or(44100.0);
     Some(json!({ "cmd": "play", "id": id, "pcm": pcm, "rate": rate }))
@@ -311,10 +320,13 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         Some("state") => {
             to_overlays(app, &ui);
             // mode: what opened a take (hold, handsfree, wake): a phrase take while Hydra thinks adds to the turn.
-            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state"), "mode": msg.get("mode") }));
+            // ask: the take an ask opened (listen via ask), so only that one is closed when the ask ends.
+            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state"), "mode": msg.get("mode"), "ask": msg.get("ask") }));
         }
         // The orb's spectrum (W5 contract 5), straight to the Hydra window (at most 30 a second, from the helper).
         Some("bands") => { if let Some(p) = bands_push(&msg) { hydra::push(app, &p); } }
+        // An ask's question has played to its end (its mark): only then does its take open (principle 1).
+        Some("played") => to_sidecar(app, &json!({ "type": "voice_played", "id": msg.get("id").cloned().unwrap_or(Value::Null), "mark": msg.get("mark").cloned().unwrap_or(Value::Null) })),
         // The helper couldn't play Hydra's voice: the overlay plays it again.
         Some("play_failed") => to_sidecar(app, &json!({ "type": "voice_play_failed", "why": msg.get("why").cloned().unwrap_or(Value::Null) })),
         Some("level") => to_overlays(app, &ui),
@@ -378,6 +390,8 @@ mod tests {
         assert_eq!(play_cmd(&json!({ "paused": true })), Some(json!({ "cmd": "play_pause", "on": true })));
         assert_eq!(play_cmd(&json!({ "volume": 3.0 })), Some(json!({ "cmd": "play_volume", "v": 1.0 })));
         assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "end": true })), None, "the end needs nothing");
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "mark": "s1q1" })), Some(json!({ "cmd": "play_mark", "id": "s1", "mark": "s1q1" })), "an ask's mark");
+        assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "mark": "" })), None, "an empty mark is nothing");
         assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "feel": "happy", "at": 3 })), None);
         assert_eq!(play_cmd(&json!({ "kind": "speech", "id": "s1", "pcm": "AAAB", "rate": 1.0 })).unwrap()["rate"], json!(44100.0), "a rate out of range");
     }

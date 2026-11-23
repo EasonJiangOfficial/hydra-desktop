@@ -38,7 +38,7 @@
       this.show(k);
       const before = this.steps ?? [];
       this.steps = (e.steps ?? []).map((s, i) => ({ ...s, at: before[i]?.state === s.state ? before[i].at : now() }));
-      for (const [i, s] of this.steps.entries()) if (!fresh && before[i] && before[i].state !== s.state && (s.state === 'ok' || s.state === 'bad')) k.S(s.state === 'ok' ? 'tick' : 'error');
+      for (const [i, s] of this.steps.entries()) if (!fresh && before[i] && before[i].state !== s.state && (s.state === 'ok' || s.state === 'bad')) k.S('tick'); // silent: no error chime on a card step (E4)
       const head = String(e.head ?? 'your request').toLowerCase();
       this.head = head.charAt(0).toUpperCase() + head.slice(1);
       this.lay = null;

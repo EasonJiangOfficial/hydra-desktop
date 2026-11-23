@@ -1,7 +1,7 @@
 // Tenth review R10-13, R10-14, R10-15, R10-17: the voice side of a turn, tested by behavior (voiceturn.mjs,
 // agentsettings.mjs) with a fake clock, fake voice and fake agent. Run: npm test
 import assert from 'node:assert/strict';
-import { FILLER_MS, addOnTo, createSpokenTrack, startFiller } from '../voiceturn.mjs';
+import { FILLER_MS, addOnTo, createSpokenTrack, startProgress } from '../voiceturn.mjs';
 import { createSettingsWatch, hydraModelPick, wakePhraseFor } from '../agentsettings.mjs';
 import { INPUT_PREFIX } from '../relay.mjs';
 
@@ -31,23 +31,27 @@ import { INPUT_PREFIX } from '../relay.mjs';
 }
 
 // ---- The filler (R10-17): after 1.1 s with no answer, never muted, never after the answer started.
-{
+{ // The opener (build 4 E1: startProgress, which also says the progress lines; those are in build4e1.test.mjs).
+  let t = 0;
   const timers = [];
-  const setTimer = (f, ms) => { timers.push({ f, ms, on: true }); return timers.length - 1; };
-  const clearTimer = (i) => { timers[i].on = false; };
-  const fire = () => timers.forEach((x) => x.on && (x.on = false, x.f()));
+  const setTimer = (f, ms) => { const x = { f, ms, at: t + ms, on: true }; timers.push(x); return x; };
+  const clearTimer = (x) => { x.on = false; };
+  const fire = () => { const x = timers.filter((y) => y.on).sort((a, b) => a.at - b.at)[0]; if (x) { x.on = false; t = Math.max(t, x.at); x.f(); } };
   let beats = 0, live = true, muted = false;
-  const voice = { beat: () => { beats++; } };
-  startFiller({ voice, live: () => live, muted: () => muted, setTimer, clearTimer });
+  const voice = { beat: () => { beats++; }, progress: () => true };
+  const opts = () => ({ voice, live: () => live, muted: () => muted, setTimer, clearTimer, now: () => t });
+  let p = startProgress(opts());
   assert.equal(timers[0].ms, FILLER_MS); assert.equal(FILLER_MS, 1100);
   fire(); assert.equal(beats, 1, 'a filler when nothing started');
-  const cancel = startFiller({ voice, live: () => live, muted: () => muted, setTimer, clearTimer });
-  cancel(); fire(); assert.equal(beats, 1, 'the answer started: no filler');
-  muted = true; startFiller({ voice, live: () => live, muted: () => muted, setTimer, clearTimer }); fire();
+  p.stop();
+  p = startProgress(opts());
+  p.touch(); fire(); assert.equal(beats, 1, 'the answer started: no filler'); p.stop();
+  p = startProgress(opts()); p.stop(); fire(); assert.equal(beats, 1, 'stopped: no filler');
+  muted = true; p = startProgress(opts()); fire(); p.stop();
   assert.equal(beats, 1, 'never while muted');
-  muted = false; live = false; startFiller({ voice, live: () => live, muted: () => muted, setTimer, clearTimer }); fire();
+  muted = false; live = false; p = startProgress(opts()); fire();
   assert.equal(beats, 1, 'the turn is over: no filler');
-  assert.doesNotThrow(() => startFiller({ voice: null, live: () => true, muted: () => false })(), 'no voice: nothing');
+  assert.doesNotThrow(() => startProgress({ voice: null, live: () => true }).stop(), 'no voice: nothing');
 }
 
 // ---- Words added while thinking (R10-17): into the running session, else the next request; idle: a new request.

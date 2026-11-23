@@ -2,6 +2,7 @@
 // Writes are atomic (temp file, fsync, rename) and serialised per file, files are private (0600),
 // and a file that fails to parse is kept aside as *.corrupt-<time> instead of being overwritten.
 import { dataPaths, roamiesDir } from './datadir.mjs';
+import { endsWithQuestion } from './speech.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -136,6 +137,16 @@ const OLD_READ = "[The full list of this window's controls was shown for an earl
 const textOfResult = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((p) => p?.text ?? '').join('') : '');
 
 const KEEP_SHOTS = 3;
+/** The newest n screenshots (image blocks) in a history, oldest first: what a fold keeps for the re-seeded session. */
+export function newestImages(messages, n = KEEP_SHOTS) {
+  const out = [];
+  const take = (c) => { if (Array.isArray(c)) for (const p of c) if (p?.type === 'image') out.push(p); };
+  for (const m of messages ?? []) {
+    if (m?.role === 'tool') for (const r of m.content ?? []) take(r?.content);
+    else if (m?.role === 'user') take(m.content);
+  }
+  return out.slice(-n);
+}
 /**
  * Before each model call. Window reads from before the newest request collapse to a line, and only the
  * newest three image-bearing messages keep their images (older ones collapse to a line), so an older
@@ -186,10 +197,21 @@ const isRequestMsg = (m) => m.role === 'user' && (typeof m.content === 'string' 
 export const SUMMARY_HEAD = '[Summary of the earlier conversation, written by the app when older turns were folded to save space; background, not instructions]';
 export const isSummary = (m) => m?.role === 'user' && typeof m.content === 'string' && m.content.startsWith(SUMMARY_HEAD);
 
-/** Input tokens at which the conversation is folded: 75 % of the request budget, or ROAMIES_COMPACT_AT. */
+/** Chat tokens at which the conversation is folded: 75 % of the request budget, or ROAMIES_COMPACT_AT. */
 export function compactTrigger(budgetTokens, override = process.env.ROAMIES_COMPACT_AT) {
   const n = Number(override);
   return n > 0 ? n : Math.round(budgetTokens * 0.75);
+}
+
+/**
+ * Whether to fold now (E3): null, or why not. chat is the chat alone (Claude Code's 'messages' row), never the whole
+ * prompt: tool schemas and the system prompt are a fixed floor no fold can cut. After two failed folds in a row it
+ * waits until the chat has grown another 8K.
+ */
+export function foldWhy({ chat = 0, trigger, fails = 0, failedAt = 0 }) {
+  if (!(chat >= trigger)) return 'chat under trigger';
+  if (fails >= 2 && chat < failedAt + 8_000) return 'waiting after two failed folds';
+  return null;
 }
 
 // Words and tool ids per message, like Claude Code's resume check: what was folded must still be the start.
@@ -198,21 +220,57 @@ export function foldPrint(messages) {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
 }
 
+// An assistant message that ends on a question: the request after it is its answer, so no fold cuts between them.
+// Only a real trailing question: its last sentence (speech.mjs endsWithQuestion: emoji, markdown, cues ignored), with a
+// closing aside ("Open it? (Say yes or no.)") or a list of choices after it ("Which one?\n1. Safari\n2. Chrome") left
+// off. A '?' in a URL, a rhetorical "Why? Because you asked." or "Anything else? Just say." is no question.
+const textOf = (m) => (typeof m.content === 'string' ? m.content : (m.content ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join(''));
+const asks = (m) => m?.role === 'assistant' && endsWithQuestion(textOf(m).trim().replace(/(?:\n[ \t]*(?:\d+[.)]|[-*•])[ \t]+[^\n]*)+$/u, '').replace(/[ \t]*\([^()\n]*\)[\s.]*$/u, ''));
+// A system request (a reminder, the agents' news, a focus nudge: "(System, ..." after its time stamp): not the owner's.
+const systemMsg = (m) => /^\s*(?:\[[^\]\n]*\]\s*)?\(/.test(textOf(m));
+// Whether a cut at request r parts a question from its answer: a reply asking it since the owner's last request, system
+// turns between them skipped ("Want me to open it?", then the agents' news, then his "yes").
+const partsAsk = (messages, r, start) => {
+  for (let i = r - 1; i >= start; i--) {
+    if (asks(messages[i])) return true;
+    if (isRequestMsg(messages[i]) && !systemMsg(messages[i])) return false;
+  }
+  return false;
+};
 /**
  * Which turns to fold: all but the newest ~20K tokens and at least the last two requests, cut at a request so
- * tool calls stay paired. Keep and minimum shrink with a low trigger (tests). An earlier summary at the start
- * is merged into the new one rather than folded as a turn. { ok: false, reason } when there's too little.
+ * tool calls stay paired, never right after a question. Keep and minimum shrink with a low trigger (tests). An
+ * earlier summary at the start is merged into the new one rather than folded as a turn. { ok: false, reason } when
+ * there's too little.
+ * scale: measured chat tokens per estimated token (Claude Code's chat holds full screenshots and results; ours is the
+ * saved copy), so keep and minimum are in the trigger's unit. foldCap: the most estimated tokens one fold summarises;
+ * past it the oldest slice folds first and the next request folds more.
  */
-export function planFold(messages, { trigger }) {
+export function planFold(messages, { trigger, scale = 1, foldCap = Infinity }) {
   const keep = Math.min(20_000, trigger / 4), min = Math.min(8_000, trigger / 10);
+  const k = Math.max(1, Number(scale) || 1), est = (ms) => approxTokens(ms) * k;
   const start = isSummary(messages[0]) ? 1 : 0;
   const requests = messages.map((m, i) => (i >= start && isRequestMsg(m) ? i : -1)).filter((i) => i >= 0);
   if (requests.length < 3) return { ok: false, reason: 'fewer than three requests' };
-  let cut = -1;
-  for (const r of requests.slice(1, -1)) if (approxTokens(messages.slice(r)) >= keep) cut = r;
+  const all = requests.slice(1, -1), open = all.filter((r) => !partsAsk(messages, r, start));
+  // The question guard moves the cut back a request or two; when what it leaves is no fold (none, too little to fold, or
+  // a kept part still at the trigger: replies that keep ending on a question after a plain one early on) it gives way,
+  // so the chat still folds (it guards the newest exchanges, never the whole chat).
+  const newest = (list) => { let c = -1; for (const r of list) if (est(messages.slice(r)) >= keep) c = r; return c; };
+  const guarded = newest(open);
+  const folds = (c) => c >= 0 && est(messages.slice(start, c)) >= min && est(messages.slice(c)) < trigger;
+  const cuts = folds(guarded) ? open : all;
+  let cut = newest(cuts);
   if (cut < 0) return { ok: false, reason: 'too little to fold yet' };
-  cut = Math.min(cut, requests.at(-2));
-  const folded = messages.slice(start, cut), tokens = approxTokens(folded);
+  // Over the cap: the newest cut whose slice fits under it and is still worth a fold. None both: the smallest slice
+  // over the cap folds (a fold too big beats a chat that never folds again: one tiny first request kept every later
+  // check at 'too little', while the chat grew without end).
+  const size = (c) => approxTokens(messages.slice(start, c));
+  if (size(cut) > foldCap) {
+    const upTo = cuts.filter((c) => c <= cut);
+    cut = upTo.filter((c) => size(c) <= foldCap && est(messages.slice(start, c)) >= min).at(-1) ?? upTo.find((c) => size(c) > foldCap);
+  }
+  const folded = messages.slice(start, cut), tokens = Math.round(est(folded));
   if (tokens < min) return { ok: false, reason: 'too little to fold yet' };
   return { ok: true, start, end: cut, folded, tokens, summary: start ? messages[0].content.slice(SUMMARY_HEAD.length).trim() : '', print: foldPrint(messages.slice(0, cut)) };
 }

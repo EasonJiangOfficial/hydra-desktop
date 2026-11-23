@@ -1033,10 +1033,12 @@
   }
 
   // ---- an ask from the agent while the orb is in the Hydra window (the overlay that draws asks is hidden then) ----
-  // It slides down over the page: a question with its choices (the first one is yes), or a field with Send.
-  let askNow = null;
+  // It slides down over the page: a question with its choices (the first one is yes), or a field with Send. The panel
+  // closing (it lost focus) is never an answer: the ask is kept and shows again when the panel opens (C3).
+  let askNow = null, askHeld = null;
   function askSheet(m) {
     closeAsk(null, false);
+    askHeld = null;
     const question = m.prompt || m.placeholder || '';
     const answer = (text) => { const id = m.id; closeAsk(id, true); send({ type: 'answer', id, text }); };
     const choices = Array.isArray(m.choices) && m.choices.length ? m.choices.map(String) : null;
@@ -1048,7 +1050,7 @@
         ? el('div', { className: 'askrow' }, choices.map((c, i) => btn(c, () => answer(i === 0 ? 'yes' : null), { kind: i === 0 ? 'primary' : 'ghost', k: `ask-${i}` })))
         : el('div', { className: 'askrow' }, el('span', { className: 'px field' }, input), btn('Send', () => answer(input.value), { kind: 'primary', k: 'ask-send' }), btn('Cancel', () => answer(null), { k: 'ask-cancel' })));
     document.querySelector('.body').prepend(sheet);
-    askNow = { id: m.id, sheet };
+    askNow = { id: m.id, sheet, m };
     setTimeout(() => (input ?? sheet.querySelector('button'))?.focus(), 30);
   }
   function closeAsk(id, animate) {
@@ -1158,14 +1160,16 @@
     // The Roamie switches on with the panel, and waves if it's been a while.
     if (avatar) { avatar.kit.vanish(null, true); setTimeout(() => { avatar.appear(); if (Date.now() - seen.opened > 10 * 60e3) setTimeout(() => avatar.act('wave'), 500); seen.opened = Date.now(); }, REDUCED.matches ? 0 : 120); }
     body.classList.toggle('from-bottom', !!fromBottom);
-    if (REDUCED.matches) return render(null, false);
+    const held = askHeld;
+    if (REDUCED.matches) { render(null, false); if (held) askSheet(held); return; }
     void body.offsetWidth;
     body.classList.add('opening');
     render(null, true);
+    if (held) askSheet(held);
   };
   window.__panelShut = () => {
     disarm(); ui.key = null; unarmQuit(); meterWanted(false);
-    if (askNow) { const id = askNow.id; closeAsk(id, false); send({ type: 'answer', id, text: null }); }
+    if (askNow) { askHeld = askNow.m; closeAsk(askNow.id, false); }
     body.classList.remove('opening');
     if (REDUCED.matches) { body.classList.add('shut'); return; }
     body.classList.add('shutting');
@@ -1188,7 +1192,7 @@
     }
     else if (m.kind === 'note') note(m.text, m.bad, m.copy);
     else if (m.kind === 'ask') askSheet(m);
-    else if (m.kind === 'cancel_ask') closeAsk(m.id, true);
+    else if (m.kind === 'cancel_ask') { if (askHeld?.id === m.id) askHeld = null; closeAsk(m.id, true); }
     else if (m.kind === 'clap_level') clapLevel(m);
     else if (m.kind === 'copied' && m.which === 'problem') note(m.ok ? 'Copied the error details. Paste them into your report.' : "Couldn't copy the error details. Try Save diagnostics.", !m.ok);
     else if (m.kind === 'copied') {
