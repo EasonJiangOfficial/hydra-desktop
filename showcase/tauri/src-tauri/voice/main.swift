@@ -1276,6 +1276,9 @@ final class Voice {
     /// via: what opened it (the cue plays for an orb tap, not for auto-listen or the take after a wake).
     func listenNow(wait: Double? = nil, via: String = "listen", ask: Bool = false) {
         if phase == .wake { stopWake() }
+        // The owner is already talking over Hydra, or a take is open. Keep it. Do not drop it and ask for the wake phrase.
+        if phase == .barge { bargeTake(best); return }
+        if phase == .handsFree || phase == .holding || phase == .armed || phase == .finishing { return }
         endBarge("a take opened")
         guard phase == .idle else { return }
         arm(uptime())

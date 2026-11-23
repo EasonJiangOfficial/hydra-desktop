@@ -281,6 +281,28 @@ export function askForTake(asks, { text, takeAt }) {
   return null;
 }
 
+/** One short sentence for a tool or task that timed out or failed. A bare timeout is "That timed out.";
+ *  anything else is the error text already in hand, cut to its first sentence. */
+export function failLine(result) {
+  const raw = String(result ?? '').replace(/\s+/g, ' ').trim();
+  if (!raw) return 'That failed.';
+  if (/^(?:timed out|ETIMEDOUT|TimeoutError|The operation was aborted due to timeout)\.?$/i.test(raw)) return 'That timed out.';
+  let line = raw.split(/(?<=[.!?])\s/)[0].trim();
+  if (line.length > 160) line = `${line.slice(0, 157).trimEnd()}…`;
+  if (!/[.!?…]$/.test(line)) line += '.';
+  return line;
+}
+
+/** A failed or timed-out tool: stop the "still working" lines and say why. Progress stays stopped until
+ *  later work calls resume(). A success does nothing. */
+export function noteToolFailure({ isError = false, result = '', progress = null, say = null } = {}) {
+  if (!isError) return null;
+  progress?.pause?.();
+  const line = failLine(result);
+  say?.(line);
+  return line;
+}
+
 /**
  * Why a turn ended without an answer, in one short line (owner: every turn that ends without an answer says why), or ''
  * when it answered. spoken: say it too (a voice turn; never after Stop or the sleep word, which mean silence).

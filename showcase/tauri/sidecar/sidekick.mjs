@@ -49,8 +49,8 @@ import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
 import { postDrawnNotes } from './notesync.mjs';
-import { ASK_DEADLINE_MS, addOnTo, afterHeld, askForTake, createSpokenTrack, endNote, overReply, ownTurn, pcmSecs, pendingWanted, phaseOf, retryText, runStart, startProgress, tagRun, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
-import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
+import { ASK_DEADLINE_MS, addOnTo, afterHeld, askForTake, createSpokenTrack, endNote, noteToolFailure, overReply, ownTurn, pcmSecs, pendingWanted, phaseOf, retryText, runStart, startProgress, tagRun, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
+import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, keepListening, listenWait } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
 import { handoffNote } from './quote.mjs';
@@ -1006,7 +1006,7 @@ const livePrompt = (context = '') => {
   const open = commitmentsText(), done = doneTodayText(), working = agents.liveText(), scheduled = jobsText(fmtWhen), learned = skillIndex(), linked = mcp.liveText();
   const turn = `Live state (current as of this moment):
 ${frontNow ? `${frontNow}\n` : ''}${lookLine(session?.looks, config.look ?? 'hydra', nameOfLook, userName)}${inkLine()}${focusLine()}${crewLine()}${linked ? `- Connections (connection_tools shows a server's tools, use_connection calls one):\n${linked}\n` : ''}- Editing files, running commands and controlling other apps: ${config.allowActions ? 'ALLOWED' : `switched OFF (tell the user to turn on "Allow File Edits & Commands" on the General page in ${PANEL} if they want it)`}.
-${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${HOTKEYS_OK ? `${userName} holds ${talkWords()} to talk` : `${userName} presses the key they bound to ${BIND.talk} to start talking and again to send (a pause sends too)`}${config.autoListen ? (config.listenEvery ? `. Auto-listen is on for every reply: after each spoken reply the mic opens by itself for ${listenSecs()} seconds, so they can just keep talking` : '. Auto-listen is on: when your reply to a spoken question ends with a question, the mic opens by itself for their answer') : ''}${!WAKE_OK ? '. There is no wake word on this computer: to talk they use the talk keys' : ''}${phraseOn() ? `. Wake word is on: ${userName} can also say "${wakePhraseNow()}" to start talking hands-free, and what they say right after it is the request (a request that still starts with "${wakePhraseNow()}" is them waking you, not calling you by another name: never correct it)${config.wakeName ? ` (they chose "${config.wakeName}" as the wake word; your own name is unchanged)` : ''}` : ''}` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Listening page in ${PANEL}`})`}.` : ''}
+${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${HOTKEYS_OK ? `${userName} holds ${talkWords()} to talk` : `${userName} presses the key they bound to ${BIND.talk} to start talking and again to send (a pause sends too)`}${config.autoListen ? `. Auto-listen is on: after you finish a question or a statement, the mic stays open for ${listenSecs()} seconds so they can answer or add a thought without the wake phrase. If they talk over you, that keeps the take` : ''}${!WAKE_OK ? '. There is no wake word on this computer: to talk they use the talk keys' : ''}${phraseOn() ? `. Wake word is on: ${userName} can also say "${wakePhraseNow()}" to start talking hands-free, and what they say right after it is the request (a request that still starts with "${wakePhraseNow()}" is them waking you, not calling you by another name: never correct it)${config.wakeName ? ` (they chose "${config.wakeName}" as the wake word; your own name is unchanged)` : ''}` : ''}` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Listening page in ${PANEL}`})`}.` : ''}
 - Shortcuts: ${HOTKEYS_OK ? `${keys().write ? `type a question to you: a quick tap of ${writeWords()} (press both and let go), which opens a text field beside the cursor (Enter sends, Shift+Enter adds a line, Esc or another tap closes it)` : `the tap that opens a text field to type a question is turned off (the Ask button in ${PANEL} still opens it; the Shortcuts page there turns the tap back on)`}; show or hide you ${keyWords(keys().summon)}` : `on this Wayland desktop no app can have global shortcuts, so ${userName} binds keys to these commands in their desktop's keyboard settings: ${BIND.summon} (show or hide you), ${BIND.ask} (ask you), ${BIND.list} (the list), ${BIND.talk} (talk) and ${BIND.panel} (the panel)`}${SNAP_OK ? `; ask about an area ${keyWords(keys().snap)}` : ''}${CIRCLE_OK ? "; while holding the talk keys, moving the cursor round something circles it (no clicking; it snaps shut with a click when the circle closes, and loose lines don't count) and you'll see what they circled" : ''}${HOTKEYS_OK ? `; show the list ${keyWords(keys().list)}` : ''}.${HANDS_OK ? '' : ' Asking about an area, reading app windows, finding things on screen by their words and working other apps need the Hydra app, which isn\'t running here; draw there with x, y from a screenshot.'}`;
   const memory = `${open ? `Open commitments:\n${open}` : 'No open commitments.'}${done ? `\nDone today (ticked off on the list or by you; still shown struck through until midnight):\n${done}` : ''}
 ${facts.length ? `What you know about ${userName}${total > facts.length ? ` (${facts.length} most relevant of ${total})` : ''}:\n${facts.map((f) => `- ${f.id}: ${f.text}`).join('\n')}` : `You don't know anything lasting about ${userName} yet.`}${working ? `\n${working}` : ''}${scheduled ? `\nScheduled jobs (update_job changes them):\n${scheduled}` : ''}${learned ? `\nSkills you've learned (use_skill reads the steps):\n${learned}` : ''}`;
@@ -1629,7 +1629,7 @@ const frontWithin = (p) => new Promise((done) => {
   const t = setTimeout(() => done(''), 150);
   p.then((v) => { clearTimeout(t); done(v); }, () => { clearTimeout(t); done(''); });
 });
-// Auto-listen: the turn whose reply ended on a question, until the overlay says it's been typed out and said.
+// Auto-listen: the turn whose reply was a question or a statement, until the overlay says it's been typed out and said.
 let autoTurn = null;
 // Wake word: the voice helper doesn't listen for "Hey Roamies" while a reply runs, until the overlay says it's been
 // typed out and said (reply_said), so Roamies can't wake itself. Let go after a while in case that never comes.
@@ -1794,7 +1794,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       if (h) { reply.push(h); lastReply = h; fresh = false; }
     };
     const ctl = controller;
-    watch = stallWatch(STALL_MS, () => { stalled = true; logLine('stalled', { turn, ms: Date.now() - use.t }); ctl.abort(); });
+    watch = stallWatch(STALL_MS, () => { stalled = true; progress.pause(); logLine('stalled', { turn, ms: Date.now() - use.t }); ctl.abort(); });
     runFrom = agent.getMessages().length;
     const run = agent.prompt(content);
     runTag = tagRun(agent.getMessages()[runFrom]); // found by its tag after the run (runStart): a hard trim moves it
@@ -1857,6 +1857,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
         activity.end(e.toolCallId, e.isError); panel();
         logLine(e.isError ? 'tool_error' : 'tool_done', { turn, id: e.toolCallId, ms: e.durationMs, result: String(e.result ?? '').replace(/\s+/g, ' ').slice(0, e.isError ? 1000 : 400) });
         if (e.isError && toolNames.get(e.toolCallId) !== 'plan_steps') trail.error(typeof e.result === 'string' ? e.result : '');
+        if (e.isError) noteToolFailure({ isError: true, result: e.result, progress, say: (line) => voice?.say?.(line) });
         if (process.env.ROAMIES_USAGE) console.error(`[tool_end] ${e.isError ? 'ERROR' : 'ok'} ${Date.now() - (toolT.get(e.toolCallId) ?? Date.now())}ms ${String(typeof e.result === 'string' ? e.result : JSON.stringify(e.result ?? '')).replace(/\s+/g, ' ').slice(0, 160)}`);
         ui({ kind: 'agent', e: { type: 'tool_end', id: e.toolCallId, isError: e.isError } });
       }
@@ -1886,10 +1887,11 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     if (controller.signal.aborted) voice?.abort(); else { spoken?.flush(); voice?.end(); }
     trail.end();
     ink.endRequest();
-    // Asked by voice and answered with a question: the overlay opens the mic once the reply has been typed and said.
+    // Asked by voice and answered with a question or a statement: the overlay opens the mic once the reply has been typed and said.
+    // An interrupt keeps the take too. "After every reply" is not required.
     // A reminder nudge, with "Listen after reminders" on: the same hands-free listen, for "snooze 10 minutes".
-    // After every answer to something said, a follow-up window listens without the key phrase (W5 contract 4).
-    const listen = !stalled && !controller.signal.aborted && ((byVoice && autoListenOn() && listensAfter(lastReply, !!config.listenEvery)) || (listenAfter && snoozeListenOn())) ? { turn, speech: voice?.id ?? null } : null;
+    const follow = !stalled && !controller.signal.aborted && autoListenOn() && keepListening({ reply: byVoice || interruptedAfter ? lastReply : '', interrupt: !!interruptedAfter });
+    const listen = follow || (listenAfter && snoozeListenOn() && !stalled && !controller.signal.aborted) ? { turn, speech: voice?.id ?? null } : null;
     autoTurn = listen ? turn : null;
     rated = !stalled && !controller.signal.aborted && !!turnWords && learn.ok + learn.bad > 0;
     const rate = rated && learningOn();

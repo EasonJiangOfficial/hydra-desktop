@@ -260,8 +260,16 @@ export function endsWithQuestion(text) {
   return /[?？]$/.test(s);
 }
 
-// Auto-listen (#44): after a spoken reply that asks something, or after every one if they chose so. The mic then
-// waits one of these many seconds for words (8 unless picked).
+// Auto-listen: after a spoken question or a statement, the mic stays open. The old "After every reply"
+// switch is not required (a statement used to need it). The mic then waits one of these many seconds (8 unless picked).
 export const LISTEN_SECS = [3, 5, 8, 10, 15];
 export const listenWait = (secs) => (LISTEN_SECS.includes(secs) ? secs : 8);
-export const listensAfter = (reply, every) => !!every || endsWithQuestion(reply);
+export const listensAfter = (reply, _every) => String(reply ?? '').trim().length > 0;
+
+/** The mic stays open after a question or a statement, and an interrupt keeps the take. No wake phrase.
+ *  A stop or a stall does not open it. `every` is not an argument: the switch is not required. */
+export function keepListening({ reply = '', interrupt = false, aborted = false, stalled = false } = {}) {
+  if (aborted || stalled) return false;
+  if (interrupt) return true;
+  return listensAfter(reply);
+}
