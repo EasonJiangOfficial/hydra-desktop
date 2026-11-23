@@ -88,7 +88,8 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
     'the chime plays as the mute begins, in the same process (it lifts the mute for its length)');
   assert.match(cue, /static func audible\(via: String\) -> Bool \{ \["clap", "phrase", "keys", "orb"\]\.contains\(via\) \}/);
   assert.match(cue, /OutputMute\.lift\(for: p\.duration \+ 0\.05\)/);
-  assert.match(swift, /listenNow\(via: via\)/, 'a clap or barge take passes what started it');
+  assert.match(swift, /listenNow\(wait: wait, via: via\)/, 'a clap take passes what started it');
+  assert.match(swift, /showListening\("handsfree", uptime\(\), via: "barge"\)/, 'a talk-over take passes barge');
   assert.match(swift, /\["orb", "wake"\]\.contains\(\$0\) \? \$0 : nil \} \?\? "listen"/, "the sidecar's listen: orb, wake, else a silent auto-listen");
   assert.match(swift, /case "sound": [^\n]*Cue\.soundOn = on/, 'the sound switch gates the cues');
   assert.match(swift, /Cue\.volume = \{ voice\.out\.volume \}/, "and Hydra's volume");
