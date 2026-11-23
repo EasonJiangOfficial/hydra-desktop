@@ -48,7 +48,7 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { ASK_DEADLINE_MS, addOnTo, askForTake, createSpokenTrack, endNote, ownTurn, pcmSecs, pendingWanted, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
+import { ASK_DEADLINE_MS, addOnTo, afterHeld, askForTake, createSpokenTrack, endNote, overReply, ownTurn, pcmSecs, pendingWanted, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -2710,14 +2710,17 @@ function onVoice(m) {
   // a cancel. Hydra's voice holds while the owner talks and goes on after; a take that hears nothing leaves the turn as
   // it was. With nothing running, a take talks over the last reply: that stops its voice, and the next turn knows.
   if (m.type === 'voice_state' && m.state === 'listening' && whileBusy({ busy }) === 'add_on') { addOnTake = true; hush(true); logLine('add_on', { listening: true, mode: String(m.mode ?? '') }); }
-  else if (m.type === 'voice_state' && m.state === 'listening') { addOnTake = false; speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); } // talking over it stops it
+  // With nothing running, a take over the last reply still being said holds it (C7): the owner's words stop it, and a
+  // take that hears none (a noise opened it) lets the cut sentence go on, never silence.
+  else if (m.type === 'voice_state' && m.state === 'listening') { addOnTake = false; cutTake = overReply({ saying: saidPending, voiceOn: VOICE_ON() }) === 'hold'; if (cutTake) hush(true); else speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); }
   else if (m.type === 'voice_state' && m.state === 'processing') frontSoon = { at: Date.now(), p: whereNow() };
   else if (m.type === 'voice' && m.text?.trim()) {
+    if (cutTake && afterHeld({ words: m.text }) === 'stop') { cutTake = false; speech.stop(); } // the owner said something over the reply: it stays cut
     // Key release to the words arriving (mic tail and the recogniser finishing), to see what that step costs.
     if (typeof m.ms === 'number') logLine('voice_final', { ms: m.ms, via: String(m.via ?? ''), chars: m.text.trim().length });
     onSpoken(m.text.trim(), m.area);
   }
-  else if (m.type === 'voice_state' && m.state === 'idle') { addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (snap?.waitingVoice) snap.waitingVoice = false; } // the take ended (its words came first)
+  else if (m.type === 'voice_state' && m.state === 'idle') { addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (snap?.waitingVoice) snap.waitingVoice = false; if (cutTake) resumeCut(); } // the take ended (its words came first)
   else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; voiceConfigSent = ''; voiceConfig(); }
   // "Clap twice" (the panel): the owner's claps set the detector for his room; the live level while the page is open.
   else if (m.type === 'voice_clap_calibrated') {
@@ -2748,6 +2751,8 @@ function onVoice(m) {
       if (m.reason === 'failed' && m.message) problem('hearing', `no_input failed: ${m.message}`);
       say(micTrouble(process.platform, m.reason), 'concerned');
     }
+    // A take over the reply that heard nothing: the reply goes on (resumeCut), with no "I didn't hear anything" over it.
+    else if (m.code === 'nothing_heard' && Date.now() - resumedAt < 3000) logLine('nothing_heard', { resumed: true });
     // While a turn runs a take that heard nothing (a clap, fan noise) just ends: nothing over the live turn.
     else if (m.code === 'nothing_heard' && busy) logLine('nothing_heard', { busy: true });
     else if (m.code === 'nothing_heard') say(m.spoke ? "I heard you but couldn't make out the words. Try again a little closer to the mic?" : `I didn't hear anything. ${talkHowLong()}.`, 'concerned');
@@ -3141,6 +3146,13 @@ async function onSpoken(text, area) {
 // answers them right after this turn. False when nothing runs any more (they are a new request then).
 let addOnTake = false;
 let takeAt = null; // when the newest take started listening (its voice_state)
+// A take over the last reply while it was still being said (C7): held, not cut, until the take ends.
+let cutTake = false, resumedAt = 0;
+// The take heard no words: the reply it held goes on from where it was, and the next turn isn't told it was cut off.
+function resumeCut() {
+  cutTake = false; resumedAt = Date.now(); interruptedAfter = '';
+  logLine('resumed', { by: 'no words' });
+}
 // While the owner talks over a working turn its voice holds (paused, never cut), and goes on once the take ends; the
 // owner's own pause (voicePaused) is left as it is.
 let hushed = false, hushedAt = 0;

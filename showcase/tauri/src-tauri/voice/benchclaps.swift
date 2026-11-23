@@ -2,11 +2,14 @@
 // claps (several levels, gaps, rooms that ring, a dull laptop mic, over room noise and over someone talking: the
 // `say` sentences of the recorded set when its folder is given); negatives are everything that must not wake it. Each
 // set is 40 seeded trials at 48, 44.1 and 16 kHz. Prints each set's rate; the target is 9 in 10 or better on every
-// positive set and at most 1 false wake in 20 on the negatives.
+// positive set and at most 1 false wake in 20 on the negatives (build 4 C8 and C7: none at all on theirs). Then the
+// same for what stops Hydra while it speaks (runOver).
 import AVFoundation
 import Foundation
 
 enum ClapBench {
+    /// BENCH_SEED=<n>: other trials than the usual ones (the same sets, made afresh).
+    static let seed = ProcessInfo.processInfo.environment["BENCH_SEED"].flatMap { UInt64($0) }
     /// A detector for a rate, a sensitivity and maybe a calibration: samples in, true on a double clap.
     typealias Make = (_ rate: Double, _ sensitivity: Double, _ cal: ClapDetector.Calibration?) -> ([Float]) -> Bool
     struct Result { let set: String; let positive: Bool; let trials: Int; let hits: Int }
@@ -30,7 +33,7 @@ enum ClapBench {
         if let dir = setDir, let names = try? FileManager.default.contentsOfDirectory(atPath: dir) {
             for n in names.sorted() where n.hasPrefix("negative-") && n.hasSuffix(".wav") { if let r = read(URL(fileURLWithPath: dir).appendingPathComponent(n)) { talk.append(r) } }
         }
-        var rng = ClapTest.Rng(s: 2026)
+        var rng = ClapTest.Rng(s: seed ?? 2026)
         func u(_ a: Double, _ b: Double) -> Double { a + (b - a) * Double(abs(rng.next())) }
         func pick<T>(_ xs: [T]) -> T { xs[min(xs.count - 1, Int(Double(abs(rng.next())) * Double(xs.count)))] }
         func speech(_ b: inout [Float], from: Double, rate: Double, rms: Float) {
@@ -114,6 +117,103 @@ enum ClapBench {
         set("music with hi-hats", positive: false) { r in var b = room(8, r); ClapTest.hats(&b, from: 0.2, to: 7.8, rate: r, rng: &rng); return count(b, r) }
         set("knocks on a door", positive: false) { r in var b = room(4, r); let t = u(0.8, 1.5), g = u(0.2, 0.5); for k in 0 ..< 3 { ClapTest.knock(&b, at: t + Double(k) * g, rate: r, peak: Float(u(0.3, 0.9))) }; return count(b, r) }
         set("one clap while talking", positive: false) { r in var b = room(6, r); speech(&b, from: 0.2, rate: r, rms: Float(u(0.02, 0.05))); ClapTest.clap(&b, at: u(1.5, 3), rate: r, peak: Float(u(0.6, 1.5)), rng: &rng, reverb: reverb()); return count(b, r) }
+        // ---- build 4 C8: what woke Hydra with nobody clapping (the owner's keys, mouse, desk, door and fan), every one in
+        // pairs with a double clap's timing, in a quiet room to one with a fan running (-62 to -52 dBFS), at every
+        // sensitivity; and real double claps at a normal distance, which must still wake it. ----
+        func pairs(_ secs: Double, _ r: Double, _ one: (inout [Float], Double) -> Void) -> [Float] {
+            var b = room(secs, r, Float(u(0.0012, 0.004)))
+            var t = u(0.7, 1.2)
+            while t < secs - 1.2 { one(&b, t); one(&b, t + u(0.18, 0.75)); t += u(1.7, 2.6) }
+            return b
+        }
+        let noises: [(String, (Double) -> [Float])] = [
+            ("two keys at a time", { r in pairs(9, r) { ClapTest.key(&$0, at: $1, rate: r, peak: Float(u(0.01, 0.12)), rng: &rng) } }),
+            ("typing in bursts", { r in
+                var b = room(9, r, Float(u(0.0012, 0.004))), t = 0.5
+                while t < 8.5 { for _ in 0 ..< 2 + Int(u(0, 6)) { ClapTest.key(&b, at: t, rate: r, peak: Float(u(0.01, 0.1)), rng: &rng); t += u(0.09, 0.25) }; t += u(0.35, 1.5) }
+                return b }),
+            ("mouse clicks and double-clicks", { r in pairs(9, r) { ClapTest.mouse(&$0, at: $1, rate: r, peak: Float(u(0.01, 0.08)), rng: &rng) } }),
+            ("taps on the desk", { r in pairs(9, r) { ClapTest.tap(&$0, at: $1, rate: r, peak: Float(u(0.01, 0.2)), rng: &rng) } }),
+            ("thumps (a door, a fist on the desk)", { r in pairs(9, r) { ClapTest.thump(&$0, at: $1, rate: r, peak: Float(u(0.02, 0.6)), rng: &rng) } }),
+            ("a fan spinning up and down", { r in var b = room(9, r); ClapTest.fan(&b, from: 0.2, to: 8.8, rate: r, level: Float(u(0.002, 0.006)), rng: &rng); return b }),
+            ("keys over a fan", { r in var b = pairs(9, r) { ClapTest.key(&$0, at: $1, rate: r, peak: Float(u(0.01, 0.12)), rng: &rng) }; ClapTest.fan(&b, from: 0.2, to: 8.8, rate: r, level: Float(u(0.002, 0.006)), rng: &rng); return b }),
+        ]
+        let sens: [(String, Double, ClapDetector.Calibration?)] = [("Low", 0.2, nil), ("Medium", 0.5, nil), ("High", 0.8, nil), ("calibrated to faint claps, High", 0.8, .init(peakDb: -36, riseDb: 26))]
+        for (name, make) in noises { for (lv, k, cal) in sens { set("C8 \(name) | \(lv)", positive: false) { r in count(make(r), r, k, cal) } } }
+        for (lv, k) in [("Low", 0.2), ("Medium", 0.5), ("High", 0.8)] {
+            set("C8 real double clap, normal distance (-25 to -12 dB) | \(lv)", positive: true) { r in
+                var b = room(4, r, Float(u(0.0012, 0.004))); clapPair(&b, at: u(0.8, 1.5), gap: u(0.2, 0.75), rate: r, peak: Float(u(0.3, 1.0)), verb: reverb()); return pos(count(b, r, k))
+            }
+        }
+        return out
+    }
+
+    /// While Hydra speaks (build 4 C7): what stops it. `over` makes the interrupt logic for a rate, a sensitivity and
+    /// whether the mic has echo cancellation; fed the mic's samples, the time and what the recogniser has written so far
+    /// (a stub: the words a fixture says, at the moment they'd come; nothing for noise, or a filler), it is true once
+    /// Hydra is cut off. Hydra's voice as the mic hears it: after echo cancellation (about -45 dBFS), or from the speakers
+    /// with no echo reference (-32 to -24 dBFS), where only claps can stop it.
+    typealias Over = (_ rate: Double, _ sensitivity: Double, _ echo: Bool) -> (_ chunk: [Float], _ now: Double, _ heard: String) -> Bool
+    static func runOver(over: Over) -> [Result] {
+        var rng = ClapTest.Rng(s: seed.map { $0 &+ 5 } ?? 7007)
+        func u(_ a: Double, _ b: Double) -> Double { a + (b - a) * Double(abs(rng.next())) }
+        func playback(_ secs: Double, _ r: Double, echo: Bool) -> [Float] {
+            var b = ClapTest.room(secs, rate: r, rng: &rng, level: Float(u(0.0012, 0.003)))
+            ClapTest.speech(&b, from: 0, to: secs, rate: r, rng: &rng, level: echo ? 0.02 : Float(u(0.06, 0.15)))
+            return b
+        }
+        func stopped(_ b: [Float], _ r: Double, _ k: Double, _ echo: Bool, _ words: [(Double, String)]) -> Int {
+            let f = over(r, k, echo)
+            var i = 0
+            while i < b.count {
+                let j = min(b.count, i + 512), now = Double(j) / r
+                if f(Array(b[i ..< j]), now, words.last { $0.0 <= now }?.1 ?? "") { return 1 }
+                i = j
+            }
+            return 0
+        }
+        func pairs(_ b: inout [Float], _ r: Double, _ one: (inout [Float], Double) -> Void) {
+            var t = u(0.7, 1.2)
+            while t < Double(b.count) / r - 1.2 { one(&b, t); one(&b, t + u(0.18, 0.75)); t += u(1.7, 2.6) }
+        }
+        let trials = 40
+        var out: [Result] = []
+        // Each fixture: Hydra's voice plus the sound, and what the stubbed recogniser writes.
+        typealias Fixture = (Double, Bool) -> ([Float], [(Double, String)])
+        let negatives: [(String, Fixture)] = [
+            ("a fan spinning up and down (\"Hmm.\")", { r, e in var b = playback(8, r, echo: e); ClapTest.fan(&b, from: 0.2, to: 7.8, rate: r, level: Float(u(0.002, 0.006)), rng: &rng); return (b, [(1.0, "Hmm.")]) }),
+            ("two keys at a time", { r, e in var b = playback(8, r, echo: e); pairs(&b, r) { ClapTest.key(&$0, at: $1, rate: r, peak: Float(u(0.01, 0.12)), rng: &rng) }; return (b, []) }),
+            ("typing in bursts", { r, e in
+                var b = playback(8, r, echo: e), t = 0.5
+                while t < 7.5 { for _ in 0 ..< 2 + Int(u(0, 6)) { ClapTest.key(&b, at: t, rate: r, peak: Float(u(0.01, 0.1)), rng: &rng); t += u(0.09, 0.25) }; t += u(0.35, 1.5) }
+                return (b, []) }),
+            ("mouse clicks and double-clicks", { r, e in var b = playback(8, r, echo: e); pairs(&b, r) { ClapTest.mouse(&$0, at: $1, rate: r, peak: Float(u(0.01, 0.08)), rng: &rng) }; return (b, []) }),
+            ("taps on the desk (\"Uh.\")", { r, e in var b = playback(8, r, echo: e); pairs(&b, r) { ClapTest.tap(&$0, at: $1, rate: r, peak: Float(u(0.01, 0.2)), rng: &rng) }; return (b, [(1.5, "Uh.")]) }),
+            ("thumps (a door, a fist on the desk)", { r, e in var b = playback(8, r, echo: e); pairs(&b, r) { ClapTest.thump(&$0, at: $1, rate: r, peak: Float(u(0.02, 0.6)), rng: &rng) }; return (b, []) }),
+            ("a cough (\"Hm.\")", { r, e in var b = playback(6, r, echo: e); let t = u(2, 4); ClapTest.speech(&b, from: t, to: t + 0.3, rate: r, rng: &rng, level: 0.3); return (b, [(t + 0.35, "Hm.")]) }),
+        ]
+        let positives: [(String, Fixture)] = [
+            ("the owner says \"wait\"", { r, e in var b = playback(6, r, echo: e); let t = u(2, 4); ClapTest.speech(&b, from: t, to: t + 0.45, rate: r, rng: &rng, level: Float(u(0.2, 0.4))); return (b, [(t + 0.4, "Wait.")]) }),
+            ("the owner says \"stop\"", { r, e in var b = playback(6, r, echo: e); let t = u(2, 4); ClapTest.speech(&b, from: t, to: t + 0.45, rate: r, rng: &rng, level: Float(u(0.2, 0.4))); return (b, [(t + 0.4, "Stop.")]) }),
+            ("the owner says \"hold on a second\"", { r, e in var b = playback(6, r, echo: e); let t = u(2, 3.5); ClapTest.speech(&b, from: t, to: t + 1.1, rate: r, rng: &rng, level: Float(u(0.2, 0.4))); return (b, [(t + 0.4, "Hold"), (t + 0.7, "Hold on"), (t + 1.1, "Hold on a second")]) }),
+            ("a clean double clap", { r, e in var b = playback(5, r, echo: e); let t = u(1.5, 3); ClapTest.clap(&b, at: t, rate: r, peak: Float(u(0.7, 1.2)), rng: &rng); ClapTest.clap(&b, at: t + u(0.25, 0.6), rate: r, peak: Float(u(0.7, 1.2)), rng: &rng); return (b, []) }),
+        ]
+        for (echo, how) in [(true, "echo cancelled"), (false, "no echo reference")] {
+            for (k, lv) in [(0.2, "Low"), (0.5, "Medium"), (0.8, "High")] {
+                for (name, make) in negatives {
+                    var hits = 0
+                    for t in 0 ..< trials { let r = [48000.0, 44100, 16000][t % 3]; let (b, w) = make(r, echo); hits += stopped(b, r, k, echo, w) }
+                    out.append(Result(set: "C7 \(name) | \(how), \(lv)", positive: false, trials: trials, hits: hits))
+                }
+                for (name, make) in positives {
+                    // With no echo reference talking can't stop Hydra (its own voice would): only a clap can, there.
+                    let talk = !name.contains("clap")
+                    var hits = 0
+                    for t in 0 ..< trials { let r = [48000.0, 44100, 16000][t % 3]; let (b, w) = make(r, echo); hits += stopped(b, r, k, echo, w) }
+                    out.append(Result(set: "C7 \(name)\(talk && !echo ? " (talk can't stop it here)" : "") | \(how), \(lv)", positive: echo || !talk, trials: trials, hits: hits))
+                }
+            }
+        }
         return out
     }
 
@@ -122,10 +222,104 @@ enum ClapBench {
         var ok = true
         print("\(label)")
         for r in rs {
-            let good = r.positive ? Double(r.hits) / Double(r.trials) >= 0.9 : Double(r.hits) / Double(r.trials) <= 0.05
+            // Build 4's sets (C8, C7) allow no false wake and no false stop at all.
+            let good = r.positive ? Double(r.hits) / Double(r.trials) >= 0.9 : Double(r.hits) / Double(r.trials) <= (r.set.hasPrefix("C8 ") || r.set.hasPrefix("C7 ") ? 0 : 0.05)
             if !good { ok = false }
-            print("  \(good ? "ok  " : "MISS") \(r.set.padding(toLength: 54, withPad: " ", startingAt: 0)) \(r.positive ? "woke       " : "false wakes") \(r.hits)/\(r.trials)")
+            print("  \(good ? "ok  " : "MISS") \(r.set.padding(toLength: 92, withPad: " ", startingAt: 0)) \(r.positive ? "woke       " : "false wakes") \(r.hits)/\(r.trials)")
         }
         return ok ? 0 : 1
+    }
+}
+
+// ---------- build 4 C8 / C7: the sounds that woke Hydra or cut it off with nobody clapping (made up, seeded) ----------
+// Each is made to measure as the owner's own false candidates did on his Mac (voice log, 2026-11-22: -36 to -48 dBFS,
+// rises of 9 to 25 dB, 900 to 3300 Hz, down 6 to 20 dB in 100 ms), and to come in pairs 0.15 to 0.8 s apart with quiet
+// around them, as a double clap does.
+extension ClapTest {
+    /// A one-pole filter's coefficient for a corner frequency.
+    static func pole(_ hz: Double, _ rate: Double) -> Float { Float(1 - exp(-2 * .pi * min(hz, rate * 0.45) / rate)) }
+
+    /// A key on a laptop keyboard: the key bottoming out (a click of 0.5 to 2.5 kHz, 3 ms, and a low knock of 180 to
+    /// 450 Hz, 15 ms) and the softer click of letting it go 60 to 160 ms later. Duller than a clap, as the owner's keys
+    /// measured (900 to 3300 Hz).
+    static func key(_ buf: inout [Float], at: Double, rate: Double, peak: Float, rng: inout Rng) {
+        let start = Int(at * rate), n = Int(0.28 * rate)
+        let body = 180 + 270 * Double(abs(rng.next())), up = 0.06 + 0.10 * Double(abs(rng.next()))
+        let upGain = 0.25 + 0.45 * abs(rng.next()), bodyGain = 0.6 + 1.2 * abs(rng.next())
+        let lo = pole(2500, rate), hi = pole(500, rate)
+        var l1: Float = 0, l2: Float = 0, h: Float = 0
+        func tick(_ t: Double, _ at: Double) -> Float { t >= at ? Float(min(1, (t - at) / 0.001) * exp(-(t - at) / 0.003)) : 0 }
+        for i in 0 ..< n where start + i < buf.count {
+            let t = Double(i) / rate
+            l1 += lo * (rng.next() - l1); l2 += lo * (l1 - l2); h += hi * (l2 - h)
+            let click = tick(t, 0) + upGain * tick(t, up)
+            let thock = bodyGain * Float(min(1, t / 0.001) * exp(-t / 0.015) * sin(2 * .pi * body * t))
+            buf[start + i] += peak * (click * (l2 - h) * 4 + thock * 0.5)
+        }
+    }
+
+    /// A mouse or trackpad click: a 1 ms tick (2 to 6 kHz) and its release 50 to 110 ms later.
+    static func mouse(_ buf: inout [Float], at: Double, rate: Double, peak: Float, rng: inout Rng) {
+        let start = Int(at * rate), up = 0.05 + 0.06 * Double(abs(rng.next())), upGain = 0.5 + 0.4 * abs(rng.next())
+        let lo = pole(6000, rate), hi = pole(2000, rate), ring = 2500 + 2500 * Double(abs(rng.next()))
+        var l: Float = 0, h: Float = 0
+        for i in 0 ..< Int(0.15 * rate) where start + i < buf.count {
+            let t = Double(i) / rate
+            l += lo * (rng.next() - l); h += hi * (l - h)
+            var env = Float(exp(-t / 0.001)), r = Float(exp(-t / 0.004) * sin(2 * .pi * ring * t))
+            if t >= up { env += upGain * Float(exp(-(t - up) / 0.001)); r += upGain * Float(exp(-(t - up) / 0.004) * sin(2 * .pi * ring * (t - up))) }
+            buf[start + i] += peak * (env * (l - h) * 3 + 0.3 * r)
+        }
+    }
+
+    /// A finger or a knuckle on the desk the laptop sits on: a dull impact (a few ms, under 2.5 kHz: the desk carries
+    /// it, not the air) and the desk's ring (400 to 1200 Hz, 20 to 40 ms).
+    static func tap(_ buf: inout [Float], at: Double, rate: Double, peak: Float, rng: inout Rng) {
+        let start = Int(at * rate), f = 400 + 800 * Double(abs(rng.next())), tau = 0.02 + 0.02 * Double(abs(rng.next()))
+        let lo = pole(2500, rate)
+        var l1: Float = 0, l: Float = 0
+        for i in 0 ..< Int(0.2 * rate) where start + i < buf.count {
+            let t = Double(i) / rate
+            l1 += lo * (rng.next() - l1); l += lo * (l1 - l)
+            let hit = Float(exp(-t / 0.003)) * l * 3, ring = Float(min(1, t / 0.001) * exp(-t / tau) * sin(2 * .pi * f * t))
+            buf[start + i] += peak * (hit + 0.6 * ring)
+        }
+    }
+
+    /// A door shutting or a fist on the desk: a low thump (50 to 140 Hz, 60 to 120 ms) with a little click on top.
+    static func thump(_ buf: inout [Float], at: Double, rate: Double, peak: Float, rng: inout Rng) {
+        let start = Int(at * rate), f = 50 + 90 * Double(abs(rng.next())), tau = 0.06 + 0.06 * Double(abs(rng.next()))
+        let lo = pole(3000, rate), click = 0.05 + 0.25 * abs(rng.next())
+        var l: Float = 0
+        for i in 0 ..< Int(0.4 * rate) where start + i < buf.count {
+            let t = Double(i) / rate
+            l += lo * (rng.next() - l)
+            let body = Float(min(1, t / 0.003) * exp(-t / tau) * sin(2 * .pi * f * t)), top = click * Float(exp(-t / 0.002)) * l * 3
+            buf[start + i] += peak * (body + top)
+        }
+    }
+
+    /// A laptop fan: a steady hiss (noise under 3 kHz) at `level`, and every 1 to 3 s a swell (spinning up 6 to 18 dB
+    /// over 0.1 to 1 s and back) or a gust (up 10 to 20 dB in 30 to 80 ms, down over 0.3 s).
+    static func fan(_ buf: inout [Float], from: Double, to: Double, rate: Double, level: Float, rng: inout Rng) {
+        var events: [(at: Double, up: Double, down: Double, gain: Double)] = []
+        var t = from + 0.5 + 1.5 * Double(abs(rng.next()))
+        while t < to - 0.5 {
+            let gust = rng.next() > 0.3
+            events.append(gust ? (t, 0.03 + 0.05 * Double(abs(rng.next())), 0.3, 10 + 10 * Double(abs(rng.next())))
+                               : (t, 0.1 + 0.9 * Double(abs(rng.next())), 0.6, 6 + 12 * Double(abs(rng.next()))))
+            t += 1 + 2 * Double(abs(rng.next()))
+        }
+        let lo = pole(3000, rate)
+        var l: Float = 0
+        for i in Int(from * rate) ..< min(buf.count, Int(to * rate)) {
+            let x = Double(i) / rate
+            var db = 0.0
+            for e in events where x >= e.at && x < e.at + e.up + e.down {
+                db = max(db, x < e.at + e.up ? e.gain * (x - e.at) / e.up : e.gain * (1 - (x - e.at - e.up) / e.down))
+            }
+            l += lo * (rng.next() - l)
+            buf[i] += level * 3 * l * Float(pow(10, db / 20))
+        }
     }
 }

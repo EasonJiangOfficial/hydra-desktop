@@ -13,6 +13,13 @@
 // after the second (typing and music make many). Sounds that aren't transients (talk) don't break it up.
 // Low, Medium and High (the panel's sensitivity, 0.2 / 0.5 / 0.8) set `level` and `rise`; the panel's "Clap twice"
 // measures the owner's own claps in his room and sets them from those instead (calibration).
+// Build 4 C8 (owner: "hydra keeps false triggering when I dont say anything"; at High his keys, taps and thumps made
+// clap candidates at -36 to -48 dB with rises of 9 to 25 dB, 900 to 3300 Hz, down 6 to 20 dB): a hard floor no slider,
+// calibration or "Clap twice" goes under. Never quieter than -46 dBFS, and the quieter a sound is, the sharper its rise,
+// the clearer its fall and the brighter it must be (shapeMiss). His real claps (-10 to -37 dB, rises of 25 dB or more,
+// 2300 Hz and up, down 19 dB or more) clear it at once. Each accepted candidate logs what it cleared.
+// While Hydra speaks (C7) a clap must also stand 8 dB over the loudest sound of the second before it (Hydra's voice as
+// the mic hears it), so its own syllables, a fan or a key under it never stop it.
 import AVFoundation
 import Foundation
 
@@ -26,6 +33,8 @@ final class ClapDetector {
     var calibrating = false
     /// Hydra's voice plays with no echo reference (C6): level and rise never go below the calibrated or Medium ones.
     var guarded = false
+    /// Hydra is speaking (C7): each clap must stand overVoiceDb over the loudest sound of the second before it.
+    var speaking = false
     let rate: Double
     private let hop: Int
     private var frame: [Float] = []
@@ -42,17 +51,57 @@ final class ClapDetector {
     private var meterPeak = -120.0
     private var lastLine = -10.0, linesThisSecond = 0
 
-    // An onset waiting to show it dies away like a clap.
-    // inner: another sharp onset came inside its window (keys typed close together).
-    private struct Pending { var t: Double; var peak: Double; var rise: Double; var hz: Double; var frames: Int; var tail: Double; var inner = false }
+    // An onset waiting to show it dies away like a clap. rise: over the 30 ms before it (base), at its first frame or the
+    // next (a clap that starts late in a frame peaks in the next); bed: the loudest of the second before it (Hydra's
+    // voice while it speaks); inner: another sharp onset came inside its window (keys typed close together); bump: its
+    // tail grew again (a key let go, a word) instead of dying away as a room rings; last: the frame before, in dB.
+    private struct Pending {
+        var t: Double; var peak: Double; var rise: Double; var base: Double; var bed: Double; var hz: Double; var frames: Int; var tail: Double
+        var inner = false, bump = false, last: Double
+        // Its first 30 ms as one block (energy and first-difference energy): its brightness, not one frame's (a frame
+        // that catches only the first millisecond of a tap reads as bright as a clap).
+        var e: Double, d: Double
+        init(t: Double, db: Double, base: Double, bed: Double, hz: Double, e: Double, d: Double) {
+            self.t = t; peak = db; rise = db - base; self.base = base; self.bed = bed; self.hz = hz; frames = 0; tail = -120; last = db; self.e = e; self.d = d
+        }
+    }
     private var pending: Pending?
     private var lastTransient = -10.0
     private enum State { case idle, one(Double, Double), two(Double, Double) }
     private var state = State.idle
     private var coolUntil = 0.0
+    private var firstLine = "" // the first clap of a pair, for the double clap's line
+    // The last second's frames (dB), a clap and its ring-out left out: the loudest is what a clap must stand over while
+    // Hydra speaks (its syllables stay in, whatever onsets they made).
+    private var lastSecond = [Double](repeating: -120, count: 100), lastAt = 0, bedMuteUntil = 0.0
 
     static let minGap = 0.15, maxGap = 0.8, quietBefore = 0.6, quietAfter = 0.45, flam = 0.15
     static let decayDb = 6.0, brightHz = 900.0, jumpDb = 9.0
+    /// C8: nothing quieter than this is a clap, whatever the slider, the calibration or "Clap twice" says.
+    static let floorDb = -46.0
+    /// C7: while Hydra speaks, a clap stands this far over the loudest sound of the second before it.
+    static let overVoiceDb = 8.0
+
+    /// C8: what a clap must clear at its peak (dBFS): its rise over the 30 ms before it, its brightness, and its fall in
+    /// the 60 to 100 ms after it. 9 dB / 2000 Hz / 6 dB at -22 dBFS or louder (a clap over talk, a room that rings), up to
+    /// 22 dB / 3000 Hz / 13 dB at -36 dBFS or quieter, where the owner's keys, mouse, taps and thumps were (rises of 9 to
+    /// 25 dB, 900 to 3300 Hz, down 6 to 20 dB) and his claps weren't (2300 Hz and up, rises of 26 dB or more). A tail that
+    /// dies away smoothly (a room ringing, not a key let go or a word) needs only 6 dB down.
+    struct Need: Equatable { let jump: Double, hz: Double, decay: Double }
+    static let clapHz = 2000.0
+    static func need(peak: Double) -> Need {
+        let q = min(1, max(0, (-22 - peak) / 14))
+        return Need(jump: jumpDb + 13 * q, hz: clapHz + 1000 * q, decay: decayDb + 7 * q)
+    }
+    /// nil when a sound has a clap's shape; otherwise why not (the hard floor, the same at every sensitivity).
+    static func shapeMiss(peak: Double, jump: Double, hz: Double, decay: Double, smooth: Bool) -> String? {
+        let n = need(peak: peak)
+        if peak < floorDb { return String(format: "under the %.0f dB floor", floorDb) }
+        if jump < n.jump { return String(format: "rise needs %.1f dB at this level (a key, a tap, a fan)", n.jump) }
+        if hz < n.hz { return String(format: "needs %.0f Hz at this level (dull: a knock, a thump, a desk)", n.hz) }
+        if decay < (smooth ? decayDb : n.decay) { return String(format: "needs down %.1f dB (kept sounding: a word, a key let go, a door)", smooth ? decayDb : n.decay) }
+        return nil
+    }
     /// "Clap twice" never calibrates to a pair quieter than this (a keystroke, a cup set down): it asks again (R11-6).
     static let minCalPeakDb = -45.0
 
@@ -73,9 +122,9 @@ final class ClapDetector {
         frame.reserveCapacity(hop)
     }
 
-    /// The quietest clap peak that counts, in dBFS: -27 / -38 / -49 at Low / Medium / High; from the owner's own claps
-    /// when calibrated (12 dB under them at Medium, so a softer clap still counts).
-    var levelDb: Double { guarded ? max(level(sensitivity), level(0.5)) : level(sensitivity) }
+    /// The quietest clap peak that counts, in dBFS: -27 / -38 / -46 at Low / Medium / High; from the owner's own claps
+    /// when calibrated (12 dB under them at Medium, so a softer clap still counts). Never under floorDb (C8).
+    var levelDb: Double { max(Self.floorDb, guarded ? max(level(sensitivity), level(0.5)) : level(sensitivity)) }
     /// How far a clap's onset must rise over the room and the moment before it: 18 / 15 / 12 dB.
     var riseDb: Double { guarded ? max(rise(sensitivity), rise(0.5)) : rise(sensitivity) }
     private func level(_ s: Double) -> Double {
@@ -102,12 +151,21 @@ final class ClapDetector {
 
     func feed(_ samples: [Float]) -> Bool { samples.withUnsafeBufferPointer { feed($0.baseAddress!, count: $0.count) } }
 
-    private func say(_ s: @autoclosure () -> String) {
+    /// A candidate's line: at most 4 a second, but an accepted one (`always`) is never dropped.
+    private func say(_ s: @autoclosure () -> String, always: Bool = false) {
         guard let out = onCandidate else { return }
         if now - lastLine >= 1 { lastLine = now; linesThisSecond = 0 }
         linesThisSecond += 1
-        if linesThisSecond <= 4 { out(s()) }
+        if linesThisSecond <= 4 || always { out(s()) }
     }
+    /// The loudest frame of the last second, a clap and its ring-out left out.
+    var bedDb: Double { lastSecond.max() ?? -120 }
+    /// A clap taken as one is not Hydra's voice: its frames so far leave the last second, and its ring-out stays out.
+    private func dropFromBed(_ p: Pending) {
+        for k in 1 ... min(lastSecond.count, p.frames) { lastSecond[(lastAt - k + lastSecond.count) % lastSecond.count] = -120 }
+        bedMuteUntil = p.t + 0.3
+    }
+    private var calLevel: Double { max(Self.floorDb, floorDb + 12) }
 
     private func step() -> Bool {
         now += Double(hop) / rate
@@ -127,26 +185,39 @@ final class ClapDetector {
         meterPeak = max(meterPeak, db)
         // The 30 ms before this frame, as one level (their mean power).
         let before = 10 * log10(recent.map { pow(10, $0 / 10) }.reduce(0, +) / Double(recent.count) + 1e-12)
-        defer { recent.removeFirst(); recent.append(db) }
+        // A clap's rise is from where the room was: the frame just before may already hold its first millisecond.
+        let roomBefore = min(before, 10 * log10(recent.dropLast().map { pow(10, $0 / 10) }.reduce(0, +) / Double(recent.count - 1) + 1e-12))
+        let bed = bedDb
+        defer {
+            recent.removeFirst(); recent.append(db)
+            lastSecond[lastAt] = now < bedMuteUntil ? -120 : db; lastAt = (lastAt + 1) % lastSecond.count
+        }
         if now <= Double(hop) / rate * 1.5 { floorDb = db } // the first frame sets the room's level
         if Self.debug, db - floorDb > 12 { print(String(format: "  t=%.3f db=%.1f floor=%.1f before=%.1f hz=%.0f", now, db, floorDb, before, hz)) }
 
         // Over the room by `rise`, and a sharp jump over the moment before (9 dB: over someone talking that's all a
         // clap can have; the word around it fails the decay instead).
         let rise = db - floorDb, jump = db - before
-        let level = calibrating ? floorDb + 12 : levelDb
+        let level = calibrating ? calLevel : levelDb
         let onset = rise >= (calibrating ? 10 : riseDb) && jump >= Self.jumpDb && db >= level
         if var p = pending {
             p.frames += 1
             // A much louder onset while a softer one is still being judged (a clap on top of a word): judge the new one.
             if p.frames > 2, onset, db > p.peak + 6 {
                 say(String(format: "clap candidate %.1f dB: kept sounding (louder sound right after it)", p.peak))
-                pending = Pending(t: now, peak: db, rise: jump, hz: hz, frames: 0, tail: -120)
+                pending = Pending(t: now, db: db, base: roomBefore, bed: bed, hz: hz, e: Double(e), d: Double(d))
                 holdFloorUntil = now + 0.3
                 return settle()
             }
             if p.frames > 3, jump >= riseDb, db >= level - 6, hz >= Self.brightHz { p.inner = true }
-            if p.frames <= 2, db > p.peak { p.peak = db; p.hz = max(p.hz, hz) }
+            if p.frames <= 2 {
+                if db > p.peak { p.peak = db }
+                p.e += Double(e); p.d += Double(d)
+                p.hz = rate / Double.pi * asin(min(1, sqrt(p.d / max(p.e, 1e-12)) / 2))
+            }
+            if p.frames == 1 { p.rise = max(p.rise, db - p.base) }
+            if p.frames >= 3, db > p.last + 3, db > floorDb + 6 { p.bump = true }
+            p.last = db
             if p.frames >= 6 && p.frames <= 10 { p.tail = max(p.tail, db) }
             pending = p
             if p.frames == 10 {
@@ -157,7 +228,7 @@ final class ClapDetector {
         }
 
         if onset, now >= coolUntil || calibrating {
-            pending = Pending(t: now, peak: db, rise: jump, hz: hz, frames: 0, tail: -120)
+            pending = Pending(t: now, db: db, base: roomBefore, bed: bed, hz: hz, e: Double(e), d: Double(d))
             holdFloorUntil = now + 0.3
         } else if rise >= riseDb - 6, jump >= Self.jumpDb - 3, db >= level - 6, now > holdFloorUntil {
             say(String(format: "clap candidate %.1f dB (needs %.1f), %.1f dB over the room (needs %.1f), jump %.1f dB: %@", db, level, rise, riseDb, jump, db < level ? "too quiet" : rise < riseDb ? "too close to the room's level" : "no sharp rise"))
@@ -169,30 +240,46 @@ final class ClapDetector {
 
     /// An onset has had its 100 ms: was it a clap, and does it make a double clap?
     private func judge(_ p: Pending) -> Bool {
-        let decay = p.peak - p.tail
-        let line = String(format: "clap candidate %.1f dB (needs %.1f), rise %.1f dB, %.0f Hz, down %.1f dB in 100 ms", p.peak, calibrating ? floorDb + 12 : levelDb, p.rise, p.hz, decay)
-        guard p.hz >= Self.brightHz else { say("\(line): dull (no high sound, a knock or a thump)"); return settle() }
-        guard decay >= Self.decayDb else {
-            // Sharp sounds one after another (typing): not a clap, and nothing around them is alone either.
-            if p.inner, !calibrating { lastTransient = p.t; if case .two = state { state = .idle }; say("\(line): sharp sounds close together (typing?)") }
-            else { say("\(line): kept sounding (a word, a note, a door)") }
+        let decay = p.peak - p.tail, jump = p.rise, n = Self.need(peak: p.peak)
+        var line = String(format: "clap candidate %.1f dB (needs %.1f), rise %.1f dB (needs %.1f), %.0f Hz (needs %.0f), down %.1f dB in 100 ms (needs %.1f)",
+                          p.peak, calibrating ? calLevel : levelDb, jump, n.jump, p.hz, n.hz, decay, p.bump ? n.decay : Self.decayDb)
+        if speaking && !calibrating { line += String(format: ", %.1f dB over Hydra's voice (needs %.0f)", p.peak - p.bed, Self.overVoiceDb) }
+        // The hard floor (C8), the same at every sensitivity and while calibrating.
+        if let miss = Self.shapeMiss(peak: p.peak, jump: jump, hz: p.hz, decay: decay, smooth: !p.bump) {
+            // Still a sharp sound (a key, a mouse click): not a clap, and nothing just around it is alone either.
+            let sharp = jump >= Self.jumpDb && p.hz >= Self.brightHz && (decay >= Self.decayDb || p.inner)
+            if sharp, !calibrating { lastTransient = p.t; if case .two = state { state = .idle } }
+            say("\(line): \(p.inner && decay < (p.bump ? n.decay : Self.decayDb) ? "sharp sounds close together (typing?)" : miss)")
             return settle()
         }
         // Calibrating: typing (another sharp onset inside its window) is still not a clap (R11-6).
         if calibrating, p.inner { say("\(line): sharp sounds close together (typing?)"); return settle() }
-        if calibrating { onTransient?(p.peak, p.rise); say("\(line): heard (calibrating)"); return settle() }
+        if calibrating { onTransient?(p.peak, jump); say("\(line): heard (calibrating)", always: true); return settle() }
+        // While Hydra speaks (C7): clear of its voice, or it's a syllable, a key or a fan under it.
+        if speaking, p.peak < p.bed + Self.overVoiceDb {
+            lastTransient = p.t; if case .two = state { state = .idle }
+            say("\(line): not clear of Hydra's voice"); return settle()
+        }
         defer { lastTransient = p.t }
         let quiet = p.t - lastTransient
         switch state {
         case .idle:
-            if quiet >= Self.quietBefore { state = .one(p.t, p.peak); say("\(line): first clap") }
-            else { say("\(line): not alone (another sharp sound \(String(format: "%.2f", quiet)) s before)") }
+            if quiet >= Self.quietBefore {
+                state = .one(p.t, p.peak); firstLine = String(format: "%.1f dB after %.1f s of quiet", p.peak, min(quiet, 99)); dropFromBed(p)
+                say("\(line): first clap", always: true)
+            } else { say("\(line): not alone (another sharp sound \(String(format: "%.2f", quiet)) s before)") }
         case .one(let t1, let peak1):
             let gap = p.t - t1
             if gap < Self.flam { say("\(line): part of the last clap"); return settle() }
-            if gap <= Self.maxGap, abs(p.peak - peak1) <= 12 { state = .two(t1, p.t); say("\(line): second clap, \(String(format: "%.2f", gap)) s after the first") }
-            else if gap <= Self.maxGap { state = .idle; say("\(line): second clap too unlike the first") }
-            else { state = quiet >= Self.quietBefore ? .one(p.t, p.peak) : .idle; say("\(line): first clap (the last was \(String(format: "%.2f", gap)) s ago)") }
+            if gap <= Self.maxGap, abs(p.peak - peak1) <= 12 {
+                state = .two(t1, p.t); firstLine += String(format: ", then %.1f dB %.2f s later", p.peak, gap); dropFromBed(p)
+                say("\(line): second clap, \(String(format: "%.2f", gap)) s after the first", always: true)
+            } else if gap <= Self.maxGap { state = .idle; say("\(line): second clap too unlike the first") }
+            else {
+                state = quiet >= Self.quietBefore ? .one(p.t, p.peak) : .idle
+                if quiet >= Self.quietBefore { firstLine = String(format: "%.1f dB after %.1f s of quiet", p.peak, min(quiet, 99)); dropFromBed(p) }
+                say("\(line): first clap (the last was \(String(format: "%.2f", gap)) s ago)", always: true)
+            }
         case .two:
             state = .idle
             say("\(line): a third clap: not a double clap")
@@ -207,7 +294,7 @@ final class ClapDetector {
             guard pending == nil, now - t2 >= Self.quietAfter else { return false }
             state = .idle
             coolUntil = now + 1
-            say("double clap")
+            say("double clap: \(firstLine), nothing sharp for \(String(format: "%.2f", now - t2)) s after\(speaking ? ", both clear of Hydra's voice" : "")", always: true)
             return true
         }
     }
@@ -229,12 +316,14 @@ final class ClapTap {
         lock.lock(); self.sensitivity = sensitivity; self.calibration = calibration; det?.sensitivity = sensitivity; det?.calibration = calibration; lock.unlock()
     }
     func setCalibrating(_ on: Bool) { lock.lock(); calibrating = on; det?.calibrating = on; lock.unlock() }
-    private var guarded = false
+    private var guarded = false, speaking = false
     /// Hydra's voice plays with no echo reference (main queue, each mic tick); a change is logged once.
     func setGuarded(_ on: Bool) {
         lock.lock(); let changed = guarded != on; guarded = on; det?.guarded = on; lock.unlock()
         if changed && Self.lines { log(on ? "clap level held at Medium or calibrated: Hydra speaks with no echo reference" : "clap level back to the setting") }
     }
+    /// Hydra is speaking (main queue, each mic tick): a clap must stand clear of its voice (C7).
+    func setSpeaking(_ on: Bool) { lock.lock(); speaking = on; det?.speaking = on; lock.unlock() }
     /// The live clap level for the panel: the loudest frame since the last read, the room's floor, what a clap needs.
     func meter() -> (db: Double, floor: Double, needs: Double)? {
         lock.lock(); defer { lock.unlock() }
@@ -251,6 +340,7 @@ final class ClapTap {
             let d = ClapDetector(rate: rate, sensitivity: sensitivity, calibration: calibration)
             d.calibrating = calibrating
             d.guarded = guarded
+            d.speaking = speaking
             if Self.lines { d.onCandidate = { log($0) } }
             let tell = onTransient
             d.onTransient = { p, r in DispatchQueue.main.async { tell(p, r) } }
@@ -346,9 +436,9 @@ enum ClapTest {
         }
     }
 
-    static func wakes(_ buf: [Float], rate: Double, chunk: Int = 1024, sensitivity: Double = 0.5, calibration: ClapDetector.Calibration? = nil, guarded: Bool = false) -> Int {
+    static func wakes(_ buf: [Float], rate: Double, chunk: Int = 1024, sensitivity: Double = 0.5, calibration: ClapDetector.Calibration? = nil, guarded: Bool = false, speaking: Bool = false) -> Int {
         let det = ClapDetector(rate: rate, sensitivity: sensitivity, calibration: calibration)
-        det.guarded = guarded
+        det.guarded = guarded; det.speaking = speaking
         if ProcessInfo.processInfo.environment["CLAP_LINES"] != nil { det.onCandidate = { print(String(format: "    %.2f ", det.now) + $0) } }
         var n = 0, i = 0
         while i < buf.count { let j = min(buf.count, i + chunk); if det.feed(Array(buf[i ..< j])) { n += 1 }; i = j }
@@ -433,6 +523,74 @@ enum ClapTest {
             check("\(r) Hz: calibrating to a double clap (calibrations)", calibrates(b, rate: rate), 1)
             b = base(); for t in [1.0, 1.05, 1.4, 1.45] { clap(&b, at: t, rate: rate, peak: 0.3, rng: &rng, ring: 0) }
             check("\(r) Hz: calibrating to two quick key pairs (calibrations)", calibrates(b, rate: rate), 0)
+        }
+        // ---- build 4 C8: the hard floor, the same at every sensitivity ----
+        // The owner's own false candidates (voice log 2026-11-22, clap sensitivity 0.80, nobody clapping): peak dB, rise
+        // dB, Hz, down dB in 100 ms. Every one is turned down, even with the most forgiving tail.
+        let falses: [(Double, Double, Double, Double)] = [
+            (-45.8, 14.9, 1864, 7.7), (-44.6, 9.6, 1040, 12.2), (-44.8, 13.8, 2836, 9.2), (-43.4, 15.2, 2745, 8.6), (-44.6, 22.2, 1076, 19.1),
+            (-39.8, 16.2, 971, 12.5), (-43.0, 22.9, 965, 11.6), (-43.7, 21.2, 1369, 10.1), (-42.9, 22.8, 928, 10.2), (-40.6, 17.7, 943, 13.4),
+            (-40.1, 18.1, 1091, 11.2), (-39.7, 24.9, 2418, 7.0), (-47.2, 14.4, 2038, 7.2), (-43.0, 15.5, 2611, 8.9), (-43.5, 16.0, 2632, 7.2),
+            (-42.0, 16.4, 1457, 14.3), (-48.4, 11.7, 992, 12.3), (-38.2, 13.6, 3665, 20.7), (-40.1, 17.5, 2491, 6.2), (-39.3, 10.0, 3173, 6.5),
+            (-44.8, 14.9, 2530, 13.3), (-45.0, 9.6, 2925, 7.9), (-36.4, 16.1, 1732, 8.7), (-42.9, 21.9, 2966, 7.3), (-47.0, 13.1, 2226, 9.1),
+            (-41.5, 18.5, 2314, 10.3), (-41.3, 9.8, 2667, 9.2), (-36.8, 22.6, 1666, 9.9), (-44.6, 15.0, 1599, 11.3), (-35.7, 12.2, 2375, 12.7),
+            (-41.3, 10.8, 2250, 6.9), (-41.4, 21.1, 2618, 16.0), (-46.4, 23.1, 2406, 17.9), (-45.5, 19.0, 5257, 13.8), (-36.1, 9.9, 4783, 9.3),
+            (-43.1, 12.0, 3334, 11.4), (-43.2, 17.1, 3322, 13.6), (-38.9, 20.6, 1567, 8.0), (-40.0, 14.0, 2475, 7.4), (-42.1, 16.0, 2771, 15.6),
+            // While Hydra spoke with no echo reference (cut it off, C7): its own syllables or a key under them.
+            (-29.1, 17.8, 1753, 6.2), (-30.0, 9.6, 1451, 9.4), (-29.8, 12.2, 3453, 7.6)]
+        let passed = falses.filter { ClapDetector.shapeMiss(peak: $0.0, jump: $0.1, hz: $0.2, decay: $0.3, smooth: true) == nil }
+        check("the owner's \(falses.count) logged false candidates (-30 to -48 dB, rises of 9 to 25 dB) all fail the floor (\(passed.map { "\($0.0)" }))", passed.count, 0)
+        // His real claps that night: every one clears it, even with the strictest tail.
+        let reals: [(Double, Double, Double, Double)] = [(-20.6, 32.1, 4235, 26.0), (-17.6, 30.9, 3950, 21.0), (-22.0, 37.3, 4530, 23.7), (-30.4, 29.2, 4577, 21.8),
+            (-15.2, 26.8, 2347, 21.3), (-23.7, 39.3, 7433, 24.9), (-18.1, 40.8, 7578, 27.4), (-14.9, 26.1, 5082, 24.8), (-17.1, 29.2, 5561, 23.8),
+            (-14.3, 53.2, 6143, 24.1), (-9.6, 43.4, 3512, 27.9), (-36.6, 25.5, 5138, 24.1), (-24.2, 35.0, 7145, 29.9), (-29.9, 32.4, 5424, 19.9)]
+        let missed = reals.filter { ClapDetector.shapeMiss(peak: $0.0, jump: $0.1, hz: $0.2, decay: $0.3, smooth: false) != nil }
+        check("the owner's \(reals.count) real claps (-10 to -37 dB) all clear it (\(missed.map { "\($0.0)" }))", reals.count - missed.count, reals.count)
+        check("no slider or calibration goes under -46 dB (High, High calibrated to -45 dB)", ClapDetector(rate: 48000, sensitivity: 1, calibration: .init(peakDb: -45, riseDb: 10)).levelDb == -46 && ClapDetector(rate: 48000, sensitivity: 0.8).levelDb == -46 ? 1 : 0, 1)
+        for rate in [48000.0, 44100.0, 16000.0] {
+            let r = Int(rate)
+            for seed: UInt64 in [5, 21, 77] {
+                var rng = Rng(s: seed)
+                func u(_ a: Double, _ b: Double) -> Double { a + (b - a) * Double(abs(rng.next())) }
+                // Pairs 0.18 to 0.75 s apart with a second or more of quiet around them: a double clap's timing exactly.
+                func pairs(_ secs: Double, room: Float, _ one: (inout [Float], Double) -> Void) -> [Float] {
+                    var b = ClapTest.room(secs, rate: rate, rng: &rng, level: room)
+                    var t = 0.8
+                    while t < secs - 1.2 { one(&b, t); one(&b, t + u(0.18, 0.75)); t += u(1.8, 2.5) }
+                    return b
+                }
+                let lv = Float(u(0.0012, 0.004))
+                let keys = pairs(9, room: lv) { b, t in ClapTest.key(&b, at: t, rate: rate, peak: Float(u(0.01, 0.12)), rng: &rng) }
+                let mice = pairs(9, room: lv) { b, t in ClapTest.mouse(&b, at: t, rate: rate, peak: Float(u(0.01, 0.08)), rng: &rng) }
+                let taps = pairs(9, room: lv) { b, t in ClapTest.tap(&b, at: t, rate: rate, peak: Float(u(0.01, 0.2)), rng: &rng) }
+                let thumps = pairs(9, room: lv) { b, t in ClapTest.thump(&b, at: t, rate: rate, peak: Float(u(0.02, 0.6)), rng: &rng) }
+                var fan = ClapTest.room(9, rate: rate, rng: &rng, level: lv); ClapTest.fan(&fan, from: 0.2, to: 8.8, rate: rate, level: Float(u(0.002, 0.006)), rng: &rng)
+                for (name, b) in [("two keys at a time", keys), ("mouse clicks in pairs", mice), ("taps on the desk in pairs", taps), ("thumps in pairs", thumps), ("a fan spinning up", fan)] {
+                    check("\(r) Hz seed \(seed): \(name) at High", wakes(b, rate: rate, sensitivity: 0.8), 0)
+                    check("\(r) Hz seed \(seed): \(name), calibrated to faint claps (-36 dB), High", wakes(b, rate: rate, sensitivity: 0.8, calibration: .init(peakDb: -36, riseDb: 26)), 0)
+                }
+            }
+            // Real double claps at a normal distance (-25 to -12 dBFS, as the owner's were) still wake it at Low, Medium and High.
+            var rng = Rng(s: 99)
+            var b = room(4, rate: rate, rng: &rng, level: 0.003); clap(&b, at: 1.0, rate: rate, peak: 0.6, rng: &rng, reverb: (0.2, 0.5)); clap(&b, at: 1.35, rate: rate, peak: 0.55, rng: &rng, reverb: (0.2, 0.5))
+            for (k, name) in [(0.2, "Low"), (0.5, "Medium"), (0.8, "High")] { check("\(r) Hz: a real double clap at a normal distance, \(name)", wakes(b, rate: rate, sensitivity: k), 1) }
+            // ---- C7: a clap while Hydra speaks must stand clear of its voice ----
+            var voice = room(5, rate: rate, rng: &rng); speech(&voice, from: 0, to: 5, rate: rate, rng: &rng, level: 0.15)
+            check("\(r) Hz: Hydra's own voice with no echo reference never claps (High)", wakes(voice, rate: rate, sensitivity: 0.8, guarded: true, speaking: true), 0)
+            var over = voice; clap(&over, at: 2.0, rate: rate, peak: 1.0, rng: &rng); clap(&over, at: 2.4, rate: rate, peak: 1.0, rng: &rng)
+            check("\(r) Hz: a clean double clap over Hydra's voice stops it", wakes(over, rate: rate, sensitivity: 0.5, guarded: true, speaking: true), 1)
+            var under = voice; clap(&under, at: 2.0, rate: rate, peak: 0.12, rng: &rng); clap(&under, at: 2.4, rate: rate, peak: 0.12, rng: &rng)
+            check("\(r) Hz: a double clap barely over Hydra's voice doesn't", wakes(under, rate: rate, sensitivity: 0.8, guarded: true, speaking: true), 0)
+            // Hydra's own clicks (a "t", a "k" after a pause) as loud as its voice: sharp, bright and short like a clap,
+            // so only the margin over its voice turns them down.
+            var own = room(5, rate: rate, rng: &rng); speech(&own, from: 0, to: 2.2, rate: rate, rng: &rng, level: 0.15); speech(&own, from: 3.8, to: 5, rate: rate, rng: &rng, level: 0.15)
+            clap(&own, at: 2.6, rate: rate, peak: 0.25, rng: &rng); clap(&own, at: 3.0, rate: rate, peak: 0.25, rng: &rng)
+            check("\(r) Hz: clap-like clicks in Hydra's own voice, as loud as it, never stop it", wakes(own, rate: rate, sensitivity: 0.8, guarded: true, speaking: true), 0)
+            check("\(r) Hz: (the same clicks with Hydra quiet are a double clap)", wakes(own, rate: rate, sensitivity: 0.8), 1)
+            var echoed = room(9, rate: rate, rng: &rng); speech(&echoed, from: 0, to: 9, rate: rate, rng: &rng, level: 0.02)
+            var t = 0.8
+            while t < 8 { key(&echoed, at: t, rate: rate, peak: 0.05, rng: &rng); key(&echoed, at: t + 0.4, rate: rate, peak: 0.05, rng: &rng); t += 2 }
+            check("\(r) Hz: two keys at a time while Hydra speaks (echo cancelled) never stop it, High", wakes(echoed, rate: rate, sensitivity: 0.8, speaking: true), 0)
         }
         // R11-6: a pair quieter than -45 dB is too soft to calibrate to: it asks again.
         let soft = ClapDetector.pickCalibration([(1.0, -52, 20), (1.4, -50, 20)]) == .soft ? 0 : 1

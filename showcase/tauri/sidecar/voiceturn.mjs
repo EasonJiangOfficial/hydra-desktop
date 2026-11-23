@@ -122,6 +122,13 @@ export const pendingWanted = ({ voice, busy, answerSaid, listening, asking }) =>
  *  prompt, never cancelled"): every take, whatever opened it (the phrase, a clap, the talk keys, barge-in). */
 export const whileBusy = ({ busy }) => (busy ? 'add_on' : 'new');
 
+/** Build 4 C7 (owner: "the agent speaks and is interupted by my laptop fans or sounds not by my speach"): a take that
+ *  starts over the last reply while it is still being said holds the reply ('hold'), it doesn't cut it; with no reply
+ *  playing there is nothing to keep ('stop'). When the take ends, words keep the reply cut ('stop'); no words (a noise
+ *  opened it) let it go on from where it was ('resume'), never silence. */
+export const overReply = ({ saying, voiceOn }) => (saying && voiceOn ? 'hold' : 'stop');
+export const afterHeld = ({ words }) => (String(words ?? '').trim() ? 'stop' : 'resume');
+
 // ---- Allow asks in a voice turn (owner: "sometimes it cancels and doesnt warn me or do anything") ----
 export const ASK_DEADLINE_MS = 60_000;
 // A clear yes or no: every word from its side's words (fillers, the action's verb, the question's own words), one strong
