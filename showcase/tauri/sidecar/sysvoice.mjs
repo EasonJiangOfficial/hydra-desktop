@@ -53,12 +53,13 @@ export class SystemVoice {
     this.queue = []; this.ended = false; this.done = false; this.child = null; this.busy = false;
   }
   open() { return this; }
-  say(text) { if (this.done) return; const t = spokenText(text); if (t) this.queue.push(t); this.next(); }
+  /** done (optional): called once this sentence's audio has gone out (onAudio), before the next one's, as StudioVoice does. */
+  say(text, done) { if (this.done) return; const t = spokenText(text); if (t) this.queue.push([t, done]); this.next(); }
   end() { this.ended = true; this.next(); }
   abort() { this.done = true; this.queue = []; this.child?.kill('SIGKILL'); this.child = null; }
   async next() {
     if (this.busy || this.done) return;
-    const text = this.queue.shift();
+    const [text, said] = this.queue.shift() ?? [];
     if (text == null) { if (this.ended) { this.done = true; this.onEnd?.(); } return; }
     this.busy = true;
     const file = path.join(this.tmp, `hydra-say-${process.pid}-${Math.random().toString(36).slice(2)}.wav`);
@@ -67,6 +68,7 @@ export class SystemVoice {
       if (this.done) return;
       // One steady loudness for every sentence (W5 contract 6), whichever voice made it.
       if (out?.pcm?.length) this.onAudio?.(levelPcm(out.pcm), out.rate);
+      said?.();
     } catch (e) {
       if (!this.done) { this.done = true; this.onError?.({ reason: 'error', message: `The Mac's voice failed: ${e.message}` }); }
       return;

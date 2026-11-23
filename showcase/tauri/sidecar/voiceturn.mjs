@@ -278,7 +278,24 @@ export function addOnTo(text, { busy, addInput, enqueue }) {
  *  added word the run never took in. */
 export function retryText({ messages = [], from = -1, text, unanswered = [] }) {
   const adds = from >= 0 ? messages.slice(from).filter((m) => m.role === 'user' && m.added).map((m) => String(m.content)) : [];
-  return [text, ...new Set([...adds, ...unanswered])].join('\n\n');
+  // An unanswered word that is a placed one is the same words, one for one: said twice, it is there twice.
+  const placed = [...adds], rest = [];
+  for (const u of unanswered.map(String)) { const i = placed.indexOf(u); if (i >= 0) placed.splice(i, 1); else rest.push(u); }
+  return [text, ...adds, ...rest].join('\n\n');
+}
+
+// A run's own first message (the request prompt() just pushed), tagged so the run is found after it: the API route
+// writes a hard trim back into the agent's history, so an index taken before the run goes stale. A symbol: copies of
+// the message keep it ({ ...m }), the saved file and the provider never see it.
+const RUN = Symbol('run');
+/** Tags the message; returns the tag (null: nothing to tag). */
+export function tagRun(m) { if (!m || typeof m !== 'object') return null; const tag = {}; m[RUN] = tag; return tag; }
+/** Where the tagged run starts in messages now. No tag, or not found (not seen: every rewrite copies the message with
+ *  its tag, and a trim cuts only up to a later user message, which the API route never adds): fallback, the index from
+ *  before the run, so the saved history is never cut short. */
+export function runStart(messages, tag, fallback = -1) {
+  const i = tag ? messages.findIndex((m) => m?.[RUN] === tag) : -1;
+  return i >= 0 ? i : fallback;
 }
 
 /** Words added into the session that its run ended before answering (agent.unanswered(): max turns, an error, Stop),

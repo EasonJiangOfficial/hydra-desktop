@@ -208,7 +208,9 @@ const run = async (mode, steps, { owner = () => 'yes' } = {}) => {
   assert.deepEqual(f.tags, [[false, true]], JSON.stringify(f));
   assert.equal(f.acts, 0, 'nothing ran on a no');
   assert.equal(planDeletion([{ do: 'fill', field: 'Body', text: 'x' }]), true, "draw's fill");
-  assert.equal(planDeletion([{ do: 'click', id: 3 }, { do: 'type', text: 'x' }]), false, "draw's click and type");
+  // build4efix5: draw's click names its field; a click on a control with no name before typing is a deletion.
+  assert.equal(planDeletion([{ do: 'click', id: 3, shown: 'Body' }, { do: 'type', text: 'x' }]), false, "draw's click and type");
+  assert.equal(planDeletion([{ do: 'click', id: 3 }, { do: 'type', text: 'x' }]), true, 'no name: it may be Select All');
   assert.equal(planDeletion([{ do: 'type', text: 'x' }], ['TextEdit', '1Password']), true, 'in a password manager');
   for (const s of [{ do: 'set', field: 'f', text: 'x' }, { do: 'choose', field: 'f', option: 'x' }]) assert.equal(stepsLose([s]), true, s.do);
 }
@@ -321,7 +323,8 @@ const agentWith = (query, o = {}) => new ClaudeCodeAgent({ model: 'claude-opus-5
     session.messages = [];
   }
   assert.doesNotMatch(side, /session\.messages\.pop\(\)/, 'never a blind pop of the last message');
-  assert.match(side, /syncSession\(retryNext \? runFrom : undefined\);\n    \/\/ Its history is saved without the run the retry repeats: no later sync may write that run back\.\n    if \(retryNext\) agent = null;/);
+  // build4efix5: the cut is found by the run's tag (runStart), never an index taken before the run.
+  assert.match(side, /syncSession\(retryNext \? runStart\(agent\?\.getMessages\?\.\(\) \?\? \[\], runTag, runFrom\) : undefined\);\n    \/\/ Its history is saved without the run the retry repeats: no later sync may write that run back\.\n    if \(retryNext\) agent = null;/);
 }
 
 // ---- 10 (low, principle 5). jsonOf takes the first balanced object that is the answer (has its keys), not the first

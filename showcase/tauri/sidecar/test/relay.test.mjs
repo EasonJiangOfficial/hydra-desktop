@@ -44,7 +44,9 @@ const auth = (req) => req.headers.authorization === `Bearer ${KEY}` || req.heade
 const body = (req) => new Promise((res) => { let s = ''; req.on('data', (d) => { s += d; }); req.on('end', () => res(s ? JSON.parse(s) : null)); });
 const json = (res, code, v) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(v)); };
 const newApproval = (answer) => { const id = randomUUID(); approvals.set(id, { status: 'pending', polls: 0, answer }); return id; };
-let liveDone = 0;
+let liveDone = false;
+// The turn's own stop (the relay aborts it), awaited instead of a sleep: a relay that never stops it fails the test.
+const stopped = (signal) => new Promise((r) => { if (signal.aborted) r(); else signal.addEventListener('abort', r, { once: true }); });
 
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -112,8 +114,9 @@ const server = http.createServer(async (req, res) => {
       const { approvalId, ...rest } = m.params.arguments;
       if (m.params.name === 'list_tasks') return json(res, 200, { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: '[{"id":"k1"}]' }] } });
       if (!approvalId) {
-        // The live turn's yes comes after 2 polls; the routine's no only a while after the live turn is done.
-        const id = newApproval(rest.id === 'k1' ? (n) => (n >= 2 ? 'approved' : null) : () => (liveDone && Date.now() - liveDone > 150 ? 'declined' : null));
+        // The live turn's yes comes after 2 polls; the routine's no only once the live turn is done and the routine has
+        // kept its lease with a heartbeat (events, never a time: principle 6).
+        const id = newApproval(rest.id === 'k1' ? (n) => (n >= 2 ? 'approved' : null) : () => (liveDone && turns.get(T.routine).posts.some((p) => !p.events.length) ? 'declined' : null));
         const gate = { needsApproval: true, approvalId: id, summary: `Delete task ${rest.id}` };
         return json(res, 200, { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: JSON.stringify(gate) }], structuredContent: gate } });
       }
@@ -151,13 +154,13 @@ async function runTurn(t, { emit, signal, approve }) {
   if (t.id === T.bad) {
     emit({ type: 'text', delta: 'Sending. ' });
     emit({ type: 'confirm', id: randomUUID(), summary: 'An approval the server never made', danger: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await stopped(signal); // the 400 stops it
     emit({ type: 'text', delta: 'never sent' });
     return;
   }
   if (t.id === T.stale) {
     emit({ type: 'text', delta: 'Working on it. ' });
-    await new Promise((r) => { signal.addEventListener('abort', r, { once: true }); setTimeout(r, 2000); });
+    await stopped(signal); // the 409 on its heartbeat stops it
     emit({ type: 'text', delta: 'never sent' });
     return;
   }
@@ -177,7 +180,7 @@ async function runTurn(t, { emit, signal, approve }) {
     emit({ type: 'ui', action: { kind: 'navigate', href: '/planning' } });
     emit({ type: 'text', delta: 'x'.repeat(17_000) });
     emit({ type: 'done', usage: { inputTokens: 1200, outputTokens: 80, cacheRead: 7 } });
-    liveDone = Date.now();
+    liveDone = true;
     liveDoneWhileRoutineWaiting = !turns.get(T.routine).closed;
     return;
   }

@@ -48,7 +48,7 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { ASK_DEADLINE_MS, addOnTo, askForTake, createSpokenTrack, endNote, ownTurn, pcmSecs, pendingWanted, retryText, startProgress, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
+import { ASK_DEADLINE_MS, addOnTo, askForTake, createSpokenTrack, endNote, ownTurn, pcmSecs, pendingWanted, retryText, runStart, startProgress, tagRun, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, listenWait, listensAfter } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -1674,7 +1674,12 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   const notReady = await readyAgent();
   // Told once its turn starts, however it goes: the corner and the live state still have the result, so no retries.
   desk.started(news);
-  if (notReady) return say(notReady, 'concerned');
+  if (notReady) {
+    // A retry ends here before its run, and the failed run is already out of the saved conversation: its words (the
+    // request and what was added) go to the thread with why, as a fold-wait stop's do.
+    if (retrying) toThread(turnWords, notReady);
+    return say(notReady, 'concerned');
+  }
   busy = true; quiet = false; autoTurn = null;
   saidPending = true; clearTimeout(saidCap); stir();
   holdWake(true);
@@ -1707,7 +1712,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     } });
   pendingVoice = own ? voice : null; answerSaid = false; pendingNow();
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null, hitMax = false, endLine = '';
-  let runFrom = -1; // where this request's own messages start in the agent's history
+  let runFrom = -1, runTag = null; // where this request's own messages start in the agent's history; its first one's tag
   let lastSeen = 0; // the newest call's whole prompt (cache log): tools, system prompt and chat
   try {
     // Voice: a short first line before a tool ("On it, checking Paris.") is a beat: it's spoken, but not
@@ -1778,7 +1783,9 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     const ctl = controller;
     watch = stallWatch(STALL_MS, () => { stalled = true; logLine('stalled', { turn, ms: Date.now() - use.t }); ctl.abort(); });
     runFrom = agent.getMessages().length;
-    for await (const e of agentEvents(agent.prompt(content))) {
+    const run = agent.prompt(content);
+    runTag = tagRun(agent.getMessages()[runFrom]); // found by its tag after the run (runStart): a hard trim moves it
+    for await (const e of agentEvents(run)) {
       watch.event(e);
       if (e.type === 'text_delta') {
         progress.touch();
@@ -1895,7 +1902,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
         const fix = explain('reply', err).where === 'chatgpt' ? chatGPTUsageHelp() : '';
         // What they added while it worked goes along with the retry (R11e-6), each once: the run's own messages (the
         // request, what was added into it, any steps) are left out of the saved conversation (syncSession below).
-        const again = retryText({ messages: agent?.getMessages?.() ?? [], from: runFrom, text, unanswered: agent?.unanswered?.() ?? [] });
+        const msgs = agent?.getMessages?.() ?? [];
+        const again = retryText({ messages: msgs, from: runStart(msgs, runTag, runFrom), text, unanswered: agent?.unanswered?.() ?? [] });
         retryNext = { text: again, image, note, byVoice, listenAfter, news, info: { text: again, from: modelName(config.model), untilText: untilWords(lim.until), kind: lim.kind, count: retryCount + 1, fix } };
       }
     }
@@ -1929,7 +1937,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // A tool cut off by Stop never reports back: end its tag too, or the Sidekick kept showing it ("looking at
     // CapCut") on every later request, with their own tags queued behind it.
     for (const id of activity.stopped()) ui({ kind: 'agent', e: { type: 'tool_end', id, isError: true } });
-    syncSession(retryNext ? runFrom : undefined);
+    syncSession(retryNext ? runStart(agent?.getMessages?.() ?? [], runTag, runFrom) : undefined);
     // Its history is saved without the run the retry repeats: no later sync may write that run back.
     if (retryNext) agent = null;
     // This request's turns, once they're in the session: the skill pass may learn from them (after their next message).

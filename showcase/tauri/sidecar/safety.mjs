@@ -176,13 +176,22 @@ export function parseKey(combo) {
 // this safe set. Any other step (a selection: cmd+a, shift or cmd+shift with a key, a "Select All" click; a delete key
 // or chord: Backspace, Delete, ctrl+h, ctrl+d, ctrl+k; cut, copy, paste; fill, set, choose; any key or step kind not
 // listed) makes the whole plan deletion-class, so it asks as with Approve all off. A whitelist, never a list of
-// dangerous keys: what isn't known to be safe asks. Typing is safe only with no selection before it, which a safe plan
-// can't make.
+// dangerous keys: what isn't known to be safe asks. Typing is safe only with no selection made before it in the plan
+// (stepsLose): a step that may select (selects) makes any later typing a deletion.
 const SAFE_KINDS = new Set(['click', 'click_text', 'click_at', 'hover', 'scroll', 'focus', 'wait', 'type', 'read_window', 'take_screenshot', 'screenshot']);
 const ARROWS = new Set(['left', 'right', 'up', 'down']);
 // A control clicked by its name that selects, moves or edits text (the Edit menu's items).
 const EDIT_CLICK = /^\s*(?:select(?: all)?|cut|copy|paste(?: and match style)?|delete|clear|replace|undo|redo)\b/i;
+// Typed characters that are keys, not text (the helper sends typed text as it is): C0 controls but a line break (Return,
+// in the safe set), DEL and the Mac's function-key characters. In Cocoa 0x7F and 0x08 delete back, U+F728 forward,
+// 0x0B kills the line, a tab moves to the next field (selecting its text).
+const KEY_CHARS = /[\x00-\x09\x0B\x0C\x0E-\x1F\x7F\uF700-\uF8FF]/;
+// A step after which typing can replace a selection it made: Tab or shift+Tab (focus moving into a field selects its
+// whole text), a click at a spot or on a control with no name (it may be the Edit menu's Select All).
+const selects = (s) => s?.do === 'click_at' || (['click', 'focus'].includes(s?.do) && !String(s.shown ?? s.label ?? '').trim())
+  || (s?.do === 'key' && parseKey(s.key)?.key === 'tab');
 function safeStep(s) {
+  if (s?.do === 'type') return !KEY_CHARS.test(String(s.text ?? ''));
   if (!SAFE_KINDS.has(s?.do)) {
     if (s?.do !== 'key') return false;
     const p = parseKey(s.key);
@@ -192,10 +201,19 @@ function safeStep(s) {
     // Return, Tab and Escape, alone or with shift (a new line, the field before).
     return ['return', 'tab', 'escape', 'esc'].includes(p.key) && [...p.mods].every((m) => m === 'shift');
   }
-  return !['click', 'click_text', 'hover'].includes(s.do) || !EDIT_CLICK.test(String(s.text ?? s.shown ?? s.label ?? ''));
+  return !['click', 'click_text', 'hover', 'focus'].includes(s.do) || !EDIT_CLICK.test(String(s.text ?? s.shown ?? s.label ?? ''));
 }
-/** A plan that can lose what's there (any step outside the safe set): its ask is a deletion. */
-export const stepsLose = (steps) => !Array.isArray(steps) || !steps.every(safeStep);
+/** A plan that can lose what's there (any step outside the safe set, or typing after a step that may select): its ask
+ *  is a deletion. */
+export function stepsLose(steps) {
+  if (!Array.isArray(steps)) return true;
+  let selected = false;
+  for (const s of steps) {
+    if (!safeStep(s) || (s?.do === 'type' && selected)) return true;
+    if (selects(s)) selected = true;
+  }
+  return false;
+}
 /** Approve all's tag for a plan: a deletion when it can lose what's there (stepsLose) or runs in a password manager
  *  (its vault comes forward). The one place act_in_app and draw's typing take it from. */
 export const planDeletion = (steps, apps = []) => stepsLose(steps) || apps.some(isPasswordApp);
@@ -327,6 +345,10 @@ const PASSWORD_WORDS = /password|vault|keychain|authenticator|(?:^|[^a-z0-9])otp
 /** A password manager or 2FA app (its window shows sign-ins), by name or bundle id: bringing it forward asks under
  *  Approve all too (tools.mjs). */
 export const isPasswordApp = (app) => { const a = String(app ?? '').trim().replace(/\.app$/i, ''); return PASSWORD_APPS.test(a) || PASSWORD_WORDS.test(a); };
+// A window whose title or address names a vault or a password page: a web vault in a browser (Bitwarden Web Vault,
+// 1Password's sign-in, passwords.google.com), a note called Passwords. The managers' own names count too.
+const VAULT_SHOWN = /\b(?:1password|bitwarden|lastpass|dashlane|keeper|nordpass|proton pass|roboform|enpass|keepass\w*|authy)\b/i;
+const vaultShown = (win) => { const t = `${win?.title ?? ''} ${win?.url ?? ''}`; return PASSWORD_WORDS.test(t) || VAULT_SHOWN.test(t); };
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -354,8 +376,14 @@ export function checkWindow(win, home, { viewers = true } = {}) {
     const none = BROWSER_APPS.test(app) && !win?.url ? "I couldn't read which page or file it shows" : 'It has no file I can check';
     worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a password, a message, a terminal).`), app };
   }
-  // A password manager's window shows sign-ins: Approve all never answers it (secret), and no earlier yes covers it.
-  if (worst.level === ASK && isPasswordApp(app)) worst = { ...worst, secret: true };
+  // A password manager's window, or one showing a vault or a password page, shows sign-ins: always asked, Approve all
+  // never answers it (secret), and no earlier yes covers it.
+  const vault = vaultShown(win);
+  if (worst.level === SAFE && vault) {
+    const title = String(win?.title ?? '').trim();
+    worst = { ...verdict(ASK, `Look at ${app ? `the ${app} window` : 'that window'}${title ? ` "${title}"` : ''}? It looks like a password manager or a sign-in page, so it could show passwords.`), app };
+  }
+  if (worst.level === ASK && (isPasswordApp(app) || vault)) worst = { ...worst, secret: true };
   return worst;
 }
 

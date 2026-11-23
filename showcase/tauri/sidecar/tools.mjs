@@ -881,7 +881,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         if (!HANDS) throw new Error('Typing into apps needs the Hydra app.');
         const src = m.at.src, app = t === 'front' || t === 'screen' ? {} : { app: t };
         const steps = src.text != null ? [{ do: 'fill', field: src.text, text: m.text }]
-          : src.id != null ? [{ do: 'click', id: m.at.live }, { do: 'type', text: m.text }]
+          : src.id != null ? [{ do: 'click', id: m.at.live, ...(m.at.name ? { shown: m.at.name } : {}) }, { do: 'type', text: m.text }]
             : [{ do: 'click_at', x: m.at.rect[0] + m.at.rect[2] / 2, y: m.at.rect[1] + m.at.rect[3] / 2, global: true }, { do: 'type', text: m.text }];
         // Typing is a Mac action: asked every time, with the real app and the whole text (owner's rule).
         const where = await hands('locate', app.app ? `app:${app.app}` : 'front').then((r) => r?.window?.app ?? null, () => null);
@@ -1158,12 +1158,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               if (tv.level === ASK && !notes.includes(tv.reason)) notes.push(tv.reason);
               typedSoFar.text = joined.slice(-4096);
             }
-            const label = s.do === 'click_text' ? s.text : s.do === 'click' ? s.label : s.do === 'choose' ? s.option : null;
+            // A focus is a click to the helper (it clicks the control's middle): named and checked as one.
+            const label = s.do === 'click_text' ? s.text : ['click', 'focus'].includes(s.do) ? s.label : s.do === 'choose' ? s.option : null;
             // Named in the question too; the helper still stops at each one and asks again with what it really hits.
             if (label && isRiskyClick(label)) notes.push(`"${label}" could delete, pay, send, quit or sign out.`);
             const keyDoes = s.do === 'key' ? riskyKey(s.key) : null;
             if (keyDoes) notes.push(`${s.key} ${keyDoes}.`);
-            if (label && s.do === 'click') s.shown = label; // named in the question; the helper ignores it
+            if (label && ['click', 'focus'].includes(s.do)) s.shown = label; // named in the question; the helper ignores it
             delete s.label;
           }
           // Owner's rule (DESIGN.md "Mac actions"): every plan asks, every time, with the real app and every step in
