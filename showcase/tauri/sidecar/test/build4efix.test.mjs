@@ -68,7 +68,8 @@ function fakeClock() {
   assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 1200 }), null, 'a take before its question played never does');
   a.audio(3, 4000);
   assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 3999 }), null, 'nor one that started while it played');
-  assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 4000 })?.said, 'yes', 'a take after it played does');
+  assert.equal(askForTake(open, { text: 'yes', takeAt: 4000 })?.said, 'yes', 'a take after it played does');
+  assert.equal(askForTake(open, { text: 'okay thanks', takeAt: 4000 }), null, '"okay thanks" is no answer, even after it played (lane E round 3)');
   assert.equal(askForTake(open, { text: 'open Chrome instead', takeAt: 4200 }), null, 'other words are for the turn');
 }
 
@@ -140,7 +141,7 @@ function fakeClock() {
 {
   for (const k of ['delete', 'backspace', 'forwarddelete', 'cmd+delete', 'shift+delete']) assert.equal(deletesKey(k), true, k);
   for (const k of ['return', 'a', 'cmd+s', 'tab']) assert.equal(deletesKey(k), false, k);
-  assert.match(tools, /deletion: notes\.length > 0 \|\| mapped\.some\(\(s\) => s\.do === 'key' && deletesKey\(s\.key\)\)/);
+  assert.match(tools, /deletion: notes\.length > 0 \|\| stepsLose\(mapped\)/, 'stepsLose counts every deletesKey step (round 3)');
 }
 
 // ---- 10. After Stop (an aborted signal) an ask is a no before Approve all could say yes.

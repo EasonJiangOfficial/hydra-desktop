@@ -233,10 +233,13 @@ assert.ok(!stale.posts.some((p) => p.events.some((e) => e.type === 'error')), 'n
 
 // A turn whose brain fails ends with an error event, and the loop carries on.
 const t4 = turn(randomUUID(), 'web'); queues.live.push(t4); turns.set(t4.id, { claimId: t4.claimId, events: [], posts: [] });
-const relay2 = createRelay({ api, runTurn: async () => { throw Object.assign(new Error('Sign in with Claude on the Mac.'), { code: 'mac_signed_out' }); }, waitSecs: 1, flushMs: 5, slots: ['live'] });
+// Waited for by its own end (relay_done, after its last post), not a fixed time: under a loaded machine 5 s ran out.
+let t4Done;
+const t4Ended = new Promise((r) => { t4Done = r; });
+const relay2 = createRelay({ api, runTurn: async () => { throw Object.assign(new Error('Sign in with Claude on the Mac.'), { code: 'mac_signed_out' }); }, waitSecs: 1, flushMs: 5, retry: [10, 20, 40], slots: ['live'],
+  log: (k, d) => { if (k === 'relay_done' && d.id === t4.id) t4Done(); } });
 relay2.start();
-const until2 = Date.now() + 5000;
-while (!turns.get(t4.id).events.length && Date.now() < until2) await new Promise((r) => setTimeout(r, 20));
+await Promise.race([t4Ended, new Promise((r) => setTimeout(r, 60_000))]);
 await relay2.stop();
 assert.deepEqual(turns.get(t4.id).events, [{ type: 'error', message: 'Sign in with Claude on the Mac.', code: 'mac_signed_out' }]);
 

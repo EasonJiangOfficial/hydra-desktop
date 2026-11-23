@@ -112,18 +112,30 @@ export function renderTranscript(messages, maxChars) {
 class SdkMessageMapper {
   turn = 0; totalUsage = { inputTokens: 0, outputTokens: 0 }; lastAssistant; syntheticError;
   #current; #startedAt; #stopReason = 'end_turn'; #usage = { inputTokens: 0, outputTokens: 0 };
-  #adds = [];
+  #adds = []; #handled = 0;
   constructor(o) { this.o = o; }
   /** Words the owner added mid-run: they go into the history as a user message just before the next assistant message
-   *  (where Claude Code reads them in), so the saved history, a fold's transcript and a re-seed keep them.
-   *  ponytail: placed at the next message start, one round early if Claude Code holds it for a later boundary. */
-  added(text) { this.#adds.push({ role: 'user', content: String(text) }); }
+   *  that Claude Code sent after them (where it reads them in), so the saved history, a fold's transcript and a re-seed
+   *  keep them. after: how many of its messages had come when they were added (handle() counts the ones mapped), so
+   *  one already sent but not yet mapped keeps its place before them. What is left at the run's end goes last
+   *  (flushAdds). ponytail: placed at the next message start, one round early if Claude Code holds it for a later
+   *  boundary. Marked added: a later run never sends them again as its own words (claudeCodeLoop). */
+  added(text, after = Infinity) { this.#adds.push({ after, m: { role: 'user', content: String(text), added: true } }); }
+  #place(all) {
+    const now = all ? this.#adds : this.#adds.filter((a) => a.after < this.#handled);
+    if (!now.length) return;
+    this.#adds = all ? [] : this.#adds.filter((a) => !now.includes(a));
+    this.o.messages.push(...now.map((a) => a.m));
+  }
+  /** The run ended (done, an error, Stop): what was added and not placed yet goes at the end of the history. */
+  flushAdds() { this.#place(true); }
   unpairedToolCalls() {
     const last = this.o.messages.at(-1);
     if (last?.role !== 'assistant' || typeof last.content === 'string') return [];
     return last.content.filter((p) => p.type === 'tool_call');
   }
   handle(msg) {
+    this.#handled++;
     if (msg.parent_tool_use_id) return [];
     switch (msg.type) {
       case 'system': return this.#system(msg);
@@ -175,7 +187,7 @@ class SdkMessageMapper {
     }
     const id = String(message.id ?? '');
     if (!this.#current || this.#current.id !== id) {
-      this.o.messages.push(...this.#adds.splice(0));
+      this.#place(false);
       const fresh = { role: 'assistant', content: [] };
       this.#current = { id, message: fresh };
       this.o.messages.push(fresh);
@@ -453,7 +465,9 @@ async function* claudeCodeLoop(messages, o) {
   const channel = new Channel();
   let aborted = !!o.signal?.aborted, stderrTail = '';
   let start = messages.length;
-  while (start > 0 && messages[start - 1].role === 'user') start--;
+  // The pending turn: the user messages at the end, not words added into an earlier run (already sent, and in the
+  // transcript for a fresh session).
+  while (start > 0 && messages[start - 1].role === 'user' && !messages[start - 1].added) start--;
   const prior = messages.slice(0, start);
   const first = messages.slice(start).flatMap((m) => toSdkUserContent(m.content));
   if (!o.resume && prior.some((m) => m.role !== 'system')) first.unshift({ type: 'text', text: renderTranscript(prior, MAX_SEED_CHARS) });
@@ -463,7 +477,7 @@ async function* claudeCodeLoop(messages, o) {
   const link = { signal: o.signal, onEvent: (event) => channel.push({ kind: 'event', event }), stderr: (d) => { stderrTail = (stderrTail + d).slice(-STDERR_TAIL_CHARS); } };
   // head: this run's own prompt, always the first message (headDone: its turn got its answer, o.onAnswered).
   const head = toSdkUserMessage(first);
-  let run, input, q, warmUsed = false, headDone = false;
+  let run, input, q, warmUsed = false, headDone = false, received = 0; // received: Claude Code's messages so far
   const begin = async (s) => {
     const fresh = {};
     run = s ?? { link: fresh, ...sdkOptions(o, o.resume, fresh) };
@@ -477,7 +491,7 @@ async function* claudeCodeLoop(messages, o) {
     q = w ? w.query(input) : (o.query ?? sdkQuery)({ prompt: input, options: run.options });
     if (aborted) { input.end(); q.interrupt().catch(() => {}); }
     let seen = false;
-    try { for await (const message of q) { seen = true; channel.push({ kind: 'sdk', message }); } channel.push({ kind: 'end' }); }
+    try { for await (const message of q) { seen = true; received++; channel.push({ kind: 'sdk', message }); } channel.push({ kind: 'end' }); }
     catch (error) {
       if (warmUsed && !seen && !aborted) { try { q.close(); } catch {} return begin(null); } // the spare died while parked
       channel.push({ kind: 'error', error });
@@ -524,7 +538,7 @@ async function* claudeCodeLoop(messages, o) {
     input.push(m);
     addedAt = ++step;
     added.push({ at: addedAt, text: String(text), uuid: m.uuid, m });
-    mapper.added(text);
+    mapper.added(text, received);
     return true;
   });
 
@@ -597,6 +611,9 @@ async function* claudeCodeLoop(messages, o) {
     }
   } catch (e) { cut = true; throw e; } finally {
     o.takeInput?.(null);
+    // Every word added stays in the history, answered or not (shown as unanswered then): after the closed tool calls.
+    if (aborted) mapper.pairDanglingToolCalls(INTERRUPTED_NOTE);
+    mapper.flushAdds();
     // Claude Code named what it took: unless Stop ended it, every addition it didn't take is unanswered, whenever it was
     // sent (one sent during the final answer's first token is before finalAt, R11c-B1 follow-up), on a cut or a stream
     // that simply ended (R11e-7). After Stop, only what provably got its answer started is left out (E0-4): folded into
@@ -613,7 +630,6 @@ async function* claudeCodeLoop(messages, o) {
     if (killTimer) clearTimeout(killTimer);
     q?.close();
   }
-  if (aborted) mapper.pairDanglingToolCalls(INTERRUPTED_NOTE);
   if (hitMaxTurns) yield { type: 'max_turns', totalTurns: mapper.turn, maxTurns: o.maxTurns ?? 0 };
   if (usage && !aborted) yield usage;
   yield { type: 'agent_done', totalTurns: mapper.turn, totalUsage: { ...mapper.totalUsage } };
@@ -664,10 +680,15 @@ export class ClaudeCodeAgent {
   answered() { return this.#answered; }
   /** After a prompt's run whose words were named unanswered: takes them back out when nothing came after them in the
    *  history, so no later run sends them again (claudeCodeLoop's first message takes every user message at the end).
-   *  Its Claude Code session isn't resumed then (resumeId: the anchor was those words), since it may hold them. */
+   *  Its Claude Code session isn't resumed then (resumeId: the anchor was those words), since it may hold them.
+   *  Words added into that run and left unanswered at its end (kept after them, flushAdds) go too: the caller carries
+   *  them into the next run as its own words. */
   forget() {
-    if (this.#running || !this.#last || this.messages.at(-1) !== this.#last) return;
-    this.messages.pop();
+    if (this.#running || !this.#last) return;
+    let end = this.messages.length;
+    while (end > 0 && this.messages[end - 1].added) end--;
+    if (this.messages[end - 1] !== this.#last) return;
+    this.messages.length = end - 1;
     // The anchor was those very words: said again word for word they'd match it and resume that session (E0-6).
     this.resume = null;
     this.options.onResume?.(null);

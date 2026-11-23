@@ -19,6 +19,8 @@ import { DEFAULT_VOICE, FISH_MODELS, FREE_MODEL, FishVoice, RATE, fishAccount } 
 import { StudioVoice, studioStatus } from './voicestudio.mjs';
 import { cueFeel } from './speech.mjs';
 import { GEMINI_DEFAULT_VOICE, GEMINI_MODEL, GEMINI_MODELS, GEMINI_PITCH, GEMINI_RATE, GeminiVoice, geminiAccount } from './gemini.mjs';
+// A line's length as said (voice cues left out), with the space after it: what tally() counts.
+const spokenLen = (t) => String(t ?? '').replace(/\[[^\]]*\]\s*/g, '').length + 1;
 
 // The services that can speak. models: priciest first, the pick and the ones after it are tried in turn; pick:
 // the one used until the user picks (else the first); freeModel: the one for an account with no credit; rate:
@@ -227,6 +229,9 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     lastReq = now(); keepWarm();
     const id = `s${++seq}`, said = [], kinds = [], t0 = Date.now();
     let heard = false, done = false, v = null, filled = false;
+    // tally(): characters handed on and seconds of audio given so far (an ask counts only the audio after what's owed).
+    let chars = 0, secs = 0;
+    const count = (t) => { chars += spokenLen(t); };
     const finish = (whole = false) => {
       if (done) return;
       done = true;
@@ -236,13 +241,14 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     };
     const me = {
       id,
-      say(s) { if (done) return; said.push(s); if (String(s).replace(/\[[^\]]*\]/g, '').trim()) kinds.push(false); v.say(s); },
+      say(s) { if (done) return; said.push(s); count(s); if (String(s).replace(/\[[^\]]*\]/g, '').trim()) kinds.push(false); v.say(s); },
+      tally: () => ({ chars, secs }),
       // A filler (fillers given: Hydra's server voice), once, before anything of the answer.
       beat() {
         if (done || filled || said.length || heard || !fillers?.length) return false;
         filled = true;
         lastFiller = pickFiller(lastFiller, fillers);
-        kinds.push(true);
+        kinds.push(true); count(lastFiller);
         log('speech_beat', { id, ms: Date.now() - t0, filler: true });
         v.say(lastFiller);
         return true;
@@ -250,7 +256,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
       // A progress line or an ask said in the turn (voiceturn.mjs): allowed after the answer began, never once it ended.
       progress(line, kind = 'progress') {
         if (done || !String(line ?? '').trim()) return false;
-        kinds.push(true);
+        kinds.push(true); count(line);
         log('speech_beat', { id, ms: Date.now() - t0, [kind]: true });
         v.say(line);
         return true;
@@ -264,6 +270,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         if (done) return;
         if (!heard) { heard = true; log('speech_first_audio', { id, provider: 'voicestudio', ms: Date.now() - t0 }); if (local && !local.ok) checkLocal(); } // working again: refresh the panel's status
         const filler = kinds.shift() === true;
+        secs += pcm.byteLength / 2 / (rate || 24_000);
         emit({ kind: 'speech', id, rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'), ...(filler ? { filler: true } : {}) });
       },
       onEnd: () => finish(true),
@@ -324,15 +331,18 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     let ended = false, tries = 0, v = null, heard = false, done = false, beat = false, t0 = Date.now();
     // The face follows the voice: a sentence whose feeling differs from the last one's (speech.mjs cueFeel) is marked
     // with where it starts, in characters spoken so far (cues left out); the overlay times it by the audio played.
-    let spoken = 0, feel = null;
+    let spoken = 0, feel = null, secs = 0;
     const mark = (s) => {
       const f = cueFeel(s);
       if (f !== feel) { feel = f; emit({ kind: 'speech', id, feel: f, at: spoken }); }
       spoken += s.replace(/\[[^\]]*\]\s*/g, '').length + 1;
     };
+    const play = (rate, pcm) => { secs += (typeof pcm === 'string' ? Buffer.byteLength(pcm, 'base64') : pcm.length) / 2 / (Number(rate) || 24_000); emit({ kind: 'speech', id, rate, pcm }); };
     const me = {
       id,
       say(s) { if (done) return; mark(s); said.push(s); v.say(s); },
+      // tally(): characters handed on (spoken, the beat's too) and seconds of audio given so far.
+      tally: () => ({ chars: spoken, secs }),
       /** Something slow is starting: a short beat, unless it's already said something. */
       beat() {
         if (done || beat || said.length || heard) return false;
@@ -341,8 +351,8 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         if (!shippedBeat && !chunks) { me.say(phrase); return true; }
         log('speech_beat', { id, ms: Date.now() - t0 });
         spoken += phrase.length + 1; // played ahead of the reply, so the feelings after it start later
-        if (shippedBeat) emit({ kind: 'speech', id, rate: shippedBeat.rate, pcm: shippedBeat.pcm });
-        else for (const pcm of chunks) emit({ kind: 'speech', id, rate: P.play ?? P.rate, pcm });
+        if (shippedBeat) play(shippedBeat.rate, shippedBeat.pcm);
+        else for (const pcm of chunks) play(P.play ?? P.rate, pcm);
         return true;
       },
       // A progress line or an ask said in the turn (voiceturn.mjs): allowed after the answer began, never once it ended.
@@ -371,7 +381,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         onAudio: (pcm) => {
           if (done) return;
           if (!heard) { heard = true; if (m !== model) model = m; log('speech_first_audio', { id, model: m, ms: Date.now() - t0 }); }
-          emit({ kind: 'speech', id, rate: P.play ?? P.rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64') });
+          play(P.play ?? P.rate, Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'));
         },
         onEnd: () => finish(true),
         onError: async (err) => {

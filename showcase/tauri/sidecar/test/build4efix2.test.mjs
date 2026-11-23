@@ -99,7 +99,7 @@ function piece(from, to, names, st) {
   const c = fakeClock();
   const sent = [];
   const V = { id: 's1', progress: () => true };
-  const st = { yesNoOpen: new Map(), turnVoice: V, voiceBusy: false, voiceEndsAt: 0, askTake: null, send: (m) => sent.push(m.type),
+  const st = { power: { asleep: false }, yesNoOpen: new Map(), turnVoice: V, voiceBusy: false, voiceEndsAt: 0, askTake: null, send: (m) => sent.push(m.type),
     Date: { now: c.now }, setTimeout: (f, ms) => c.setTimer(f, ms), clearTimeout: (h) => h && c.clearTimer(h) };
   const { askAudio, askArm, askTakeEnd } = piece('function askAudio(secs) {', 'function showAsk(', ['askAudio', 'askArm', 'askTakeEnd'], st);
   const ask = (id) => { const a = trackAsk({ id, route: 'overlay', question: 'Can I open ui.elevenlabs.io?', choices: true, voice: V, resolve: () => {}, ...c }); st.yesNoOpen.set(id, { a, voice: V }); return a; };

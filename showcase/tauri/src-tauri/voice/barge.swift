@@ -110,6 +110,10 @@ enum TriggerTest {
         let got = InputDevice.firstOpening(InputDevice.tries(picked: nil, current: 3, builtIn: 4)) { d -> AudioDeviceID? in tried.append(d); return d == nil ? nil : d }
         check("the mic tries the next one when the system's choice fails", got == 3 && tried == [nil, 3])
         check("a picked mic is the only one it tries", InputDevice.firstOpening(InputDevice.tries(picked: 7, current: 3, builtIn: 4)) { d -> AudioDeviceID? in d == 7 ? nil : d } == nil)
+        // An ask's cancel closes only the take the ask opened; Esc, Stop and sleep close any take.
+        check("an ask's cancel closes the ask's take", Voice.cancels(onlyAsk: true, askTake: true))
+        check("an ask's cancel never closes the owner's take", !Voice.cancels(onlyAsk: true, askTake: false))
+        check("a plain cancel closes any take", Voice.cancels(onlyAsk: false, askTake: false) && Voice.cancels(onlyAsk: false, askTake: true))
         check("clap-to-talk off still wakes from sleep", Trigger.decide(.clap, asleep: true, speaking: false, clapTalk: false, phrase: false, barge: false) == .wake)
 
         // The talk detector. "Playback" is Hydra's voice as it reaches the mic after echo cancellation (about 25 dB

@@ -1004,7 +1004,7 @@ final class Voice {
             if now - listenAt > Self.maxSession { end("max length"); finish() }
         case .handsFree:
             // Pressing again switches to push-to-talk; letting go then sends.
-            if chord && !prevChord && !blocked { phase = .holding; releasedAt = nil; return }
+            if chord && !prevChord && !blocked { phase = .holding; releasedAt = nil; askTake = false; return }
             let quiet = now - max(heardAt, voiceAt)
             // Steady sound in the room (a fan, music) keeps the level up, so words that stopped coming end it too.
             if !best.isEmpty && (quiet > Self.pauseEnds || now - heardAt > Self.wordsEnd) { end(quiet > Self.pauseEnds ? "pause" : "no new words"); finish() }
@@ -1045,6 +1045,7 @@ final class Voice {
 
     private func arm(_ now: Double) {
         phase = .armed
+        askTake = false
         nothingWait = Self.phraseWait
         chordAt = now
         heldAtArm = keysDown()
@@ -1074,6 +1075,11 @@ final class Voice {
     }
     /// The take a wake opens (via 'wake'): if it hears nothing, Hydra just stays awake, with no "I didn't hear anything".
     private var quietEmpty = false
+    /// The take open now is one an ask opened (listen via 'ask'): only that one is closed by the ask's cancel (only
+    /// "ask"). Any other take (the owner's keys, a clap, the phrase) clears it, as does the owner taking this one over.
+    private var askTake = false
+    /// Whether a cancel closes the take open now: an ask's cancel (onlyAsk) only the take an ask opened.
+    static func cancels(onlyAsk: Bool, askTake: Bool) -> Bool { !onlyAsk || askTake }
     private func showListening(_ mode: String, _ now: Double, via: String) {
         listenAt = now; heardAt = now; voiceAt = now
         takeBands = true
@@ -1092,7 +1098,7 @@ final class Voice {
         let cursor = Self.cursorShows(via: via) && !wave.off
         if cursor { wave.show() } else { wave.hide() }
         // wave: the cursor shows the listening, so the app shows no listening bubble.
-        emit(["type": "state", "state": "listening", "mode": mode, "wave": cursor])
+        emit(["type": "state", "state": "listening", "mode": mode, "wave": cursor, "ask": askTake])
         if !best.isEmpty { emit(["type": "partial", "text": best]) }
     }
 
@@ -1126,7 +1132,7 @@ final class Voice {
         stopAudio()
         finishTimer?.invalidate(); finishTimer = nil
         rec?.cancel(); rec = nil
-        phase = .idle
+        phase = .idle; askTake = false
         woke = false; wakeCooldownUntil = uptime() + Self.wakeCooldown
         let text = best.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { wave.hide() } else { wave.awaitAnswer() }
@@ -1161,7 +1167,7 @@ final class Voice {
         stopAudio()
         rec?.cancel(); rec = nil
         finishTimer?.invalidate(); finishTimer = nil
-        phase = .idle
+        phase = .idle; askTake = false
         woke = false; wakeCooldownUntil = uptime() + Self.wakeCooldown
         reportEmpty = false
         ink.clear()
@@ -1172,17 +1178,19 @@ final class Voice {
     /// The shell saw ⌃⌥S: that ⌃⌥ was a shortcut, not a request to talk.
     /// Start listening hands-free without a key press (after an area snap). Ends on a pause or a tap.
     /// via: what opened it (the cue plays for an orb tap, not for auto-listen or the take after a wake).
-    func listenNow(wait: Double? = nil, via: String = "listen") {
+    func listenNow(wait: Double? = nil, via: String = "listen", ask: Bool = false) {
         if phase == .wake { stopWake() }
         guard phase == .idle else { return }
         arm(uptime())
+        askTake = ask
         nothingWait = min(15, max(3, wait ?? 8))
         phase = .handsFree
         blocked = true // the snap shortcut's keys may still be held: don't read them as a tap
         showListening("handsfree", uptime(), via: via)
     }
 
-    func externalCancel() {
+    func externalCancel(onlyAsk: Bool = false) {
+        guard Self.cancels(onlyAsk: onlyAsk, askTake: askTake) else { return }
         afterVoiceGen += 1 // a take still waiting for Hydra's voice (listenAfterVoice) never opens
         if phase == .armed || phase == .holding || phase == .handsFree { cancel() }
         blocked = true
@@ -1315,6 +1323,7 @@ final class Voice {
         // The take's own wait for words, as a key press gives it (an earlier listenNow may have left 3 s).
         nothingWait = Self.phraseWait
         phase = .handsFree
+        askTake = false
         chordAt = now
         best = rest
         showListening("wake", now, via: "phrase")
@@ -1876,11 +1885,11 @@ Thread.detachNewThread {
     while let line = readLine() {
         guard let data = line.data(using: .utf8), let msg = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
         switch msg["cmd"] as? String {
-        case "cancel": DispatchQueue.main.async { voice.externalCancel() }
+        case "cancel": let onlyAsk = msg["only"] as? String == "ask"; DispatchQueue.main.async { voice.externalCancel(onlyAsk: onlyAsk) }
         case "listen":
             let wait = msg["wait"] as? Double, via = (msg["via"] as? String).flatMap { ["orb", "wake"].contains($0) ? $0 : nil } ?? "listen"
-            let after = msg["afterVoice"] as? Bool == true
-            DispatchQueue.main.async { if after { voice.listenAfterVoice(wait: wait, via: via) } else { voice.listenNow(wait: wait, via: via) } }
+            let after = msg["afterVoice"] as? Bool == true, ask = msg["via"] as? String == "ask"
+            DispatchQueue.main.async { if after { voice.listenAfterVoice(wait: wait, via: via) } else { voice.listenNow(wait: wait, via: via, ask: ask) } }
         case "finish": DispatchQueue.main.async { voice.externalFinish() }
         // Hydra's cues (cue.swift): the wake chime, and the soft loop while it works.
         case "cue": if let n = msg["name"] as? String, ["wake", "listen"].contains(n) { DispatchQueue.main.async { Cue.play(n) } }

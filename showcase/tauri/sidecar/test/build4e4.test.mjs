@@ -30,7 +30,7 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
   const run = (asleep, why) => {
     const sent = [], uis = [], web = [], said = [];
     vm.runInNewContext(block, {
-      asleep, why, wakeActions, Date, logLine() {}, voiceConfig() {}, menu() {}, interruptQuietly() {}, speech: { stop() {} },
+      asleep, why, wakeActions, Date, logLine() {}, voiceConfig() {}, menu() {}, interruptQuietly() {}, asksAsleep() {}, speech: { stop() {} },
       send: (m) => sent.push(m), ui: (m) => uis.push(m), pushWeb: (m) => web.push(m), speakLine: (t) => said.push(t),
     });
     return JSON.parse(JSON.stringify({ sent, uis, web, said })); // out of the vm's realm

@@ -253,10 +253,13 @@ export function planFold(messages, { trigger, scale = 1, foldCap = Infinity }) {
   const requests = messages.map((m, i) => (i >= start && isRequestMsg(m) ? i : -1)).filter((i) => i >= 0);
   if (requests.length < 3) return { ok: false, reason: 'fewer than three requests' };
   const all = requests.slice(1, -1), open = all.filter((r) => !partsAsk(messages, r, start));
-  // The question guard moves the cut back a request or two; when it blocks every cut (replies that keep ending on a
-  // question) it gives way, so the chat still folds.
+  // The question guard moves the cut back a request or two; when what it leaves is no fold (none, too little to fold, or
+  // a kept part still at the trigger: replies that keep ending on a question after a plain one early on) it gives way,
+  // so the chat still folds (it guards the newest exchanges, never the whole chat).
   const newest = (list) => { let c = -1; for (const r of list) if (est(messages.slice(r)) >= keep) c = r; return c; };
-  const cuts = newest(open) >= 0 ? open : all;
+  const guarded = newest(open);
+  const folds = (c) => c >= 0 && est(messages.slice(start, c)) >= min && est(messages.slice(c)) < trigger;
+  const cuts = folds(guarded) ? open : all;
   let cut = newest(cuts);
   if (cut < 0) return { ok: false, reason: 'too little to fold yet' };
   // Over the cap: the newest cut whose slice fits under it and is still worth a fold. None both: the smallest slice

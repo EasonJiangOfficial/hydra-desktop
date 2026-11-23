@@ -173,8 +173,27 @@ export function parseKey(combo) {
   return { mods, key: k === 'enter' ? 'return' : k === 'backspace' ? 'delete' : k };
 }
 /** A key step that deletes (delete or forward delete, with any modifiers): what's selected in Mail, Notes, Reminders,
- *  Finder… goes. Tags the plan's ask as a deletion, so Approve all never runs it unasked. */
-export const deletesKey = (combo) => ['delete', 'forwarddelete'].includes(parseKey(combo)?.key);
+ *  Finder… goes. Also the Cocoa text chords that delete as those keys do: ctrl+h (delete back), ctrl+d (delete forward),
+ *  ctrl+k (delete to the end of the line). Tags the plan's ask as a deletion, so Approve all never runs it unasked. */
+export const deletesKey = (combo) => {
+  const p = parseKey(combo);
+  if (!p) return false;
+  if (p.key === 'delete' || p.key === 'forwarddelete') return true;
+  return p.mods.has('ctrl') && !p.mods.has('cmd') && ['h', 'd', 'k'].includes(p.key);
+};
+/** Steps that lose what's there (act_in_app's plan, draw's typing): a delete key or chord (deletesKey), or after a
+ *  select-all (cmd+a) anything that types over it, pastes over it, cuts it or fills a field. Tags the ask a deletion. */
+export function stepsLose(steps) {
+  let all = false;
+  for (const s of steps ?? []) {
+    const key = s?.do === 'key' ? parseKey(s.key) : null;
+    if (key && deletesKey(s.key)) return true;
+    const cuts = !!key && key.mods.has('cmd') && key.key === 'x';
+    if (all && (['type', 'fill', 'set'].includes(s?.do) || cuts || (key && (isPasteKey(s.key) || keyChar(s.key))))) return true;
+    if (key && key.mods.has('cmd') && key.key === 'a') all = true;
+  }
+  return false;
+}
 export function riskyKey(combo) {
   const p = parseKey(combo);
   if (!p || !p.mods.has('cmd')) return null;
@@ -295,7 +314,9 @@ const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) 
   const first = name.split(/\s+/)[0];
   return [name, first, dir, ...(dir && name ? [`${dir}/${name}`, `${dir}/${first}`] : [])].filter(Boolean);
 });
-const PASSWORD_APPS = /^(1password( \d+)?|bitwarden|lastpass|dashlane|keeper( password manager)?|keepassxc|keepassium|strongbox|enpass|proton pass|nordpass|roboform|passwords|keychain access|secrets)$/i;
+// Password managers and 2FA code apps, with a Beta, Nightly, Desktop or version after the name ("1Password Beta",
+// "Authy Desktop", "Secrets 4"). ponytail: names from memory, not read off a Mac; add any the owner uses.
+const PASSWORD_APPS = /^(?:1password|bitwarden|lastpass|dashlane|keeper(?: password manager)?|keepass\w*|keeweb|macpass|kypass|minikeepass|strongbox|enpass|proton pass|nordpass|roboform|passwords|keychain access|secrets|codebook|buttercup|padloc|psono|passbolt|sticky password|myki|authy|(?:google |microsoft )?authenticator|2fas(?: auth)?|ente auth|step two|otp auth|raivo(?: otp)?|aegis)(?:[ -](?:beta|nightly|desktop|\d+(?:\.\d+)*))*$/i;
 /** A password manager (its window shows sign-ins): bringing it forward asks under Approve all too (tools.mjs). */
 export const isPasswordApp = (app) => PASSWORD_APPS.test(String(app ?? '').trim().replace(/\.app$/i, ''));
 export function checkWindow(win, home, { viewers = true } = {}) {

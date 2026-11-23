@@ -316,7 +316,8 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         Some("state") => {
             to_overlays(app, &ui);
             // mode: what opened a take (hold, handsfree, wake): a phrase take while Hydra thinks adds to the turn.
-            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state"), "mode": msg.get("mode") }));
+            // ask: the take an ask opened (listen via ask), so only that one is closed when the ask ends.
+            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state"), "mode": msg.get("mode"), "ask": msg.get("ask") }));
         }
         // The orb's spectrum (W5 contract 5), straight to the Hydra window (at most 30 a second, from the helper).
         Some("bands") => { if let Some(p) = bands_push(&msg) { hydra::push(app, &p); } }

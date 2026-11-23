@@ -138,7 +138,17 @@ function trackReply(msg) {
     replyPush(true); replyNow = null;
   }
 }
-function setPaused(on) { voicePaused = !!on; send({ type: 'ui', msg: { kind: 'voice_pause', on: voicePaused } }); nativeSpeech({ paused: voicePaused }); pushWeb({ paused: voicePaused }); }
+// The owner's own pause: while it lasts, a yes/no's question still to play hasn't played (no take opens for it, no
+// word answers it), and it plays that much later.
+let pausedAt = 0;
+function setPaused(on) {
+  on = !!on;
+  if (on !== voicePaused) {
+    const t = Date.now();
+    if (on) pausedAt = t; else if (voiceEndsAt > pausedAt) voiceEndsAt += t - pausedAt;
+    for (const [id, w] of yesNoOpen) { w.a.hold(on, t); if (!on && w.a.voiced && !w.took) askArm(id, w); }
+  }
+  voicePaused = on; send({ type: 'ui', msg: { kind: 'voice_pause', on: voicePaused } }); nativeSpeech({ paused: voicePaused }); pushWeb({ paused: voicePaused }); }
 // Hydra's voice on the Mac plays in the voice helper (W5 contract 6): the same voice-processing engine as the mic, so
 // echo cancellation hears it as its own. The overlay still schedules every chunk (silently) for its timing and the
 // orb's level. Off (the overlay plays it) until the helper says it's up, and again if it couldn't play.
@@ -327,7 +337,7 @@ const power = createPower({
   working: () => busy || pending.size > 0,
   onChange: ({ asleep, why }) => {
     logLine('power', { asleep, why });
-    if (asleep) { speech.stop(); send({ type: 'listen_cancel' }); interruptQuietly('sleep'); }
+    if (asleep) { asksAsleep(); speech.stop(); send({ type: 'listen_cancel' }); interruptQuietly('sleep'); }
     voiceConfig();
     ui({ kind: 'power', asleep, sound: asleep && why === 'sleep_word' });
     menu();
@@ -1999,11 +2009,13 @@ function askArm(id, w) {
   // More of it still to play: a take opened too soon closes, and opens again once it has been said.
   if (askTake?.id === id) { askTakeEnd(id); w.took = false; }
   clearTimeout(w.timer); w.timer = null;
+  // Asleep (the sleep word, the menu): the mic never opens by itself.
   const at = w.a.heardAt;
-  if (at == null || !w.a.open || w.took) return;
+  if (at == null || !w.a.open || w.took || power.asleep) return;
   w.timer = setTimeout(() => {
     w.timer = null;
-    if (!w.a.open || !w.a.voiced || voiceBusy || askTake || w.took) return;
+    // Still heard (the owner's pause since holds it), still awake.
+    if (!w.a.open || !w.a.voiced || voiceBusy || askTake || w.took || power.asleep || w.a.heardAt == null) return;
     w.took = true; askTake = { id }; send({ type: 'listen', via: 'ask', wait: 8 });
   }, Math.max(0, at + 300 - Date.now()));
   w.timer.unref?.();
@@ -2012,7 +2024,16 @@ function askTakeEnd(id) {
   const w = yesNoOpen.get(id);
   if (w) { clearTimeout(w.timer); w.timer = null; }
   if (askTake?.id !== id) return;
-  askTake = null; send({ type: 'listen_cancel' });
+  // Only the ask's own take (the helper checks it opened it): never one of the owner's that began meanwhile.
+  askTake = null; send({ type: 'listen_cancel', only: 'ask' });
+}
+// Going to sleep: no ask's take opens or stays open, and a yes/no said aloud ends (a no) whether or not its turn could
+// cancel it (a memory ask has no signal): it was said for a turn the sleep stopped.
+function asksAsleep() {
+  for (const [id, w] of yesNoOpen) {
+    w.took = true; askTakeEnd(id);
+    if (w.a.voiced) { w.to({ kind: 'cancel_ask', id }); w.a.cancel(); }
+  }
 }
 function showAsk(opts, signal) {
   const id = `a${++askSeq}`;
@@ -2032,7 +2053,7 @@ function showAsk(opts, signal) {
       resolve: (v, by) => { if (by === 'voice' && askTake?.id === id) askTake = null; askTakeEnd(id); pending.delete(id); yesNoOpen.delete(id); pendingNow(); power.busy(); resolve(v); } });
     pending.set(id, (text) => a.answer(text));
     // Said aloud: a short take opens once its question has played (askAudio), so a bare "yes" is heard.
-    if (opts.choices) { yesNoOpen.set(id, { a, to, voice }); pendingNow(); }
+    if (opts.choices) { if (voicePaused) a.hold(true); yesNoOpen.set(id, { a, to, voice }); pendingNow(); }
     // Another route finished first (e.g. the OAuth callback server): close the input bubble.
     signal?.addEventListener('abort', () => { to({ kind: 'cancel_ask', id }); a.cancel(); }, { once: true });
   });
@@ -2706,6 +2727,9 @@ let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
 function onVoice(m) {
   if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') takeAt = Date.now(); stir(); pendingNow(); }
+  // A take the helper says isn't the ask's (the owner's own, begun as the ask's was sent, so the helper never opened that
+  // one): it isn't closed when the ask ends.
+  if (m.type === 'voice_state' && m.state === 'listening' && askTake && m.ask !== true) askTake = null;
   // Any take while Hydra works (the phrase, a clap, the talk keys, barge-in; C1): its words join the turn under way, never
   // a cancel. Hydra's voice holds while the owner talks and goes on after; a take that hears nothing leaves the turn as
   // it was. With nothing running, a take talks over the last reply: that stops its voice, and the next turn knows.

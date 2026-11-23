@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, deletesKey, isPasswordApp, isYes } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isPasswordApp, isYes, stepsLose } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -453,7 +453,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const [res, all] = await read().catch(async (err) => {
       if (t === 'front' || !/No matching window/.test(String(err?.message ?? err))) throw err;
       // Opening an app isn't a plain read: it asks first (owner's rule, DESIGN.md "Mac actions").
-      if (!(await confirm(`Open ${t} to read its window? It isn't open now.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+      // A password manager opened puts its vault on screen: asked under Approve all too.
+      if (!(await confirm(`Open ${t} to read its window? It isn't open now.`, ctx, { deletion: isPasswordApp(t) }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
       if (!(await launchApp(t, hands))) throw err;
       return read();
     });
@@ -871,7 +872,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       }
     }));
     // Replacing the clipboard loses what was on it and can stage a command: asked, with the whole text (R10-12).
-    for (const m of marks) if (m.kind === 'copy' && !(await confirm(`Put this on your clipboard (it replaces what's there)?\n${m.text}`))) throw new Error(`${userName} said no, so nothing was copied or drawn.`);
+    for (const m of marks) if (m.kind === 'copy' && !(await confirm(`Put this on your clipboard (it replaces what's there)?\n${m.text}`, undefined, { deletion: true }))) throw new Error(`${userName} said no, so nothing was copied or drawn.`);
     for (const b of beats) for (const m of b.marks) {
       if (m.kind === 'copy') { if (!(await toClipboard(m.text))) notes.push("Couldn't copy to the clipboard."); }
       else if (m.kind === 'open') { await tools.find((x) => x.name === 'open').execute({ target: m.url }); }
@@ -884,7 +885,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             : [{ do: 'click_at', x: m.at.rect[0] + m.at.rect[2] / 2, y: m.at.rect[1] + m.at.rect[3] / 2, global: true }, { do: 'type', text: m.text }];
         // Typing is a Mac action: asked every time, with the real app and the whole text (owner's rule).
         const where = await hands('locate', app.app ? `app:${app.app}` : 'front').then((r) => r?.window?.app ?? null, () => null);
-        if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`))) throw new Error(`${userName} said no, so nothing was typed.`);
+        // A fill replaces what the field holds (lost); a password manager brings its vault forward: asked under Approve all.
+        const loses = steps.some((st) => st.do === 'fill') || stepsLose(steps) || isPasswordApp(where) || isPasswordApp(app.app);
+        if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`, undefined, { deletion: loses }))) throw new Error(`${userName} said no, so nothing was typed.`);
         const r = await hands('act', JSON.stringify({ steps, ...app, wholeOk: ['plan'], planApp: where ?? app.app ?? '' }));
         if (r?.needsConfirm) throw new Error(`${actWords(r.why, where ?? app.app)} Nothing more was typed; use act_in_app for that.`);
         if (lastShot) lastShot.used = true;
@@ -1169,8 +1172,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const where = await hands('locate', spec).then((r) => r?.window?.app ?? null, () => null);
           const inWhat = where ?? (appName === 'front' ? 'the app in front' : appName);
           const question = `In ${inWhat}, every step I'd take:\n${stepsText(mapped, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`;
-          // A plain Delete key deletes what's selected (a message in Mail, a note): a deletion, with or without cmd.
-          if (!(await confirm(question, ctx, { deletion: notes.length > 0 || mapped.some((s) => s.do === 'key' && deletesKey(s.key)) }))) throw new Error(`${userName} said no, so nothing ran.`);
+          // A plain Delete key (or its ctrl chords) deletes what's selected (a message in Mail, a note), as typing over a
+          // select-all replaces it: a deletion. Steps in a password manager bring its vault forward: asked too.
+          if (!(await confirm(question, ctx, { deletion: notes.length > 0 || stepsLose(mapped) || isPasswordApp(inWhat) || isPasswordApp(appName) }))) throw new Error(`${userName} said no, so nothing ran.`);
           const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
@@ -1208,7 +1212,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               if (r.whole === 'plan') {
                 const left = plan.steps.slice(r.step);
                 // Tagged as the first ask was: the deletion's target changed with the app, so its yes doesn't carry.
-                const deletes = notes.length > 0 || left.some((s) => s.do === 'key' && deletesKey(s.key));
+                const deletes = notes.length > 0 || stepsLose(left) || isPasswordApp(r.app) || isPasswordApp(appName);
                 if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`, ctx, { deletion: deletes }))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
@@ -1251,7 +1255,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             catch (err) {
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
               if (plan.app && /No matching window/.test(String(err?.message ?? err))) {
-                if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
+                if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx, { deletion: isPasswordApp(plan.app) }))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
                 if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); return seen(res); }
               }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
@@ -1310,7 +1314,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         const spec = { do: what === 'switch' ? 'activate' : what, ...(real ? { app: String(real), exact: true, ...(Number.isInteger(pid) ? { pid } : {}) } : app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
         const name = owner ?? real;
         const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
-        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx, { deletion: what === 'force_quit' }))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
+        // Brought forward or laid out (shown), a password manager puts its vault on screen: asked under Approve all too.
+        const shows = ['switch', 'arrange'].includes(what) && isPasswordApp(name);
+        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx, { deletion: what === 'force_quit' || shows }))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
         agentChangesScreen();
         let res = await hands('manage', JSON.stringify(spec));
         if (res.needsConfirm) {
@@ -1428,8 +1434,10 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const isLink = /^[a-z][a-z0-9+.-]*:/i.test(t) && !/^[a-z]:\\/i.test(t);
         const shown = isLink ? t : /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t) ? checkRead(expand(t), HOME).path : `the app ${t}`;
         const question = ov.level === ASK ? ov.reason : `Open ${shown}${app ? ` in ${app}` : ''}?`;
-        // A hidden or app-data file (secret: it can hold sign-ins) asks under Approve all too.
-        if (!(await confirm(question, ctx, { deletion: !!ov.secret }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+        // A hidden or app-data file (secret: it can hold sign-ins), or a password manager opened (its vault on screen),
+        // asks under Approve all too.
+        const vault = isPasswordApp(app) || (!isLink && isPasswordApp(path.basename(t)));
+        if (!(await confirm(question, ctx, { deletion: !!ov.secret || vault }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
         agentChangesScreen();
         // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
         const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);

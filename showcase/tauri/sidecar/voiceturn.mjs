@@ -127,6 +127,7 @@ export const ASK_DEADLINE_MS = 60_000;
 // A clear yes or no: every word from its side's words (fillers, the action's verb, the question's own words), one strong
 // one among them (or a whole yes phrase: "do it", "go for it", "please do"), nothing from the other side.
 const YES_STRONG = new Set(['yes', 'yeah', 'yea', 'yep', 'yup', 'sure', 'ok', 'okay', 'alright', 'allow', 'absolutely', 'definitely', 'course', 'ahead']);
+const ACK = new Set(['ok', 'okay', 'alright']), THANKS = new Set(['thanks', 'thank', 'thx', 'cheers']);
 const YES_PHRASES = new Set(['do it', 'go for it', 'please do', 'go on', 'yes please']);
 const FILLER = ['it', 'please', 'hydra', 'um', 'uh', 'oh', 'well', 'that', 'thanks', 'thank', 'you', 'i', 'and', 'so', 'just', 'now', 'then', 'this', 'the', 'one'];
 const YES_WORDS = new Set([...YES_STRONG, ...FILLER, 'go', 'do', 'of', 'fine', 'thing', 'for', 'right', 'all', 'can', 'may', 'am', 'that\'s', 'is', 'good']);
@@ -148,7 +149,10 @@ export function spokenAnswer(text, question = '') {
   const obj = new Set(wordsOf(question).filter((x) => !YES_STRONG.has(x) && !NO_STRONG.has(x)));
   const fits = (set) => w.every((x) => set.has(x) || VERB_WORDS.has(x) || obj.has(x));
   const said = w.join(' ');
-  const yes = (w.some((x) => YES_STRONG.has(x)) || [...YES_PHRASES].some((p) => said === p || said.startsWith(`${p} `))) && fits(YES_WORDS);
+  // An acknowledgement ("okay thanks", "ok, thank you hydra") answers nothing: only a yes word beyond ok/okay/alright,
+  // or a yes phrase, says yes next to a thanks.
+  const thanked = w.some((x) => THANKS.has(x));
+  const yes = (w.some((x) => YES_STRONG.has(x) && !(thanked && ACK.has(x))) || [...YES_PHRASES].some((p) => said === p || said.startsWith(`${p} `))) && fits(YES_WORDS);
   const no = w.some((x) => NO_STRONG.has(x)) && fits(NO_WORDS);
   return yes && !no ? 'yes' : no && !yes ? 'no' : null;
 }
@@ -185,13 +189,21 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
   // Said aloud only when the voice took the question (it refuses once the turn's voice ended): an ask never said is
   // never answered by a spoken word, nor expires aloud.
   const line = spokenQuestion(question);
+  // What the voice still owed for the words said before the question (narration flushed just before it, the reply so
+  // far): its audio comes first, so the question's own audio is only what comes after that (voice.tally(): characters
+  // handed to the voice and seconds of audio it gave so far).
+  const before = choices && voice ? voice.tally?.() : null;
+  let owed = before ? Math.max(0, (Number(before.chars) || 0) / CHARS_PER_SEC - (Number(before.secs) || 0)) : 0;
   let voiced = !!(choices && voice) && voice.progress?.(line, 'ask') === true;
   let open = true, timer = null;
-  // Its question's audio (audio()): how much came after it was said, and when all the voice had queued ends playing.
+  // Its question's audio (audio()): how much of its own came, and when all the voice had queued ends playing.
   // ponytail: chunks carry no sentence marks, so "the question has played" is at least half its length in audio heard
-  // after it, and the queue's estimated end (chunk lengths from their arrival); a play report per line would be exact.
-  let got = 0, endsAt = null;
+  // after what was owed before it (both at a fixed speaking rate), and the queue's estimated end (chunk lengths from
+  // their arrival); a play report per line would be exact.
+  // holdFrom: the voice is paused (the owner's own pause): what was still to play then hasn't played.
+  let got = 0, endsAt = null, holdFrom = null;
   const needs = (line.length / CHARS_PER_SEC) * 0.5;
+  const held = (from, to) => { if (Number.isFinite(endsAt) && endsAt > from) endsAt += Math.max(0, to - from); };
   log('ask', { id, route, ...(choices ? { yesno: true } : {}), ...(voiced ? { spoken: true } : {}) });
   const done = (answer, how, by) => {
     if (!open) return false;
@@ -212,12 +224,25 @@ export function trackAsk({ id, route, question, choices = false, voice = null, d
     at: t0,
     question,
     /** A chunk of the turn's voice came after the question was said: secs long, the queue now ending at queueEnd. */
-    audio(secs, queueEnd) { if (!open || !voiced) return; got += Math.max(0, Number(secs) || 0); endsAt = queueEnd; },
+    audio(secs, queueEnd) {
+      if (!open || !voiced) return;
+      const s = Math.max(0, Number(secs) || 0), earlier = Math.min(owed, s);
+      owed -= earlier; got += s - earlier; endsAt = queueEnd;
+    },
     /** The voice was held (the owner talking) from `from` to `to`: what was still to play ends that much later. */
-    held(from, to) { if (Number.isFinite(endsAt) && endsAt > from) endsAt += Math.max(0, to - from); },
+    held,
+    /** The owner's own pause (on) from `at`, or its end (off): while it lasts, what was still to play hasn't played. */
+    hold(on, at = now()) {
+      if (on) { holdFrom ??= at; return; }
+      if (holdFrom == null) return;
+      held(holdFrom, at); holdFrom = null;
+    },
     /** When its question finished playing (null while it hasn't): only a take that started after it answers it by
      *  voice (askForTake), and the ask's own take opens then. */
-    get heardAt() { return voiced && got >= needs && Number.isFinite(endsAt) ? endsAt : null; },
+    get heardAt() {
+      if (!voiced || got < needs || !Number.isFinite(endsAt)) return null;
+      return holdFrom != null && endsAt > holdFrom ? null : endsAt;
+    },
     /** The turn's voice ended: no spoken answer, nothing said at its expiry. */
     unvoice() { voiced = false; },
     /** text: what the screen sent ('yes' for the first choice, null for the rest or a cancel); by: 'voice' when said. */

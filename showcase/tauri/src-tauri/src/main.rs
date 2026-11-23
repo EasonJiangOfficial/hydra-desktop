@@ -1965,8 +1965,8 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         Some("talk_toggle") => to_voice(app, &json!({ "cmd": "toggle" })),
         // Roamies is answering or speaking: the wake word waits, so it can't wake itself.
         Some("wake_hold") => to_voice(app, &json!({ "cmd": "wake_hold", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
-        // Esc while it's listening: drop the take.
-        Some("listen_cancel") => to_voice(app, &json!({ "cmd": "cancel" })),
+        // Esc while it's listening: drop the take. only "ask": just the take an ask opened, never the owner's own.
+        Some("listen_cancel") => to_voice(app, &json!({ "cmd": "cancel", "only": msg.get("only").cloned().unwrap_or(Value::Null) })),
         // An orb tap during a take: send what was heard (Esc cancels it, above).
         Some("listen_finish") => to_voice(app, &json!({ "cmd": "finish" })),
         // Notch mode: the capsule at the notch shows the listening, so the pill by the cursor stays off.
