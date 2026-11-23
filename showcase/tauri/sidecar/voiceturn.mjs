@@ -36,6 +36,8 @@ export function createSpokenTrack({ now = Date.now, cps = CHARS_PER_SEC } = {}) 
     },
     finished() { if (cur) cur.finished = true; },
     get id() { return cur?.id ?? null; },
+    /** The answer's own audio is playing (a progress line does not count: filler is not the answer). */
+    get playing() { return !!cur && !cur.finished && cur.first != null && cur.secs > 0; },
     interrupted() {
       const s = cur;
       cur = null; last = s;
@@ -120,6 +122,16 @@ export function wakeActions(why) {
  *  the progress lines: a sound with no trigger from him was "sounds play randomly". */
 export const ownTurn = ({ text, news = null, intro = false }) => !news && !intro && !String(text ?? '').startsWith('(');
 export const pendingWanted = ({ voice, busy, answerSaid, listening, asking }) => !!voice && !!busy && !answerSaid && !listening && !asking;
+
+/** One phase for every orb. Checked top-down: the first match wins. An approval wait is asking, never working. */
+export function phaseOf({ asleep = false, listening = false, asking = false, busy = false, answerSaid = false, playing = false } = {}) {
+  if (asleep) return 'asleep';
+  if (listening) return 'listening';
+  if (asking) return 'asking';
+  if (busy && !answerSaid) return 'working';
+  if ((busy && answerSaid) || playing) return 'talking';
+  return 'idle';
+}
 
 /** Whether a take that starts while Hydra works adds on (owner: "speech added while Hydra thinks is added onto the
  *  prompt, never cancelled"): every take, whatever opened it (the phrase, a clap, the talk keys, barge-in). */

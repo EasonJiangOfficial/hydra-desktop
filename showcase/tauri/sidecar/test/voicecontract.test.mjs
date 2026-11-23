@@ -30,7 +30,7 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
 {
   // clapSensitivity (W6): null until Hydra sends one, so the Mac keeps its own (an older server sends none).
   assert.deepEqual(SETTINGS_DEFAULTS, { wakePhrase: 'Hey Hydra', sleepWord: null, clapSensitivity: null, model: 'claude-opus-5-5', effortLive: 'low', effortRoutine: 'medium', approveAll: false }, 'the contract\'s defaults');
-  assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
+  assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'gpt-6.2-astra', 'gpt-6.2-sol', 'grok-4.7']);
   const snake = cleanSettings({ settings: { wake_phrase: '  Okay   Computer ', sleep_word: 'Goodnight Hydra', model: 'claude-sonnet-5-5', effort_live: 'high', effort_routine: 'low' } });
   assert.deepEqual(snake, { wakePhrase: 'Okay Computer', sleepWord: 'Goodnight Hydra', clapSensitivity: null, model: 'claude-sonnet-5-5', effortLive: 'high', effortRoutine: 'low', approveAll: false });
   assert.deepEqual(cleanSettings({ settings: { wakePhrase: 'Hey Jarvis', model: 'claude-haiku-5-5', effortLive: 'medium' } }).model, 'claude-haiku-5-5', 'camelCase too');
@@ -324,7 +324,7 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
     assert.doesNotMatch(src, /'claude-(?:opus|sonnet|haiku)-5-5'/, `${name} hard-codes no model (agentsettings.mjs holds the contract's default)`);
   }
   assert.match(side, /const FAST = \{ openai: 'gpt-6-luna', gemini: 'gemini-3\.8-flash' \};/, 'no stale Haiku default for Claude');
-  assert.match(side, /const pick = hydraModelPick\(\{ provider: config\.provider, model: config\.model, want: agentSettings\.current\.model, routed, canRun \}\);/, 'the local agent runs Hydra\'s model (hydraModelPick: behavior in voiceturn.test.mjs)');
+  assert.match(side, /const pick = hydraModelPick\(\{ provider: config\.provider, model: config\.model, want: agentSettings\.current\.model, routed, canRun, chatgpt: !!oauthOn\.get\('openai'\) \}\);/, 'the local agent runs Hydra\'s model (hydraModelPick: behavior in voiceturn.test.mjs)');
   assert.match(side, /const setting = hydra \? agentSettings\.current\.effortLive : config\.efforts\?\.\[slot\]/, 'and its live effort');
   assert.match(side, /const \{ model, thinking \} = brainFor\(agentSettings\.current, turn\.surface\);/, 'relay turns too');
   assert.match(side, /agentSettings\.start\(\);/, 'read when paired');
@@ -345,7 +345,7 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');
   assert.match(side, /const progress = turnProgress = startProgress\(\{ voice: own && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \|\| voiceBusy,/, 'a filler after 1.1 s and progress lines, never muted (startProgress: behavior in voiceturn.test.mjs, build4e1.test.mjs)');
   assert.match(side, /if \(!voiceMuted\) voice\?\.beat\(\); \/\/ a tool starts/, 'or when a tool starts');
-  assert.match(side, /listensAfter\(lastReply, true\)/, 'a follow-up window after every answer');
+  assert.match(side, /listensAfter\(lastReply, !!config\.listenEvery\)/, 'a follow-up window after a question, or after every reply when that switch is on');
   assert.match(side, /const tts = \(\) => \(MAC && hydraKey && !hydraRevoked \? TTS\.voicestudio :/, 'paired: every sentence from /api/voice/tts');
   assert.match(side, /function nativeSpeech\(m\) \{ if \(nativeVoice\(\)\) send\(\{ type: 'voice_play', msg: m \}\); \}/, 'played by the voice helper');
   assert.match(side, /pushWeb\(\{ reply: \{ id: replyNow\.id, text: stripEmotes\(replyNow\.text\), final \} \}\);/, 'no emote tags in the window');

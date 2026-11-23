@@ -31,7 +31,7 @@ import { HYDRA_ORIGIN, createHydraTools, delay, hydraApi, pairDevice, showTool }
 import { askSummary, authStale, connectorGroup, connectorLevel, createRelay, relaySession, toolFilter, turnPrompt } from './relay.mjs';
 import { LIMITS, subturnResultSchema } from './relayschema.mjs';
 import { SAFE, deletesCall } from './safety.mjs';
-import { SETTINGS_DEFAULTS, brainFor, createSettingsWatch } from './agentsettings.mjs';
+import { SETTINGS_DEFAULTS, brainFor, createSettingsWatch, gptRoute } from './agentsettings.mjs';
 import { FinalText } from './reply.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -228,7 +228,11 @@ export function createBrainTurn({ hydraTools, api = null, executable, settings =
       ...(api && (turn.surface === 'web' || turn.surface === 'phone') && !turn.parentTurnId && turn.claimId
         ? [askMacTool({ api, turn, alive, signal, log, deadline: h.deadline, ...askMac })] : []),
     ];
-    const { model, thinking } = brainFor(await Promise.resolve().then(settings).catch(() => SETTINGS_DEFAULTS), turn.surface);
+    const picked = brainFor(await Promise.resolve().then(settings).catch(() => SETTINGS_DEFAULTS), turn.surface);
+    const route = gptRoute({ model: picked.model, server: true });
+    const model = route.model, thinking = picked.thinking;
+    if (route.note) emit({ type: 'text', delta: `${route.note} ` });
+    if (route.fallback) emit({ type: 'model', model, effort: thinking || 'low', fallback: route.fallback });
     const agent = new ClaudeCodeAgent({
       model, system: BRAIN_SYSTEM, tools, maxTurns: 24, thinking,
       executable, env, cwd, signal, connectors: true, disallowedTools: BUILTIN_TOOLS,

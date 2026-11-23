@@ -336,7 +336,7 @@ export function stepsText(steps, { clipboard } = {}) {
   return steps.map((s, i) => `${i + 1}. ${one(s)}`).join('\n');
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null, readClipboard = defaultClipboard, remote = () => false }) {
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null, readClipboard = defaultClipboard, remote = () => false, onNotes = () => {} }) {
   // Relative paths start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   let axNudged = 0;
@@ -960,6 +960,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         if (ctx?.signal?.aborted) return stopped();
         const ids = parts.assign(seg);
         for (const p of ids) ink.fresh.add(p);
+        const drawnNotes = seg.flatMap((b) => b.marks.filter((m) => ['note', 'card', 'clip', 'list'].includes(m.kind)));
+        if (drawnNotes.length) onNotes(drawnNotes, id);
         drawn.push(...ids.map((p) => [p, parts.get(p)]));
         if (opts.fade) for (const p of ids) loose.add(p);
         // Only a few cards stay up at once (the overlay closes the oldest as each new one is drawn), so the oldest are

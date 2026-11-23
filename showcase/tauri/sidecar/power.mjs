@@ -63,8 +63,21 @@ export function cleanSleepWord(raw) {
  * talked(): the owner spoke or typed to it (wakes it if asleep, and restarts the 5 minutes).
  */
 /** working(): a turn or an ask is open; idle sleep never comes then, and the 5 minutes count from when it ends. */
-export function createPower({ onChange, working = () => false, now = () => Date.now(), setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (h) => clearTimeout(h), sleepAfterMs = SLEEP_AFTER_MS } = {}) {
-  let asleep = false, last = now(), timer = null;
+export function createPower({ onChange, working = () => false, taking = () => false, now = () => Date.now(), setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (h) => clearTimeout(h), sleepAfterMs = SLEEP_AFTER_MS, confirmMs = 12_000 } = {}) {
+  let asleep = false, last = now(), timer = null, provisional = false, confirmTimer = null;
+  const clearConfirm = () => { if (confirmTimer) clearTimer(confirmTimer); confirmTimer = null; };
+  const armConfirm = () => {
+    clearConfirm();
+    if (!provisional || asleep) return;
+    confirmTimer = setTimer(() => {
+      confirmTimer = null;
+      if (!provisional || asleep) return;
+      if (taking() || working()) { armConfirm(); return; }
+      provisional = false;
+      set(true, 'unconfirmed');
+    }, confirmMs);
+    confirmTimer?.unref?.();
+  };
   const arm = () => {
     if (timer) clearTimer(timer);
     timer = asleep ? null : setTimer(check, Math.max(1000, last + sleepAfterMs - now()));
@@ -87,11 +100,18 @@ export function createPower({ onChange, working = () => false, now = () => Date.
   arm();
   return {
     get asleep() { return asleep; },
-    sleep: (why = 'asked') => set(true, why),
-    wake: (why = 'asked') => set(false, why),
-    talked() { last = now(); if (asleep) set(false, 'talk'); else arm(); },
+    sleep: (why = 'asked') => { provisional = false; clearConfirm(); return set(true, why); },
+    wake: (why = 'asked') => {
+      const ok = set(false, why);
+      // A typed message is a real wake. A clap, the phrase or a tap stays provisional until words arrive.
+      if (!asleep && why !== 'talk') { provisional = true; armConfirm(); } else { provisional = false; clearConfirm(); }
+      return ok;
+    },
+    /** The take ended. No words, and nothing else confirmed the wake: back to sleep, with no sound. */
+    takeEnded() { if (provisional && !working()) { provisional = false; clearConfirm(); set(true, 'unconfirmed'); } },
+    talked() { provisional = false; clearConfirm(); last = now(); if (asleep) set(false, 'talk'); else arm(); },
     /** Something is going on (a reply running, speech playing): the 5 minutes count from when it ends. */
     busy() { if (!asleep) { last = now(); arm(); } },
-    stop() { if (timer) clearTimer(timer); timer = null; },
+    stop() { if (timer) clearTimer(timer); timer = null; clearConfirm(); },
   };
 }

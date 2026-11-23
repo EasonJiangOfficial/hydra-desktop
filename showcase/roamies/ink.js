@@ -752,7 +752,7 @@
       // All of it; a long note goes wider rather than very tall.
       const narrow = wrapRows(m.text, 210 - 28, `500 13px ${MONO}`), w = narrow.length > 12 ? 320 : 210;
       const rows = w === 210 ? narrow : wrapRows(m.text, w - 28, `500 13px ${MONO}`), h = 40 + rows.length * 19;
-      await card(m, w, h, function (b, l, t, x, y, age) { b.fillStyle = colorOf(this, this.color); b.fillRect(x + 8, y + 8, w - 16, 3); wrapped(b, rows, x + 14, y + 32, 19, `500 13px ${MONO}`, TEXT, age / (0.3 + m.text.length * 0.025)); }, { bar: false, edge: true });
+      await card(m, w, h, function (b, l, t, x, y, age) { b.fillStyle = colorOf(this, this.color); b.fillRect(x + 8, y + 8, w - 16, 3); wrapped(b, rows, x + 14, y + 32, 19, `500 13px ${MONO}`, TEXT, age / (0.3 + m.text.length * 0.025)); }, { edge: true, title: 'note' });
       sfx('page');
     },
     // A mind map: the topic on the left, its branches beside it, each branch's points behind a +. A click on a branch
@@ -2096,7 +2096,7 @@
   const drawnBy = new Map(); // part → drawing id, for drawings that fade by themselves
   const deepParts = new Set(); // parts of a deep explanation: big cards, one at a time
   function fadeLater(id, sec) {
-    const mine = () => marks.filter((m) => m.alive && drawnBy.get(m.part) === id);
+    const mine = () => marks.filter((m) => m.alive && drawnBy.get(m.part) === id && !m.pinned && !['note', 'card', 'clip', 'list'].includes(m.kind));
     const tick = () => {
       const ms = mine();
       if (!ms.length) return;
