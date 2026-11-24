@@ -815,10 +815,25 @@ final class Voice {
     static func micWanted(allowed: Bool, take: Bool, wake: Bool, clap: Bool, barging: Bool, playingInMic: Bool) -> Bool {
         allowed && (take || wake || clap || barging || playingInMic)
     }
-    /// Someone may be talking over Hydra (a sustained rise over its voice, C7): energy alone never stops it. The recogniser
-    /// listens on this Mac (with the moment before, so the first word isn't lost) while Hydra goes on; enough words make it
-    /// a take (heardOverVoice), too few in BargeGate.window s and it ends quietly (endBarge).
+    /// Someone may be talking over Hydra. Energy alone never stops it. While Hydra speaks the recogniser is already
+    /// on (listenOverSpeech): any real word is the take. A wake phrase and a double clap are not the gate.
     private var gate = BargeGate()
+    /// The mic is already open for the reply. Start the recogniser at once so the owner's words are heard.
+    /// No wake phrase. No clap. Without echo cancellation Hydra would hear itself, so this waits for that only.
+    private func listenOverSpeech() {
+        guard bargeOn, !asleep, speaking, !dryRun, LiveTest.url == nil else { return }
+        guard phase == .idle || phase == .wake else { return }
+        guard hub.echoCancel else { return }
+        if phase == .wake { stopWake() }
+        guard phase == .idle else { return }
+        _ = gate.onset(now: uptime())
+        hub.remove("barge")
+        phase = .barge
+        best = ""; woke = false; bargeWoke = false; heardAt = uptime()
+        guard let r = makeRecognizer() else { gate.end(); phase = .idle; return }
+        rec = r; feed.set(r, preroll: true)
+        log("Hydra speaking: the mic is open, any words are the take")
+    }
     private func talkedOver() {
         guard Trigger.decide(.voice, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) == .take, phase == .idle || phase == .wake else { return }
         guard gate.onset(now: uptime()) == .check else { return }
@@ -1062,6 +1077,7 @@ final class Voice {
         }()
 
         syncMic(now)
+        if speaking { listenOverSpeech() }
 
         switch phase {
         case .idle:
@@ -1079,7 +1095,9 @@ final class Voice {
             if chord && !prevChord && !blocked { endBarge("the talk keys"); arm(now); return }
             if asleep || !bargeOn { endBarge("interrupting is off"); return }
             switch gate.tick(now: now) {
-            case .drop: endBarge("too few words in \(Int(BargeGate.window)) s")
+            case .drop:
+                if speaking { gate.rearm(now: now) }
+                else { endBarge("too few words in \(Int(BargeGate.window)) s") }
             case .take: bargeTake(best)
             default: break
             }

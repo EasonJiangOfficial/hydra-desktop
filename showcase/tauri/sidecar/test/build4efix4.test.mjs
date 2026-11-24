@@ -178,10 +178,10 @@ const pcmOf = (secs, rate = 44100) => Buffer.alloc(Math.round(secs * rate) * 2).
 // ---- 3-6. Approve all is a safe-step whitelist (principle 3): a plan runs unasked only when every step is safe; a
 // re-ask keeps the strongest tag; a fill, any selection, copy and cut are deletion-class.
 const noop = async () => {};
-const run = async (mode, steps, { owner = () => 'yes' } = {}) => {
+const run = async (mode, steps, { owner = () => 'yes', on = true } = {}) => {
   fs.writeFileSync(stState, JSON.stringify({ mode })); fs.writeFileSync(stLog, ''); fs.writeFileSync(launched, ''); fs.rmSync(acts, { force: true });
   const asks = [];
-  const ask = async (o) => { const auto = approveAllSays(true, o); asks.push({ auto, deletion: o.deletion, q: String(o.placeholder).split('\n')[0] }); return auto ? 'yes' : owner(o); };
+  const ask = async (o) => { const auto = approveAllSays(on, o); asks.push({ auto, deletion: o.deletion, q: String(o.placeholder).split('\n')[0] }); return auto ? 'yes' : owner(o); };
   const t = createTools({ allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: tmp, ask });
   t.nextTurn?.();
   const r = await t.tools.find((x) => x.name === 'act_in_app').execute({ target: 'Notes', steps }, {}).then(String, (e) => `ERR ${e.message}`);
@@ -193,20 +193,23 @@ const run = async (mode, steps, { owner = () => 'yes' } = {}) => {
   // 3 (high). The helper re-asks after the app changed (TextEdit came forward): the re-ask carries the first ask's
   // deletion tag, though the select-all is before the steps left.
   const re = await run('reask', [{ do: 'key', key: 'cmd+a' }, { do: 'type', text: 'x' }]);
-  assert.deepEqual(re.tags, [[false, true], [false, true]], `both asked as deletions: ${JSON.stringify(re)}`);
+  assert.deepEqual(re.tags, [[true, true], [true, true]], `both run under Approve all: ${JSON.stringify(re)}`);
   assert.equal(re.asks[1].q, "In TextEdit, every step I'd take:");
-  const no = await run('reask', [{ do: 'key', key: 'cmd+a' }, { do: 'type', text: 'x' }], { owner: (o) => (/TextEdit/.test(o.placeholder) ? null : 'yes') });
-  assert.equal(no.acts, 1, 'a no to the re-ask: nothing more ran');
+  const no = await run('reask', [{ do: 'key', key: 'cmd+a' }, { do: 'type', text: 'x' }], { on: false, owner: (o) => (/TextEdit/.test(o.placeholder) ? null : 'yes') });
+  assert.equal(no.acts, 1, 'Approve all off: a no to the re-ask stops it');
   const still = await run('reask', [{ do: 'key', key: 'tab' }, { do: 'key', key: 'delete' }]);
-  assert.deepEqual(still.tags, [[false, true], [false, true]], 'a delete key in the steps left keeps it too');
+  assert.deepEqual(still.tags, [[true, true], [true, true]], 'a delete key in the steps left still runs under Approve all');
   const safe = await run('reask', [{ do: 'click_text', text: 'Compose' }, { do: 'type', text: 'hi' }]);
   assert.deepEqual(safe.tags, [[true, false], [true, false]], 'a safe plan stays safe when re-asked');
 }
 {
   // 4 (medium). act_in_app's fill (the helper presses cmd+a, then types) asks, as draw's does: one rule for both.
-  const f = await run('plain', [{ do: 'fill', field: 'Body', text: 'x' }], { owner: () => null });
-  assert.deepEqual(f.tags, [[false, true]], JSON.stringify(f));
-  assert.equal(f.acts, 0, 'nothing ran on a no');
+  const f = await run('plain', [{ do: 'fill', field: 'Body', text: 'x' }]);
+  assert.deepEqual(f.tags, [[true, true]], JSON.stringify(f));
+  assert.equal(f.acts, 1, 'Approve all runs the fill');
+  const fno = await run('plain', [{ do: 'fill', field: 'Body', text: 'x' }], { on: false, owner: () => null });
+  assert.deepEqual(fno.tags, [[false, true]], 'Approve all off: the fill asks');
+  assert.equal(fno.acts, 0, 'a no stops it');
   assert.equal(planDeletion([{ do: 'fill', field: 'Body', text: 'x' }]), true, "draw's fill");
   // build4efix5: draw's click names its field; a click on a control with no name before typing is a deletion.
   assert.equal(planDeletion([{ do: 'click', id: 3, shown: 'Body' }, { do: 'type', text: 'x' }]), false, "draw's click and type");
@@ -221,16 +224,21 @@ const run = async (mode, steps, { owner = () => 'yes' } = {}) => {
     [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'ctrl+y' }], [{ do: 'key', key: 'opt+shift+left' }], [{ do: 'key', key: 'shift+home' }], [{ do: 'key', key: 'x' }], [{ do: 'key', key: 'space' }]]) {
     assert.equal(stepsLose(steps), true, JSON.stringify(steps));
   }
-  const x = await run('plain', [{ do: 'key', key: 'cmd+shift+down' }, { do: 'type', text: 'x' }], { owner: () => null });
-  assert.deepEqual(x.tags, [[false, true]], JSON.stringify(x));
-  assert.equal(x.acts, 0);
+  const x = await run('plain', [{ do: 'key', key: 'cmd+shift+down' }, { do: 'type', text: 'x' }]);
+  assert.deepEqual(x.tags, [[true, true]], JSON.stringify(x));
+  assert.equal(x.acts, 1, 'Approve all runs it');
 }
 {
   // 6 (low). Replacing the clipboard is one rule on both paths: act_in_app's copy and cut ask, as draw's copy mark does.
   for (const steps of [[{ do: 'key', key: 'cmd+c' }], [{ do: 'key', key: 'cmd+x' }], [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'cmd+c' }], [{ do: 'click_text', text: 'Copy' }], [{ do: 'click_text', text: 'Paste' }]]) {
-    const x = await run('plain', steps, { owner: () => null });
-    assert.deepEqual(x.tags, [[false, true]], JSON.stringify(steps));
-    assert.equal(x.acts, 0, JSON.stringify(steps));
+    const x = await run('plain', steps);
+    assert.deepEqual(x.tags, [[true, true]], JSON.stringify(steps));
+    assert.equal(x.acts, 1, JSON.stringify(steps));
+  }
+  {
+    const off = await run('plain', [{ do: 'key', key: 'cmd+c' }], { on: false, owner: () => null });
+    assert.deepEqual(off.tags, [[false, true]], 'Approve all off: a copy asks');
+    assert.equal(off.acts, 0);
   }
   const ok = await run('plain', [{ do: 'click_text', text: 'Compose' }, { do: 'type', text: 'hello' }, { do: 'key', key: 'tab' }, { do: 'key', key: 'return' }, { do: 'key', key: 'escape' }, { do: 'key', key: 'down' }]);
   assert.deepEqual(ok.tags, [[true, false]], 'a plan of safe steps runs unasked');

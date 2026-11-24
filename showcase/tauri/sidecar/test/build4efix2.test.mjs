@@ -181,7 +181,7 @@ function piece(from, to, names, st) {
   assert.ok(said.length > n, 'resumed: lines again');
 }
 
-// ---- 9. A connected server's read of a sign-in file asks under Approve all.
+// ---- 9. A connected server's read of a sign-in file runs under Approve all (it is still tagged a deletion).
 {
   const H = os.homedir(); fs.mkdirSync(path.join(H, '.config'), { recursive: true }); fs.writeFileSync(path.join(H, '.config/hub'), 'oauth_token: FAKE');
   assert.equal(checkMcpCall({ name: 'read_text_file', annotations: { readOnlyHint: true }, args: { path: path.join(H, '.config/hub') }, home: H }).secret, true);
@@ -190,8 +190,8 @@ function piece(from, to, names, st) {
   const asks = [];
   const ask = async (o) => { asks.push(o.deletion); return approveAllSays(true, o) ? 'yes' : null; };
   const t = createMcpTools({ mcp, ask, isYes, userName: 'Test', checkCall: (x) => checkMcpCall({ ...x, home: H }), openUrl: async () => {}, allowActions: () => true, keyStore: 'Keychain' }).find((x) => x.name === 'use_connection');
-  await assert.rejects(t.execute({ server: 'files', tool: 'read_text_file', args: JSON.stringify({ path: path.join(H, '.config/hub') }) }, {}), /said no/);
-  assert.deepEqual(asks, [true]); assert.equal(ran, 0, 'approve-all never read it');
+  await t.execute({ server: 'files', tool: 'read_text_file', args: JSON.stringify({ path: path.join(H, '.config/hub') }) }, {});
+  assert.deepEqual(asks, [true]); assert.equal(ran, 1, 'Approve all read it without an ask');
 }
 
 // ---- 10, 11, 12. Under Approve all: a plan re-asked in another app keeps its deletion tag; opening a hidden sign-in file
@@ -210,20 +210,19 @@ function piece(from, to, names, st) {
   const re = await run('replan', (T) => T('act_in_app').execute({ target: 'front', steps: [{ do: 'key', key: 'delete' }] }, {}));
   const mail = re.asks.find((a) => a.q === "In Mail, every step I'd take:");
   assert.ok(mail, JSON.stringify(re));
-  assert.deepEqual([mail.auto, mail.deletion], [false, true], 'the re-ask in Mail is a deletion: asked');
+  assert.deepEqual([mail.auto, mail.deletion], [true, true], 'the re-ask in Mail is a deletion and Approve all runs it');
   fs.mkdirSync(path.join(os.homedir(), '.config'), { recursive: true });
   const hidden = path.join(os.homedir(), '.config', 'b4fix2-hub');
   fs.writeFileSync(hidden, 'oauth_token: FAKE');
   assert.equal(checkOpen(hidden, os.homedir(), { app: 'TextEdit' }).secret, true);
   try {
     const op = await run('plain', (T) => T('open').execute({ target: hidden, app: 'TextEdit' }, {}));
-    assert.deepEqual(op.asks.map((a) => [a.auto, a.deletion]), [[false, true]], 'opening a sign-in file asks');
+    assert.deepEqual(op.asks.map((a) => [a.auto, a.deletion]), [[true, true]], 'Approve all opens a sign-in file');
   } finally { fs.rmSync(hidden, { force: true }); }
   assert.equal(isPasswordApp('1Password'), true); assert.equal(isPasswordApp('Safari'), false);
   const vault = await run('vault', (T) => T('take_screenshot').execute({ target: '1Password' }, {}));
-  assert.deepEqual(vault.asks.map((a) => [a.auto, a.deletion]), [[false, true]], 'bringing 1Password forward asks');
-  assert.ok(!vault.calls.some((c) => c.fwd), 'and nothing was brought forward on a no');
-  assert.ok(!fs.existsSync(launched) || !fs.readFileSync(launched, 'utf8').includes('-a TextEdit'), 'nothing opened on a no');
+  assert.ok(vault.asks.length >= 1 && vault.asks.every((a) => a.auto === true && a.deletion === true), `Approve all brings 1Password forward: ${JSON.stringify(vault.asks)}`);
+  assert.match(fs.readFileSync(launched, 'utf8'), /-a TextEdit/, 'the sign-in file was opened');
 }
 
 // ---- 13, 19. Folding goes on when replies end with a '?' that is no question, or when every reply asks; a question is

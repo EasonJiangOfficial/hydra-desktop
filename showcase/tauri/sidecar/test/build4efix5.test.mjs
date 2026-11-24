@@ -130,10 +130,10 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(setI
 // ---- 2-4 (principle 3). The safe-step whitelist: typed delete characters, Tab then typing and a blind click then
 // typing are deletion-class; everything else in the safe set stays safe.
 const noop = async () => {};
-const run = async (steps, { owner = () => null } = {}) => {
+const run = async (steps, { owner = () => null, on = true } = {}) => {
   fs.writeFileSync(launched, ''); fs.rmSync(acts, { force: true });
   const asks = [];
-  const ask = async (o) => { const auto = approveAllSays(true, o); asks.push({ auto, deletion: o.deletion, q: String(o.placeholder).split('\n')[0] }); return auto ? 'yes' : owner(o); };
+  const ask = async (o) => { const auto = approveAllSays(on, o); asks.push({ auto, deletion: o.deletion, q: String(o.placeholder).split('\n')[0] }); return auto ? 'yes' : owner(o); };
   const t = createTools({ allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: tmp, ask });
   t.nextTurn?.();
   const r = await t.tools.find((x) => x.name === 'act_in_app').execute({ target: 'Notes', steps }, {}).then(String, (e) => `ERR ${e.message}`);
@@ -145,8 +145,8 @@ const run = async (steps, { owner = () => null } = {}) => {
   for (const text of ['\x7f'.repeat(30), '\b'.repeat(30), ''.repeat(5), 'x\x0b', 'a\tb', '\x04', '']) {
     assert.equal(stepsLose([{ do: 'type', text }]), true, JSON.stringify(text));
     const x = await run([{ do: 'type', text }]);
-    assert.deepEqual(x.tags, [[false, true]], `asked as a deletion: ${JSON.stringify(text)} ${JSON.stringify(x)}`);
-    assert.equal(x.acts, 0, 'nothing ran on a no');
+    assert.deepEqual(x.tags, [[true, true]], `Approve all runs a deletion: ${JSON.stringify(text)} ${JSON.stringify(x)}`);
+    assert.equal(x.acts, 1, 'it ran');
   }
   for (const text of ['hello', 'line one\nline two', 'a\r\nb', 'café ✓ 日本']) assert.equal(stepsLose([{ do: 'type', text }]), false, JSON.stringify(text));
   assert.equal(planDeletion([{ do: 'click', id: 3, shown: 'Body' }, { do: 'type', text: '\x7f' }]), true, "draw's typing: the same rule");
@@ -158,8 +158,11 @@ const run = async (steps, { owner = () => null } = {}) => {
     assert.equal(stepsLose([{ do: 'key', key: k }, { do: 'click_text', text: 'Compose' }, { do: 'type', text: 'x' }]), true, `${k}: a later click doesn't undo it`);
   }
   const x = await run([{ do: 'key', key: 'tab' }, { do: 'type', text: 'hello' }]);
-  assert.deepEqual(x.tags, [[false, true]], JSON.stringify(x));
-  assert.equal(x.acts, 0);
+  assert.deepEqual(x.tags, [[true, true]], JSON.stringify(x));
+  assert.equal(x.acts, 1, 'Approve all runs it');
+  const off = await run([{ do: 'key', key: 'tab' }, { do: 'type', text: 'hello' }], { on: false });
+  assert.deepEqual(off.tags, [[false, true]], 'Approve all off: it asks');
+  assert.equal(off.acts, 0, 'a no stops it');
   assert.equal(stepsLose([{ do: 'type', text: 'hello' }, { do: 'key', key: 'tab' }, { do: 'key', key: 'return' }]), false, 'tab after the typing: safe');
   const ok = await run([{ do: 'click_text', text: 'Compose' }, { do: 'type', text: 'hello' }, { do: 'key', key: 'tab' }, { do: 'key', key: 'return' }]);
   assert.deepEqual(ok.tags, [[true, false]], 'still runs unasked');

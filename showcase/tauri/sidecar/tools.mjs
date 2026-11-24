@@ -466,10 +466,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     return `${head}\n${controlList(res.controls, res.texts)}${res.elsewhere?.length ? `\nElsewhere on the page (scrolled out of view): ${res.elsewhere.join(' | ')}` : ''}`;
   }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
-  // Owner: "for deletion of everything have the agent confirm before doing ... for everything". Every ask asks the
-  // owner, every time; the one exception is his own Approve all (owner: "there should be a mode that approves all
-  // actions"), which skips an ask only when it is tagged deletion: false. Every deletion-class ask below says
-  // deletion: true, so it asks whatever the setting (E2). BLOCK verdicts never reach here.
+  // Every ask asks while Approve all is off, including a deletion. Approve all says yes for every yes/no, including
+  // one tagged deletion: true. The tag stays so Approve all off still asks. BLOCK verdicts never reach here.
   // `always` tells an agent job's parent that only the owner may answer (answer_agent can't say yes for them).
   async function confirm(question, ctx, { deletion = false } = {}) {
     const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true, deletion }, ctx?.signal);

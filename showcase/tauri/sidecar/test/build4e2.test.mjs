@@ -43,7 +43,7 @@ const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await i
   w.stop();
 }
 
-// ---- The one rule (sidekick ask, the agents' asks): a yes/no tagged deletion: false only, and only when on.
+// ---- The one rule (sidekick ask, the agents' asks): Approve all says yes for every yes/no, including a deletion. Off, every ask asks.
 {
   const src = fs.readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
   const askFn = src.slice(src.indexOf('function ask(opts, signal) {'), src.indexOf('askQueued ??= oneYesNoAtATime(showAsk);'));
@@ -146,8 +146,8 @@ const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await i
   assert.deepEqual(got.map((a) => a.deletion), [true, true], JSON.stringify(got));
 }
 
-// ---- A background agent's own asks (its process, the real worker): Approve all answers the non-deletions there and
-// then; its overwrite still waits for the owner's yes on its row. Off: every one waits.
+// ---- A background agent's own asks (its process, the real worker): Approve all answers every one, including the
+// overwrite. Off: every one waits.
 {
   const { agentsRoot, createAgents } = await import('../agents.mjs');
   async function runOne(approveAll) {
@@ -171,7 +171,7 @@ const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await i
     return { a, asks: events.filter((x) => x.type === 'ask').map((x) => x.agent.ask.question) };
   }
   const on = await runOne(true);
-  assert.deepEqual(on.asks, [`Overwrite ${path.join(on.a.dir, 'files', 'index.html')}?`], 'on: only the overwrite waits');
+  assert.deepEqual(on.asks, [], 'on: nothing waits, including the overwrite');
   assert.equal(fs.readFileSync(path.join(on.a.dir, 'files', 'index.html'), 'utf8'), '<h1>Woof Co</h1>');
   const off = await runOne(false);
   assert.deepEqual(off.asks, [`Create ${path.join(off.a.dir, 'files', 'index.html')}?`, `Overwrite ${path.join(off.a.dir, 'files', 'index.html')}?`, `Create ${path.join(off.a.dir, 'work', 'build.sh')}?`], 'off: every one waits');

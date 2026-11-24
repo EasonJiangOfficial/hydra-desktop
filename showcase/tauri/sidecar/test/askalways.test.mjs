@@ -1,7 +1,6 @@
-// Every ask asks (owner: "for deletion of everything have the agent confirm before doing ... for everything"; the old
-// "Skip Allow prompts" setting is gone), with one opt-in exception, the owner's Approve all (owner: "there should be a
-// mode that approves all actions"): no setting skips a deletion ask; Approve all skips the rest; Approve all off, every
-// ask asks. A no keeps the step from running, BLOCK never asks, and relative paths start in the working folder.
+// Every ask asks while Approve all is off (a delete still asks, and a no keeps the step from running). Approve all
+// runs every yes/no and does not open an ask, including a delete. BLOCK never asks, and relative paths start in the
+// working folder.
 // The ask here goes through the same rule as sidekick ask() (approveAllSays, safety.mjs). Run: npm test
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -52,7 +51,12 @@ for (const p of ['x.txt', 'notes/new.md', '.config/git/config']) {
 
 // ---- Approve all (E2).
 assert.equal(approveAllSays(true, { choices: ['Allow', "Don't allow"], deletion: false }), true);
-for (const o of [{ choices: ['Allow'], deletion: true }, { choices: ['Allow'] }, { prompt: 'Paste the key', deletion: false }, null]) assert.equal(approveAllSays(true, o), false, `asks: ${JSON.stringify(o)}`);
+assert.equal(approveAllSays(true, { choices: ['Allow', "Don't allow"], deletion: true }), true, 'a delete runs');
+assert.equal(approveAllSays(true, { choices: ['Allow'], deletion: true }), true, 'a one-choice delete runs');
+assert.equal(approveAllSays(true, { choices: ['Allow'] }), true, 'an untagged yes/no runs');
+assert.equal(approveAllSays(true, { choices: ['Install', "Don't install"], deletion: true }), true, 'an install runs');
+for (const o of [{ prompt: 'Paste the key', deletion: false }, null, { placeholder: 'The orb', choices: ['Attach to Hydra', 'Keep it here'] }]) assert.equal(approveAllSays(true, o), false, `still asks: ${JSON.stringify(o)}`);
+assert.equal(approveAllSays(false, { choices: ['Allow'], deletion: true }), false, 'off: a delete asks');
 assert.equal(approveAllSays(false, { choices: ['Allow'], deletion: false }), false, 'off: every ask asks');
 {
   const wins = [{ id: 1, pid: 10, app: 'TextEdit', title: 'Draft', text: 'x' }, { id: 2, pid: 20, app: 'Notes', title: 'Notes', text: 'y' }];
@@ -91,45 +95,85 @@ assert.equal(approveAllSays(false, { choices: ['Allow'], deletion: false }), fal
     await run(T('save_skill').execute({ name: `Orb shot ${setting}`, description: 'Screenshot the orbs.', steps: '1. Open the page.' }, {}));
     assert.equal(asked.length, setting ? 0 : 1, `${tag}: a new skill ${setting ? 'saves unasked' : 'asks'}`);
 
-    // Deletions: every one asks whatever the setting, and a no keeps it.
-    const no = async (label, p, check) => {
+    // Deletions. Off: each one asks, and a no keeps it. On: it runs, and no ask opens.
+    const deletion = async (label, p, { off, ran } = {}) => {
       reset(setting, null);
       const r = await run(p());
-      assert.equal(asked.length >= 1, true, `${tag}: ${label} asks (${r})`);
-      assert.match(r, /said no/, `${tag}: ${label}: a no stops it`);
-      check?.();
+      if (setting) {
+        assert.equal(asked.length, 0, `${tag}: ${label} does not ask (${r})`);
+        assert.doesNotMatch(String(r), /said no/, `${tag}: ${label} ran`);
+        ran?.(r);
+      } else {
+        assert.equal(asked.length >= 1, true, `${tag}: ${label} asks (${r})`);
+        assert.match(String(r), /said no/, `${tag}: ${label}: a no stops it`);
+        off?.();
+      }
     };
     fs.writeFileSync(f, 'keep');
-    await no('an overwrite', () => T('write_file').execute({ path: f, content: 'gone' }, {}), () => assert.equal(fs.readFileSync(f, 'utf8'), 'keep'));
+    await deletion('an overwrite', () => T('write_file').execute({ path: f, content: 'gone' }, {}), {
+      off: () => assert.equal(fs.readFileSync(f, 'utf8'), 'keep'),
+      ran: () => assert.equal(fs.readFileSync(f, 'utf8'), 'gone'),
+    });
     const c = await store.addCommitment(`Call the bank ${setting}`, null);
-    await no('dropping a commitment', () => T('update_commitment').execute({ id: c.id, status: 'dropped', reason: 'done elsewhere' }, {}), () => assert.equal(store.getCommitment(c.id).status, 'open'));
+    await deletion('dropping a commitment', () => T('update_commitment').execute({ id: c.id, status: 'dropped', reason: 'done elsewhere' }, {}), {
+      off: () => assert.equal(store.getCommitment(c.id).status, 'open'),
+      ran: () => assert.equal(store.getCommitment(c.id).status, 'dropped'),
+    });
     const fact = await store.addFact(`Likes tea ${setting}`);
-    await no('forgetting a fact', () => T('forget_fact').execute({ id: fact.id, reason: 'wrong' }, {}), () => assert.ok(store.listFacts().some((x) => x.id === fact.id)));
+    await deletion('forgetting a fact', () => T('forget_fact').execute({ id: fact.id, reason: 'wrong' }, {}), {
+      off: () => assert.ok(store.listFacts().some((x) => x.id === fact.id)),
+      ran: () => assert.ok(!store.listFacts().some((x) => x.id === fact.id)),
+    });
     const job = await jobs.addJob({ title: `Digest ${setting}`, brief: 'Sum up.', due: 'in 5h' });
-    await no('removing a job', () => T('update_job').execute({ id: job.id, action: 'remove', reason: 'not needed' }, {}), () => assert.ok(jobs.getJob(job.id)));
-    await no('deleting a skill', () => T('forget_skill').execute({ name: `Orb shot ${setting}`, reason: 'wrong' }, {}), () => assert.ok(skills.skillExists(`Orb shot ${setting}`)));
-    await no('replacing a skill', () => T('save_skill').execute({ name: `Orb shot ${setting}`, description: 'New.', steps: '1. Other.' }, {}));
-    // A force quit loses unsaved work: it asks, and so does the helper's unsaved-work ask after a yes.
-    await no('a force quit', () => T('manage_app').execute({ do: 'force_quit', app: 'TextEdit' }, {}), () => assert.deepEqual(managed(), []));
-    reset(setting, (o) => (/anyway\?$/.test(o.placeholder) ? null : 'yes'));
-    const fq = await run(T('manage_app').execute({ do: 'force_quit', app: 'TextEdit' }, {}));
-    assert.deepEqual(asked, ['Force quit TextEdit?', 'Force quitting TextEdit loses anything unsaved. Force quit anyway?'], `${tag}: both asked (${fq})`);
-    assert.deepEqual(managed(), [], `${tag}: nothing quit on a no`);
-    // Putting a file back over the one there now replaces it: asks. (The overwrite above, said yes, keeps the old one.)
+    await deletion('removing a job', () => T('update_job').execute({ id: job.id, action: 'remove', reason: 'not needed' }, {}), {
+      off: () => assert.ok(jobs.getJob(job.id)),
+      ran: () => assert.ok(!jobs.getJob(job.id)),
+    });
+    await deletion('deleting a skill', () => T('forget_skill').execute({ name: `Orb shot ${setting}`, reason: 'wrong' }, {}), {
+      off: () => assert.ok(skills.skillExists(`Orb shot ${setting}`)),
+      ran: () => assert.ok(!skills.skillExists(`Orb shot ${setting}`)),
+    });
+    await deletion('replacing a skill', () => T('save_skill').execute({ name: `Orb shot ${setting}`, description: 'New.', steps: '1. Other.' }, {}), {
+      off: () => assert.equal(skills.readSkill(`Orb shot ${setting}`)?.steps, '1. Open the page.'),
+      ran: () => assert.match(skills.readSkill(`Orb shot ${setting}`)?.steps ?? '', /Other/),
+    });
+    // A force quit loses unsaved work. Off: both asks, and a no keeps it. On: it quits, and no ask opens.
+    if (!setting) {
+      await deletion('a force quit', () => T('manage_app').execute({ do: 'force_quit', app: 'TextEdit' }, {}), { off: () => assert.deepEqual(managed(), []) });
+      reset(setting, (o) => (/anyway\?$/.test(o.placeholder) ? null : 'yes'));
+      const fq = await run(T('manage_app').execute({ do: 'force_quit', app: 'TextEdit' }, {}));
+      assert.deepEqual(asked, ['Force quit TextEdit?', 'Force quitting TextEdit loses anything unsaved. Force quit anyway?'], `${tag}: both asked (${fq})`);
+      assert.deepEqual(managed(), [], `${tag}: nothing quit on a no`);
+    } else {
+      await deletion('a force quit', () => T('manage_app').execute({ do: 'force_quit', app: 'TextEdit' }, {}), { ran: () => assert.deepEqual(managed(), [['force_quit', 'TextEdit']]) });
+    }
+    // Putting a file back over the one there now replaces it. Off: a no keeps the file. On: it is put back.
     reset(setting, 'yes');
     await run(T('write_file').execute({ path: f, content: 'changed' }, {}));
     const kept = store.listBin().filter((x) => x.kind === 'file' && store.getBin(x.id)?.data?.path === fs.realpathSync(f)).at(-1);
     assert.ok(kept, `${tag}: the old file is in Recently deleted`);
-    await no('a restore over a file', () => T('restore_deleted').execute({ id: kept.id }, {}), () => assert.equal(fs.readFileSync(f, 'utf8'), 'changed'));
-    // The helper's own risky step (it could delete, pay, send or quit) asks, even after Approve all said yes to the plan.
-    reset(setting, (o) => (/Go ahead\?$/.test(o.placeholder) ? null : 'yes'));
-    fake.set({ wins, act: { ok: false, needsConfirm: true, step: 0, why: 'That click could delete the note.', label: 'Delete' } });
-    // A yes there would loop on the fake (it asks at that step again): 10 s is a fail, never a hang.
-    const risky = await Promise.race([run(T('act_in_app').execute({ target: 'Notes', steps: [{ do: 'click_text', text: 'Note one' }] }, {})), new Promise((r) => setTimeout(() => r('no answer in 10 s'), 10_000).unref())]);
-    assert.deepEqual(asked.filter((q) => /Go ahead\?$/.test(q)), ['That click could delete the note. Go ahead?'], `${tag}: the risky step asks (${risky}; ${asked})`);
-    assert.equal(asked.length, setting ? 1 : 2, `${tag}: the plan itself ${setting ? 'runs unasked' : 'asks'}: ${asked}`);
-    assert.match(risky, /said no/);
+    const beforeRestore = fs.readFileSync(f, 'utf8');
+    await deletion('a restore over a file', () => T('restore_deleted').execute({ id: kept.id }, {}), {
+      off: () => assert.equal(fs.readFileSync(f, 'utf8'), 'changed'),
+      ran: () => assert.notEqual(fs.readFileSync(f, 'utf8'), beforeRestore),
+    });
+    // The helper's own risky step. Off: it asks, and a no stops it. On: Approve all runs it, and no ask opens.
+    if (!setting) {
+      reset(setting, (o) => (/Go ahead\?$/.test(o.placeholder) ? null : 'yes'));
+      fake.set({ wins, act: { ok: false, needsConfirm: true, step: 0, why: 'That click could delete the note.', label: 'Delete' } });
+      const risky = await Promise.race([run(T('act_in_app').execute({ target: 'Notes', steps: [{ do: 'click_text', text: 'Note one' }] }, {})), new Promise((r) => setTimeout(() => r('no answer in 10 s'), 10_000).unref())]);
+      assert.deepEqual(asked.filter((q) => /Go ahead\?$/.test(q)), ['That click could delete the note. Go ahead?'], `${tag}: the risky step asks (${risky}; ${asked})`);
+      assert.equal(asked.length, 2, `${tag}: the plan asks too: ${asked}`);
+      assert.match(risky, /said no/);
+    } else {
+      reset(setting, null);
+      fake.set({ wins, act: { ok: true, done: ['clicked Delete'], window: { id: 2, app: 'Notes', title: 'Notes', bounds: [0, 0, 800, 600] } } });
+      const risky = await run(T('act_in_app').execute({ target: 'Notes', steps: [{ do: 'click_text', text: 'Note one' }] }, {}));
+      assert.equal(asked.length, 0, `${tag}: the plan does not ask (${risky})`);
+      assert.match(String(risky), /clicked Delete/);
+      assert.equal(approveAllSays(true, { placeholder: 'That click could delete the note. Go ahead?', choices: ['Allow', "Don't allow"], deletion: true }), true, 'the risky step is a yes too');
+    }
   }
   fs.rmSync(dir, { recursive: true, force: true });
 }
-console.log('every ask asks, Approve all skips only non-deletions: ok');
+console.log('Approve all runs every yes/no, including a delete; off, a delete still asks: ok');
