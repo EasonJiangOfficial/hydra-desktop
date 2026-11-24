@@ -8,6 +8,7 @@ import { keepListening, listensAfter } from '../speech.mjs';
 
 const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
 const swift = readFileSync(new URL('../../src-tauri/voice/main.swift', import.meta.url), 'utf8');
+const barge = readFileSync(new URL('../../src-tauri/voice/barge.swift', import.meta.url), 'utf8');
 const host = readFileSync(new URL('../../../roamies/host.js', import.meta.url), 'utf8');
 
 function fakeClock() {
@@ -84,6 +85,10 @@ assert.match(side, /stalled = true; progress\.pause\(\)/, 'a stall stops the pro
 assert.match(side, /keepListening\(\{ reply: byVoice \|\| interruptedAfter \? lastReply : '', interrupt: !!interruptedAfter \}\)/, 'a statement or an interrupt leaves the mic open');
 assert.doesNotMatch(side, /listensAfter\(lastReply, !!config\.listenEvery\)/, 'the mic does not wait for After every reply');
 assert.match(swift, /if phase == \.barge \{ bargeTake\(best\); return \}/, 'an interrupt already in progress stays a take');
+assert.match(barge, /realWords\(text\)\.count >= 1/, 'any real word during speech is the take');
+assert.doesNotMatch(barge, /WakeWord\.match\(text\) != nil/, 'a wake phrase is not the gate while Hydra speaks');
+assert.match(swift, /func listenOverSpeech\(\)/, 'the recogniser is already on while Hydra speaks');
+assert.match(swift, /Hydra speaking: the mic is open, any words are the take/, 'words are heard without a wake phrase or a clap');
 assert.match(swift, /if phase == \.handsFree \|\| phase == \.holding \|\| phase == \.armed \|\| phase == \.finishing \{ return \}/, 'an open take is not replaced');
 assert.doesNotMatch(host, /state === 'listening'\) \{\n      hearing = true;\n      dropAutoListen\(\);/, 'an interrupt does not cancel the follow-up mic');
 

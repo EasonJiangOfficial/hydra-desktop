@@ -694,9 +694,17 @@ const MCP_OVERWRITE = /(?:^|_)(write|edit|update|overwrite|replace|clear|discard
  *  every one of their asks is a deletion. A tag from the call itself, never from the question's words. */
 export const deletesCall = ({ name, annotations } = {}) => annotations?.destructiveHint === true || MCP_RISKY.test(snake(name)) || MCP_OVERWRITE.test(snake(name))
   || !(annotations?.readOnlyHint === true || annotations?.destructiveHint === false);
-/** E2: the owner's Approve all says yes for this ask: a yes/no (choices) whose deletion tag is exactly false. A deletion,
- *  an ask with no tag and a typed prompt still ask. Off: every ask asks. */
-export const approveAllSays = (approveAll, opts) => approveAll === true && Array.isArray(opts?.choices) && opts.deletion === false;
+/** Approve all says yes for every yes/no, including a deletion and a step the safe set called deletion-class.
+ *  A typed prompt (no choices, or a mask) still asks. A menu that is not a yes/no (the orb's Attach / Keep) still asks.
+ *  Off: every ask asks. The deletion tag is ignored while Approve all is on. */
+export const approveAllSays = (approveAll, opts) => {
+  if (approveAll !== true || !opts || opts.mask || opts.prompt != null) return false;
+  const choices = opts.choices;
+  if (!Array.isArray(choices) || choices.length === 0) return false;
+  const text = choices.map((c) => String(c).trim());
+  if (!text.some((c) => /^(allow|yes|install|remember)$/i.test(c))) return false;
+  return text.length === 1 || text.some((c) => /^don['’]t\b/i.test(c) || /^no$/i.test(c));
+};
 // Every string in a call's arguments at any depth, each line of it on its own too (V8-6: nothing is skipped). More than
 // LIMIT strings, or one line longer than MAX_ARG, is too much to check: such a call is never SAFE.
 const MAX_ARG = 4096, LIMIT = 2000;

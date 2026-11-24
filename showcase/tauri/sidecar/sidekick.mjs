@@ -2004,9 +2004,8 @@ function ask(opts, signal) {
   // Only while that turn runs: anything it started that asks later (it shouldn't) gets the local bubble.
   const relayed = relayAsk.getStore();
   if (relayed?.live) return relayed.ask(opts, signal);
-  // Approve all (agent_settings.approve_all, owner: "there should be a mode that approves all actions"): a yes/no
-  // tagged deletion: false is a yes at once. A deletion, an untagged ask and a typed prompt still ask (E2). A relay
-  // turn's asks stay server approvals (above): the server applies it there, keeping the approval row.
+  // Approve all (agent_settings.approve_all): every yes/no is a yes at once, including a deletion. A typed prompt
+  // still asks. A relay turn's asks stay server approvals (above): the server applies it there, keeping the approval row.
   // A turn already stopped (Stop, the tool's timeout, Claude Code's cancel): no, before Approve all could say yes.
   if (signal?.aborted) return Promise.resolve(null);
   if (autoYes(opts)) { logLine('ask_auto', { question: String(opts.placeholder ?? '').slice(0, 120) }); return Promise.resolve('yes'); }

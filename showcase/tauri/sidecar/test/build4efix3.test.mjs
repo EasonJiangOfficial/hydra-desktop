@@ -239,31 +239,31 @@ const tags = (x) => x.asks.map((a) => [a.auto, a.deletion]);
   // 7. manage_app switch / arrange on a password manager.
   for (const args of [{ do: 'switch', app: '1Password' }, { do: 'arrange', app: '1Password', layout: 'full' }]) {
     const x = await run('vault', (T) => T('manage_app').execute(args, {}));
-    assert.deepEqual(tags(x), [[false, true]], `${args.do} 1Password asks: ${JSON.stringify(x)}`);
-    assert.ok(!x.calls.some((c) => c[0] === 'manage'), `${args.do}: nothing done on a no`);
+    assert.deepEqual(tags(x), [[true, true]], `${args.do} 1Password runs under Approve all: ${JSON.stringify(x)}`);
+    assert.ok(x.calls.some((c) => c[0] === 'manage'), `${args.do}: it ran`);
   }
   const plain = await run('notes', (T) => T('manage_app').execute({ do: 'switch', app: 'Notes' }, {}));
   assert.deepEqual(tags(plain), [[true, false]], 'Notes still runs under Approve all');
   // 8. open, read_window and act_in_app opening a password manager.
   for (const args of [{ target: '1Password' }, { target: 'https://example.com', app: '1Password' }, { target: '/Applications/1Password.app' }]) {
     const x = await run('gone', (T) => T('open').execute(args, {}));
-    assert.deepEqual(tags(x), [[false, true]], `open ${JSON.stringify(args)} asks`);
-    assert.doesNotMatch(x.opened, /1Password/, 'nothing opened on a no');
+    assert.deepEqual(tags(x), [[true, true]], `open ${JSON.stringify(args)} runs under Approve all`);
+    assert.match(x.opened, /1Password/, 'it opened');
   }
   const rw = await run('gone', (T) => T('read_window').execute({ target: '1Password' }, {}));
-  assert.deepEqual(tags(rw), [[false, true]], `read_window opening 1Password asks: ${JSON.stringify(rw)}`);
-  assert.doesNotMatch(rw.opened, /1Password/);
+  assert.deepEqual(tags(rw), [[true, true]], `read_window opening 1Password runs under Approve all: ${JSON.stringify(rw)}`);
+  assert.match(rw.opened, /1Password/);
   const act = await run('gone', (T) => T('act_in_app').execute({ target: '1Password', steps: [{ do: 'key', key: 'tab' }] }, {}), { owner: (q) => (q.startsWith('In ') ? 'yes' : null) });
-  assert.deepEqual(tags(act), [[false, true], [false, true]], `the plan and the launch both ask: ${JSON.stringify(act)}`);
-  assert.doesNotMatch(act.opened, /1Password/, 'never launched on a no');
+  assert.deepEqual(tags(act), [[true, true], [true, true]], `the plan and the launch both run under Approve all: ${JSON.stringify(act)}`);
+  assert.match(act.opened, /1Password/, 'it launched');
   // 9, 10 (build4efix4: one safe-step whitelist, safety.mjs stepsLose). Delete keys and chords, selections, replace-all
-  // plans, cut, copy, paste, fill and any key not in the safe set are deletions; asked under Approve all.
+  // plans, cut, copy, paste, fill and any key not in the safe set are deletions. Approve all runs them.
   for (const steps of [[{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'ctrl+h' }], [{ do: 'key', key: 'cmd+a' }, { do: 'type', text: 'x' }], [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'cmd+x' }],
     [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'x' }], [{ do: 'key', key: 'ctrl+d' }], [{ do: 'key', key: 'ctrl+k' }], [{ do: 'key', key: 'control+h' }]]) {
     assert.equal(stepsLose(steps), true, JSON.stringify(steps));
     const x = await run('notes', (T) => T('act_in_app').execute({ target: 'Notes', steps }, {}));
-    assert.deepEqual(tags(x), [[false, true]], `asked: ${JSON.stringify(steps)} ${JSON.stringify(x)}`);
-    assert.ok(!x.calls.some((c) => c[0] === 'act'), 'nothing ran on a no');
+    assert.deepEqual(tags(x), [[true, true]], `ran: ${JSON.stringify(steps)} ${JSON.stringify(x)}`);
+    assert.ok(x.calls.some((c) => c[0] === 'act'), 'it ran');
   }
   for (const steps of [[{ do: 'type', text: 'hello' }], [{ do: 'click_text', text: 'Next' }, { do: 'key', key: 'return' }, { do: 'key', key: 'tab' }, { do: 'key', key: 'shift+tab' },
     { do: 'key', key: 'escape' }, { do: 'key', key: 'down' }, { do: 'key', key: 'cmd+left' }, { do: 'scroll', direction: 'down' }, { do: 'wait', seconds: 1 }, { do: 'focus', id: 2 }, { do: 'hover', text: 'Menu' }, { do: 'click_at', x: 1, y: 2 }]]) {

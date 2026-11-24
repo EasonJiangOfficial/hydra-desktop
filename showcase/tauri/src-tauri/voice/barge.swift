@@ -69,9 +69,9 @@ final class SpeechOnset {
 /// While Hydra speaks, what may stop it (build 4 C7; owner: "the agent speaks and is interupted by my laptop fans or
 /// sounds not by my speach"). Energy alone never does: a talk onset (SpeechOnset) only opens a check, in which the
 /// recogniser listens on this Mac while Hydra goes on; the check becomes a take (that stops Hydra) once it has heard
-/// enough: two real words, a stop word ("wait", "stop"), or the wake phrase. A fan, a key, a click, a thump or a cough
-/// makes no words, and the check ends quietly after `window` s. A clean double clap (clap.swift's rules while Hydra
-/// speaks) is a take at once, as before.
+/// enough: any real word. A wake phrase is not required, and a double clap is not the gate. A fan, a key, a click,
+/// a thump or a cough makes no words (a filler such as "uh" is not a word). A clean double clap can still open a
+/// take, but speech does not wait for one.
 /// Second verify pass: the sleep word said over Hydra puts it to sleep (.sleep), and the bare name ("Hydra") waits
 /// `named` s for it before it is a take; a check open as Hydra stops speaking stays open its whole window (the owner's
 /// words over the last moment of a reply are a take, not lost).
@@ -87,10 +87,9 @@ struct BargeGate {
     static func realWords(_ text: String) -> [String] {
         Spoken.words(text).map(\.word).filter { w in w.contains(where: \.isLetter) && !fillers.contains(w) }
     }
-    /// Enough to stop Hydra: two real words, a stop word, or the wake phrase.
+    /// Enough to stop Hydra: any real word. The wake phrase is not a gate. Fillers are not words.
     static func enough(_ text: String) -> Bool {
-        let w = realWords(text)
-        return w.count >= 2 || w.contains(where: stopWords.contains) || !w.isEmpty && WakeWord.match(text) != nil
+        realWords(text).count >= 1
     }
     /// A talk onset: opens a check (the recogniser starts listening), unless one is open.
     mutating func onset(now: Double) -> Act { guard since == nil else { return .none }; since = now; nameAt = nil; return .check }
@@ -113,6 +112,8 @@ struct BargeGate {
         return .drop
     }
     mutating func end() { since = nil; nameAt = nil }
+    /// The reply is still going and nobody has spoken yet: keep the check open so a later word is still heard.
+    mutating func rearm(now: Double) { since = now; nameAt = nil }
 }
 
 /// The talk detector as a consumer of the one mic tap while Hydra speaks: a fresh one (it learns the bed again) each
@@ -232,14 +233,16 @@ enum TriggerTest {
             check("\(r) Hz: typing while Hydra speaks never stops it", stops(keys, []) == nil)
             var cough = playback(6, level: 0.02); ClapTest.speech(&cough, from: 3.0, to: 3.5, rate: rate, rng: &rng, level: 0.3)
             check("\(r) Hz: a sound that makes one filler (\"Uh.\") never stops it", stops(cough, [(3.4, "Uh.")]) == nil)
-            check("\(r) Hz: nor one word that isn't a stop word (\"the\")", stops(cough, [(3.4, "the")]) == nil)
+            let saidThe = stops(cough, [(3.4, "the")])
+            check("\(r) Hz: one real word (\"the\") stops it (\(saidThe.map { String(format: "%.2f s", $0 - 3.0) } ?? "never"))", saidThe.map { $0 >= 3.4 && $0 < 3.6 } ?? false)
             for word in ["Wait.", "Stop", "Hold on"] {
                 var said = playback(6, level: 0.02); ClapTest.speech(&said, from: 3.0, to: 3.5, rate: rate, rng: &rng, level: 0.3)
                 let at = stops(said, [(3.45, word)])
                 check("\(r) Hz: \"\(word)\" said over Hydra stops it once heard (\(at.map { String(format: "%.2f s", $0 - 3.0) } ?? "never"))", at.map { $0 >= 3.45 && $0 < 3.6 } ?? false)
             }
             var two = playback(6, level: 0.02); ClapTest.speech(&two, from: 3.0, to: 4.2, rate: rate, rng: &rng, level: 0.3)
-            check("\(r) Hz: two real words stop it, one doesn't yet", stops(two, [(3.4, "Can"), (3.8, "Can you")]).map { $0 >= 3.8 } ?? false)
+            let oneWord = stops(two, [(3.4, "Can"), (3.8, "Can you")])
+            check("\(r) Hz: one real word stops it, without a second word or the wake phrase", oneWord.map { $0 >= 3.4 && $0 < 3.8 } ?? false)
         }
         // The gate by itself.
         var g = BargeGate()
@@ -249,14 +252,14 @@ enum TriggerTest {
         check("too few words in 3 s: the check ends, Hydra goes on", g.tick(now: 2.9) == .none && g.tick(now: 3.0) == .drop && !g.checking)
         check("heard words count only in a check", g.heard("wait wait", now: 3.1) == .none)
         // Second verify pass: Hydra stopping doesn't end a check. Onset at 0, Hydra's last audio at 0.1 s, the owner's
-        // words come at 0.9, 1.2 and 2.0 s: the take opens on the two words at 1.2 s (before: dropped at 1.1 s, lost).
+        // words come at 0.9 s: one real word is the take (before: it waited for a second word at 1.2 s).
         var last = BargeGate()
         _ = last.onset(now: 0)
         var took: Double?
         for (t, text) in [(0.5, ""), (0.9, "Can"), (1.1, "Can"), (1.2, "Can you"), (2.0, "Can you check my balance")] where took == nil {
             if last.heard(text, now: t) == .take || last.tick(now: t) == .take { took = t }
         }
-        check("words over the last moment of a reply are a take, though Hydra stopped (took at \(took.map { String(format: "%.1f s", $0) } ?? "never"))", took == 1.2)
+        check("words over the last moment of a reply are a take, though Hydra stopped (took at \(took.map { String(format: "%.1f s", $0) } ?? "never"))", took == 0.9)
         _ = g.onset(now: 10)
         check("Hydra stopped speaking: the check still ends only after its window with no words", g.tick(now: 11.5) == .none && g.tick(now: 13.0) == .drop)
         // The sleep word said over Hydra puts it to sleep, though the take would open on the name alone.
@@ -270,7 +273,7 @@ enum TriggerTest {
         var bare = BargeGate()
         _ = bare.onset(now: 0)
         check("the name alone over Hydra waits a moment for the sleep word, then is a take", bare.heard("Hydra", now: 0.5) == .none && bare.tick(now: 0.7) == .none && bare.tick(now: 0.86) == .take)
-        for (t, want) in [("wait", true), ("Stop.", true), ("hold on", true), ("Hey Hydra", true), ("I think", true), ("the", false), ("", false), ("Mm.", false)] {
+        for (t, want) in [("wait", true), ("Stop.", true), ("hold on", true), ("Hey Hydra", true), ("I think", true), ("the", true), ("no", true), ("", false), ("Mm.", false)] {
             check("\"\(t)\" is \(want ? "" : "not ")enough to stop Hydra", BargeGate.enough(t) == want)
         }
         return bad == 0 ? 0 : 1
