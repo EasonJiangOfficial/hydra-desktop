@@ -2755,7 +2755,14 @@ function onVoice(m) {
   // Any take while Hydra works (the phrase, a clap, the talk keys, barge-in; C1): its words join the turn under way, never
   // a cancel. Hydra's voice holds while the owner talks and goes on after; a take that hears nothing leaves the turn as
   // it was. With nothing running, a take talks over the last reply: that stops its voice, and the next turn knows.
-  if (m.type === 'voice_state' && m.state === 'listening' && whileBusy({ busy }) === 'add_on') { addOnTake = true; hush(true); logLine('add_on', { listening: true, mode: String(m.mode ?? '') }); }
+  if (m.type === 'voice_state' && m.state === 'listening' && whileBusy({ busy }) === 'add_on') {
+    addOnTake = true;
+    const via = takeVia && Date.now() - takeVia.at < 3000 ? takeVia.via : '';
+    // A double clap interrupts the speech even while a turn is open. A talk-over check still only holds it.
+    if (via === 'clap') { takeVia = null; speech.stop(); }
+    else hush(true);
+    logLine('add_on', { listening: true, mode: String(m.mode ?? ''), via });
+  }
   // With nothing running, a take over the last reply still being said holds it (C7): the owner's words stop it, and a
   // take that hears none (a noise opened it) lets the cut sentence go on, never silence.
   else if (m.type === 'voice_state' && m.state === 'listening') { addOnTake = false; const via = takeVia && Date.now() - takeVia.at < 3000 ? takeVia.via : ''; takeVia = null; cutTake = overReply({ saying: saidPending, voiceOn: VOICE_ON(), via }) === 'hold'; if (cutTake) hush(true); else speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); }
@@ -3598,7 +3605,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     agents.sync();
   } else if (m.type?.startsWith('ob_') || m.type?.startsWith('chat_') || m.type === 'set_keys' || m.type === 'set_actions' || m.type === 'set_login' || m.type === 'keybind_error') onGuide(m).catch((e) => console.error('guide', e));
   // A clap or barge-in take (the helper's trigger): counts as talking. Before the voice* catch-all, which swallowed it.
-  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); takeVia = { via: String(m.via ?? ''), at: Date.now() }; if (m.via === 'barge') noteInterrupted(); if (['clap', 'phrase', 'keys', 'orb'].includes(m.via)) ui({ kind: 'woke', from: m.via }); }
+  else if (m.type === 'voice_trigger') { logLine('trigger', { via: m.via }); takeVia = { via: String(m.via ?? ''), at: Date.now() }; if (m.via === 'barge' || (m.via === 'clap' && heardTrack.playing)) noteInterrupted(); if (['clap', 'phrase', 'keys', 'orb'].includes(m.via)) ui({ kind: 'woke', from: m.via }); }
   else if (m.type?.startsWith('voice')) onVoice(m);
   else if (m.type === 'snap') areaSnap();
   else if (m.type === 'write_tap') onWriteTap();

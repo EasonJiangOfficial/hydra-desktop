@@ -336,12 +336,12 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   assert.doesNotMatch(side, /at your service, sir\.'\);\n/, 'no wake greeting');
   // Build 4 E1 (C1): every take while Hydra works adds on (whileBusy: behavior in build4e1.test.mjs); no take or request
   // cancels a turn quietly any more, only sleep does.
-  assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{ addOnTake = true; hush\(true\);/, 'any take while thinking adds on');
+  assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{\n\s+addOnTake = true;[\s\S]*?else hush\(true\);/, 'any take while thinking adds on; a clap cuts the speech');
   assert.doesNotMatch(side, /interruptQuietly\('listening'\)|interruptQuietly\('new request'\)/, 'never a quiet cancel by a take or a request');
   assert.match(side, /if \(addOnTake\) \{ addOnTake = false; if \(addOn\(text\)\) return; \}/);
   assert.match(side, /const into = addOnTo\(text, \{ busy, addInput: \(t\) => agent\?\.addInput\?\.\(t\), enqueue \}\);/, 'addOnTo (behavior in voiceturn.test.mjs)');
   assert.match(side, /await relaySession\(\{\n\s+agent: agentRun, text: said\.text, h,/, 'relay additions into the session (relaySession: behavior in relayup.test.mjs)');
-  assert.match(side, /if \(m\.via === 'barge'\) noteInterrupted\(\);/, 'barge-in notes what was heard');
+  assert.match(side, /if \(m\.via === 'barge' \|\| \(m\.via === 'clap' && heardTrack\.playing\)\) noteInterrupted\(\);/, 'barge-in and a clap while speech plays note what was heard');
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');
   assert.match(side, /const progress = turnProgress = startProgress\(\{ voice: own && voice, live: \(\) => busy && turnVoice === voice, muted: \(\) => voiceMuted \|\| voiceBusy,/, 'a filler after 1.1 s and progress lines, never muted (startProgress: behavior in voiceturn.test.mjs, build4e1.test.mjs)');
   assert.match(side, /if \(!voiceMuted\) voice\?\.beat\(\); \/\/ a tool starts/, 'or when a tool starts');
