@@ -50,7 +50,7 @@ function fakeClock() {
   assert.doesNotMatch(side, /interruptQuietly\('new request'\)/, 'nor does a request sent while it works');
   assert.deepEqual([...side.matchAll(/interruptQuietly\('(\w+)'\)/g)].map((m) => m[1]), ['sleep'], 'only sleep cancels quietly');
   assert.match(side, /if \(interrupt && busy && !image && addOn\(text\)\) return running;/, 'typed, clicked or spoken while busy: joins the turn');
-  assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{ addOnTake = true; hush\(true\);/, 'Hydra holds its voice while the owner talks');
+  assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{\n\s+addOnTake = true;[\s\S]*?else hush\(true\);/, 'Hydra holds its voice while the owner talks; a clap cuts it');
   assert.match(side, /m\.state === 'idle'\) \{ addOnTake = false; hush\(false\);/, 'a take that ends (heard nothing) clears the add-on and lets the voice go on');
 }
 

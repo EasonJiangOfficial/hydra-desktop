@@ -146,7 +146,9 @@ export const whileBusy = ({ busy }) => (busy ? 'add_on' : 'new');
  *  and a word-less one of those still says "I didn't hear anything". Words that are only Hydra's own (its voice left in
  *  the mic after echo cancellation: every word is in the reply, and none is a stop word) are 'echo': dropped, and the
  *  reply goes on. */
-export const NOISE_TAKES = new Set(['clap', 'barge']);
+// A fan or a key can open the talk-over check. That take holds the reply until words confirm it.
+// A double clap is the owner asking Hydra to stop. It cuts the reply.
+export const NOISE_TAKES = new Set(['barge']);
 export const overReply = ({ saying, voiceOn, via }) => (saying && voiceOn && NOISE_TAKES.has(via) ? 'hold' : 'stop');
 const STOP_WORDS = new Set(['stop', 'wait', 'pause', 'cancel', 'enough', 'quiet', 'hold', 'shush', 'nevermind']);
 export const afterHeld = ({ words, reply = '' }) => {

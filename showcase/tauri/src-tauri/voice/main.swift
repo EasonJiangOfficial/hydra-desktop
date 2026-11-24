@@ -736,31 +736,42 @@ final class Voice {
         default: return false
         }
     }
+    /// What a confirmed double clap does. A one-word take the talk-over check opened (via barge) does not swallow it.
+    /// Speech playing is an interrupt. Asleep, it wakes even when that take is still open.
+    enum ClapGo: Equatable { case wake, interrupt, listen, drop }
+    static func clapHandoff(asleep: Bool, speaking: Bool, clapTalk: Bool, barge: Bool, phase: Phase, via: String) -> ClapGo {
+        switch Trigger.decide(.clap, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: false, barge: barge) {
+        case .wake: return .wake
+        case .none: return .drop
+        case .take:
+            guard clapMayTake(phase: phase, via: via) else { return .drop }
+            return speaking ? .interrupt : .listen
+        }
+    }
     /// A clap take and the take a wake opens ignore the room only while the chime is still playing. Words after it count.
     /// The chime window is `cueUntil` (Cue.until) plus a short tail. A latch past that window dropped the owner's words,
     /// so a real double clap woke or paused Hydra and then heard nothing.
     static func chimeCovers(quietEmpty: Bool, via: String, now: Double, cueUntil: Double) -> Bool {
         (quietEmpty || via == "clap") && now < cueUntil + 0.05
     }
-    /// A double clap from the clap detector.
+    /// A double clap from the clap detector. The same decision clapHandoff makes, so a test can drive it.
     func clapHeard() {
         guard clapOn || speaking else { return }
-        switch Trigger.decide(.clap, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) {
+        switch Self.clapHandoff(asleep: asleep, speaking: speaking, clapTalk: clapTalk, barge: bargeOn, phase: phase, via: takeVia) {
         case .wake:
-            // Asleep: the sidecar opens the take. A talk-over take still open would make that listen a no-op.
+            // Asleep: the sidecar opens the take. A one-word talk-over take still open would make that listen a no-op.
             log("double clap")
             if phase == .handsFree, takeVia == "barge" { yieldBargeTake() }
             if phase == .barge { endBarge("a double clap") }
             emit(["type": "clap"])
-        case .take:
+        case .interrupt, .listen:
             // While Hydra speaks, one leaked word ("the") already opened a hands-free take. That take is not the
             // owner's. A real double clap still interrupts.
-            guard Self.clapMayTake(phase: phase, via: takeVia) else { return }
             if phase == .handsFree { yieldBargeTake() }
             endBarge("a double clap")
             // Over Hydra's voice, a take that hears no words gives the reply back in BargeGate.window s, not 8 (C7).
-            log("double clap: listening"); startTake(via: "clap", wait: speaking ? BargeGate.window : nil)
-        case .none: log("double clap: nothing to do (clap-to-talk off)")
+            log("double clap: \(speaking ? "interrupt" : "listening")"); startTake(via: "clap", wait: speaking ? BargeGate.window : nil)
+        case .drop: log("double clap: nothing to do (clap-to-talk off)")
         }
     }
     /// The talk-over take is in the way of a double clap. Drop it without telling the sidecar it went idle:
@@ -1331,6 +1342,12 @@ final class Voice {
     /// via: what opened it (the cue plays for an orb tap, not for auto-listen or the take after a wake).
     func listenNow(wait: Double? = nil, via: String = "listen", ask: Bool = false) {
         if phase == .wake { stopWake() }
+        // A clap, or the wake a clap asked the sidecar for, replaces the one-word take the talk-over check opened.
+        // Leaving that take open made this return, and the clap did nothing.
+        if (via == "clap" || via == "wake") && Self.clapMayTake(phase: phase, via: takeVia) && (phase == .handsFree || phase == .barge) {
+            if phase == .handsFree { yieldBargeTake() }
+            endBarge("a double clap")
+        }
         // The owner is already talking over Hydra, or a take is open. Keep it. Do not drop it and ask for the wake phrase.
         if phase == .barge { bargeTake(best); return }
         if phase == .handsFree || phase == .holding || phase == .armed || phase == .finishing { return }

@@ -118,6 +118,9 @@ final class ClapDetector {
     /// click of 1 to 3 ms (2 to 4 ms here); a clap is the air squeezed out between two palms and the hands ringing, 5 to
     /// 15 ms (7 ms and up here), more in a room. The hard floor, the same at every sensitivity and calibration.
     static let minWidthMs = 6.0
+    /// A palm clap on this mic (live log 2026-11-24): the thud pulls the centroid down to about 1 to 1.7 kHz, and the
+    /// hiss still lasts this long. A key that clears the width floor is shorter. Only a sound this wide may be that dull.
+    static let palmMs = 8.0
     static func width(_ blocks: [Double], noise: Double, blockMs: Double = 1) -> Double {
         var s = 0.0, s2 = 0.0
         for b in blocks { let x = max(0, b - noise * 1.5); s += x; s2 += x * x }
@@ -140,7 +143,12 @@ final class ClapDetector {
         if peak < floorDb { return String(format: "under the %.0f dB floor", floorDb) }
         if let w = width, w < minWidthMs { return String(format: "a click, %.1f ms (a clap lasts %.1f ms or more: a key, a mouse, a pen)", w, minWidthMs) }
         if jump < riseNeed { return String(format: "rise needs %.1f dB at this level (a key, a tap, a fan)", riseNeed) }
-        if hz < n.hz { return String(format: "needs %.0f Hz at this level (dull: a knock, a thump, a desk)", n.hz) }
+        // A wide hiss can be a palm clap when the thud pulls the centroid under 2 kHz. The live log's clap that
+        // should count was 1639 Hz with a 46 dB rise. A desk tap is also wide and dull (the false one was 1465 Hz
+        // and rose 32 dB; the bench's taps reach higher). Under 1600 Hz, or a rise under 40 dB, it stays a tap.
+        // A short click already failed the width check, so it still needs the strict brightness.
+        let hzNeed = (width ?? 0) >= palmMs && jump >= 40 ? 1600.0 : n.hz
+        if hz < hzNeed { return String(format: "needs %.0f Hz at this level (dull: a knock, a thump, a desk)", hzNeed) }
         if decay < (smooth ? decayDb : n.decay) { return String(format: "needs down %.1f dB (kept sounding: a word, a key let go, a door)", smooth ? decayDb : n.decay) }
         return nil
     }
@@ -164,18 +172,24 @@ final class ClapDetector {
         frame.reserveCapacity(hop)
     }
 
-    /// The quietest clap peak that counts, in dBFS: -27 / -38 / -46 at Low / Medium / High; from the owner's own claps
-    /// when calibrated (12 dB under them at Medium, so a softer clap still counts). Never under floorDb (C8).
-    var levelDb: Double { max(Self.floorDb, guarded ? max(level(sensitivity), level(0.5)) : level(sensitivity)) }
-    /// How far a clap's onset must rise over the room and the moment before it: 18 / 15 / 12 dB.
-    var riseDb: Double { guarded ? max(rise(sensitivity), rise(0.5)) : rise(sensitivity) }
-    private func level(_ s: Double) -> Double {
-        if let c = calibration { return c.peakDb - 6 - 12 * s }
-        return -20 - 36 * s
+    /// The quietest clap peak that counts, in dBFS: -27 / -38 / -46 at Low / Medium / High. "Clap twice" may open that
+    /// further (12 dB under the owner's own claps at Medium, so a softer clap still counts). It never raises the bar:
+    /// a close calibration (the live one, -20.9 dB) used to ask for -32.9 dB, and real claps at -33 to -38 dB were
+    /// logged "too quiet" and never woke. Never under floorDb (C8).
+    var levelDb: Double { max(Self.floorDb, guarded ? max(openLevel(sensitivity), openLevel(0.5)) : openLevel(sensitivity)) }
+    /// How far a clap's onset must rise over the room and the moment before it: 18 / 15 / 12 dB. Calibration may ask
+    /// for less. It never asks for more than the slider.
+    var riseDb: Double { guarded ? max(openRise(sensitivity), openRise(0.5)) : openRise(sensitivity) }
+    private func sliderLevel(_ s: Double) -> Double { -20 - 36 * s }
+    private func sliderRise(_ s: Double) -> Double { 20 - 10 * s }
+    private func openLevel(_ s: Double) -> Double {
+        guard let c = calibration else { return sliderLevel(s) }
+        return min(sliderLevel(s), c.peakDb - 6 - 12 * s)
     }
-    private func rise(_ s: Double) -> Double {
-        if let c = calibration { return max(10, min(20, c.riseDb - 4 - 6 * (s - 0.5))) }
-        return 20 - 10 * s
+    private func openRise(_ s: Double) -> Double {
+        guard let c = calibration else { return sliderRise(s) }
+        let cal = max(10, min(20, c.riseDb - 4 - 6 * (s - 0.5)))
+        return min(sliderRise(s), cal)
     }
 
     /// The loudest frame since the last read, then starts over.
@@ -298,12 +312,12 @@ final class ClapDetector {
         let riseNeed = Self.riseNeed(peak: p.peak, hz: p.hz, calRise: calRise)
         // A clap's hiss over Hydra's voice reads as a few milliseconds here (the bright energy is one burst). The width
         // floor is for a key in a quiet room. It is not applied to a sound already as bright as a clap and clear of the voice.
-        let overVoice = speaking && !calibrating && p.hz >= Self.speakHz && p.peak >= p.bed + Self.overVoiceDb
+        let hiss = speaking && !calibrating && p.hz >= Self.speakHz && p.peak >= p.bed + Self.overVoiceDb
         var line = String(format: "clap candidate %.1f dB (needs %.1f), rise %.1f dB (needs %.1f), %.0f Hz (needs %.0f), %.1f ms wide (needs %.1f), down %.1f dB in 100 ms (needs %.1f)",
                           p.peak, calibrating ? calLevel : levelDb, jump, riseNeed, p.hz, n.hz, width, Self.minWidthMs, decay, p.bump ? n.decay : Self.decayDb)
         if speaking && !calibrating { line += String(format: ", %.1f dB over Hydra's voice (needs %.0f)", p.peak - p.bed, Self.overVoiceDb) }
         // The hard floor (C8), the same at every sensitivity and while calibrating.
-        if let miss = Self.shapeMiss(peak: p.peak, jump: jump, hz: p.hz, decay: decay, smooth: !p.bump, width: overVoice ? nil : width, calRise: calRise) {
+        if let miss = Self.shapeMiss(peak: p.peak, jump: jump, hz: p.hz, decay: decay, smooth: !p.bump, width: hiss ? nil : width, calRise: calRise) {
             // Still a sharp, bright sound (a key, a mouse click): not a clap, and nothing just around it is alone either
             // (typing breaks the quiet a double clap needs). Sharp: it dies away, comes in a run (typing), or stands over
             // the sound under it (Hydra's voice, a fan) and falls back to it, as a key over Hydra's voice does though its
@@ -326,14 +340,18 @@ final class ClapDetector {
             return settle()
         }
         // While Hydra speaks, a key's body tone (about 2.7 to 3.6 kHz, long enough to pass the width floor) is not a clap.
-        // A clap's hiss here is 4.7 kHz and up. The tone still breaks the quiet a later key would need, when it stands
-        // over Hydra's voice. It does not cancel a pair already open: that pair is a clap, and this is not its third hit.
+        // A short sound still needs speakHz. A palm clap on this mic is wider and duller (the live log: 1.0 to 1.7 kHz,
+        // 10 ms or more) and still counts when it stands clear of the voice. The tone still breaks the quiet a later
+        // key would need, when it stands over Hydra's voice. It does not cancel a pair already open.
         if speaking, !calibrating, p.hz < Self.speakHz {
-            if jump >= Self.jumpDb, p.hz >= Self.brightHz, p.peak >= p.bed + Self.overVoiceDb {
-                lastTransient = p.t; lastPeak = p.peak
+            let palm = width >= Self.palmMs && p.hz >= 1600 && jump >= 40 && p.peak >= p.bed + Self.overVoiceDb
+            if !palm {
+                if jump >= Self.jumpDb, p.hz >= Self.brightHz, p.peak >= p.bed + Self.overVoiceDb {
+                    lastTransient = p.t; lastPeak = p.peak
+                }
+                say("\(line): needs \(Int(Self.speakHz)) Hz while Hydra speaks (a key's tone, not a clap)")
+                return settle()
             }
-            say("\(line): needs \(Int(Self.speakHz)) Hz while Hydra speaks (a key's tone, not a clap)")
-            return settle()
         }
         // Calibrating: typing (another sharp onset inside its window) is still not a clap (R11-6).
         if calibrating, p.inner { say("\(line): sharp sounds close together (typing?)"); return settle() }
@@ -724,6 +742,72 @@ enum ClapTest {
         check("a pair at -52 / -50 dB is too soft (soft = 0 wakes)", soft, 0)
         let fine = ClapDetector.pickCalibration([(1.0, -36, 20), (1.4, -30, 22)]) == .set(.init(peakDb: -36, riseDb: 20)) ? 1 : 0
         check("a pair at -36 / -30 dB sets -36 dB, rise 20 (set = 1)", fine, 1)
+        // Live path (voice log 2026-11-24): "Clap twice" next to the mic saved -20.9 dB, rise 38.6. That used to ask
+        // for -32.9 dB and a 20 dB rise, stricter than Medium, so real claps at -33 to -38 dB were "too quiet".
+        let stuck = ClapDetector.Calibration(peakDb: -20.9, riseDb: 38.6)
+        let held = ClapDetector(rate: 48000, sensitivity: 0.5, calibration: stuck)
+        check("a close calibration does not raise Medium's level or rise (\(String(format: "%.1f dB, rise %.1f", held.levelDb, held.riseDb)))", held.levelDb <= -38 && held.riseDb <= 15 ? 1 : 0, 1)
+        // The same log: loud claps the running app turned down. Wide and dull (the thud), not a click and not a thump.
+        let liveClap = ClapDetector.shapeMiss(peak: -18.6, jump: 46, hz: 1639, decay: 24.9, smooth: true, width: 10.1) == nil
+        check("the live log's palm clap (1639 Hz, 10 ms, rise 46 dB) clears the shape", liveClap ? 1 : 0, 1)
+        check("a duller 982 Hz sound stays out (a desk tap sits there)", ClapDetector.shapeMiss(peak: -21.2, jump: 38, hz: 982, decay: 13.3, smooth: true, width: 14.5) == nil ? 1 : 0, 0)
+        check("a 1.5 ms click in that log stays a click", ClapDetector.shapeMiss(peak: -19.0, jump: 43.6, hz: 7285, decay: 23.8, smooth: true, width: 1.5) == nil ? 1 : 0, 0)
+        check("a 666 Hz sound that keeps going stays out", ClapDetector.shapeMiss(peak: -26.7, jump: 21.5, hz: 666, decay: -0.1, smooth: false, width: 19.2) == nil ? 1 : 0, 0)
+        // The function the mic tap calls (ClapTap.feed), with the stuck calibration, on a dull palm double clap.
+        var rng = Rng(s: 11)
+        var live = room(3, rate: 48000, rng: &rng, level: 0.002)
+        palmClap(&live, at: 0.7, rate: 48000, peak: 0.08)
+        palmClap(&live, at: 1.15, rate: 48000, peak: 0.07)
+        check("the mic's feed fires on a dull palm double clap under the stuck calibration", micFires(live, rate: 48000, calibration: stuck), 1)
+        var keys = room(3, rate: 48000, rng: &rng, level: 0.002)
+        Self.key(&keys, at: 0.7, rate: 48000, peak: 0.08, rng: &rng)
+        Self.key(&keys, at: 1.15, rate: 48000, peak: 0.07, rng: &rng)
+        check("the mic's feed stays quiet for two keys under that calibration", micFires(keys, rate: 48000, calibration: stuck), 0)
+        var over = room(4, rate: 48000, rng: &rng, level: 0.002)
+        speech(&over, from: 0, to: 4, rate: 48000, rng: &rng, level: 0.08)
+        clap(&over, at: 1.2, rate: 48000, peak: 1.0, rng: &rng)
+        clap(&over, at: 1.65, rate: 48000, peak: 1.0, rng: &rng)
+        check("a double clap over Hydra's voice, under the stuck calibration, stops it", wakes(over, rate: 48000, sensitivity: 0.5, calibration: stuck, guarded: true, speaking: true), 1)
+        check("that same clap reaches the mic's feed while Hydra speaks", micFires(over, rate: 48000, calibration: stuck, speaking: true), 1)
         return bad == 0 ? 0 : 1
+    }
+
+    /// A palm clap as this laptop mic hears it: a 1.2 kHz thud and a hiss that lasts about 10 ms, then gone.
+    static func palmClap(_ buf: inout [Float], at: Double, rate: Double, peak: Float) {
+        let start = Int(at * rate), n = Int(0.12 * rate)
+        var rng = Rng(s: UInt64(max(1, at * 1000)) &+ 17)
+        var lp: Float = 0
+        let pole = Float(1 - exp(-2 * .pi * 4000 / rate))
+        for i in 0 ..< n where start + i < buf.count {
+            let t = Double(i) / rate
+            let thud = Float(min(1, t / 0.001) * exp(-t / 0.014) * sin(2 * .pi * 1200 * t))
+            let hissEnv = t < 0.01 ? Float(min(1, t / 0.0008)) : Float(exp(-(t - 0.01) / 0.004))
+            lp += pole * (rng.next() - lp)
+            buf[start + i] = max(-1, min(1, buf[start + i] + peak * (0.8 * thud + 0.7 * hissEnv * lp)))
+        }
+    }
+
+    /// What the mic tap calls: ClapTap.feed on 1024-frame float buffers. Counts double claps that reach onClap.
+    static func micFires(_ samples: [Float], rate: Double, calibration: ClapDetector.Calibration?, speaking: Bool = false) -> Int {
+        let tap = ClapTap()
+        tap.configure(sensitivity: 0.5, calibration: calibration)
+        tap.setSpeaking(speaking)
+        tap.setGuarded(speaking)
+        final class Count { var n = 0 }
+        let count = Count()
+        tap.onClap = { count.n += 1 }
+        let fmt = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
+        var i = 0
+        while i < samples.count {
+            let n = min(1024, samples.count - i)
+            guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(n)) else { return -1 }
+            buf.frameLength = AVAudioFrameCount(n)
+            samples.withUnsafeBufferPointer { src in buf.floatChannelData![0].update(from: src.baseAddress! + i, count: n) }
+            tap.feed(buf)
+            i += n
+        }
+        let until = Date(timeIntervalSinceNow: 0.3)
+        while count.n == 0 && Date() < until { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        return count.n
     }
 }

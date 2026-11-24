@@ -13,8 +13,8 @@ const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
 
 // ---- the decisions
 {
-  assert.equal(overReply({ saying: true, voiceOn: true, via: 'clap' }), 'hold', 'a clap take over the reply being said holds it');
-  assert.equal(overReply({ saying: true, voiceOn: true, via: 'barge' }), 'hold', 'so does the talk-over check');
+  assert.equal(overReply({ saying: true, voiceOn: true, via: 'clap' }), 'stop', 'a double clap cuts the reply being said');
+  assert.equal(overReply({ saying: true, voiceOn: true, via: 'barge' }), 'hold', 'the talk-over check still holds it');
   assert.equal(overReply({ saying: false, voiceOn: true, via: 'clap' }), 'stop', 'nothing being said: nothing to hold');
   assert.equal(overReply({ saying: true, voiceOn: false, via: 'clap' }), 'stop', 'voice off: nothing plays, nothing to hold');
   // Second verify pass: a take the owner opened on purpose (talk keys, orb tap, the phrase, auto-listen) cuts the reply,
@@ -44,7 +44,8 @@ const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
 // ---- the wiring
 {
   assert.match(side, /else if \(m\.type === 'voice_state' && m\.state === 'listening'\) \{ addOnTake = false; const via = takeVia && Date\.now\(\) - takeVia\.at < 3000 \? takeVia\.via : ''; takeVia = null; cutTake = overReply\(\{ saying: saidPending, voiceOn: VOICE_ON\(\), via \}\) === 'hold'; if \(cutTake\) hush\(true\); else speech\.stop\(\);/,
-    'a take a noise could open (clap, barge) holds the reply still being said; any other take cuts it');
+    'a talk-over check holds the reply still being said; a clap and any other take cut it');
+  assert.match(side, /if \(via === 'clap'\) \{ takeVia = null; speech\.stop\(\); \}/, 'a clap while a turn is open still cuts the speech');
   assert.match(side, /else if \(m\.type === 'voice_trigger'\) \{ logLine\('trigger', \{ via: m\.via \}\); takeVia = \{ via: String\(m\.via \?\? ''\), at: Date\.now\(\) \};/, 'the trigger says what opened the take');
   assert.doesNotMatch(side, /m\.state === 'listening'\) \{ addOnTake = false; speech\.stop\(\);/, 'the old cut is gone');
   assert.match(side, /else if \(m\.type === 'voice' && m\.text\?\.trim\(\)\) \{\n\s+const held = cutTake \? afterHeld\(\{ words: m\.text, reply: heardTrack\.said\(\) \}\) : null;\n\s+if \(held === 'stop'\) \{ cutTake = false; speech\.stop\(\); \}/,
