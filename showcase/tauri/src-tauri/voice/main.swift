@@ -726,18 +726,58 @@ final class Voice {
             emit(["type": "clap_calibrated", "ok": false, "heard": calibrated.count, "soft": soft])
         }
     }
+    /// A double clap may open a take from idle, from wake listening, from the quiet check over Hydra's voice,
+    /// or from the hands-free take that check already opened. It must not replace a take the owner opened
+    /// (the talk keys, the phrase, the orb, auto-listen).
+    static func clapMayTake(phase: Phase, via: String) -> Bool {
+        switch phase {
+        case .idle, .wake, .barge: return true
+        case .handsFree: return via == "barge"
+        default: return false
+        }
+    }
+    /// A clap take and the take a wake opens ignore the room only while the chime is still playing. Words after it count.
+    /// The chime window is `cueUntil` (Cue.until) plus a short tail. A latch past that window dropped the owner's words,
+    /// so a real double clap woke or paused Hydra and then heard nothing.
+    static func chimeCovers(quietEmpty: Bool, via: String, now: Double, cueUntil: Double) -> Bool {
+        (quietEmpty || via == "clap") && now < cueUntil + 0.05
+    }
     /// A double clap from the clap detector.
     func clapHeard() {
         guard clapOn || speaking else { return }
         switch Trigger.decide(.clap, asleep: asleep, speaking: speaking, clapTalk: clapTalk, phrase: wakeOn, barge: bargeOn) {
-        case .wake: log("double clap"); emit(["type": "clap"])
+        case .wake:
+            // Asleep: the sidecar opens the take. A talk-over take still open would make that listen a no-op.
+            log("double clap")
+            if phase == .handsFree, takeVia == "barge" { yieldBargeTake() }
+            if phase == .barge { endBarge("a double clap") }
+            emit(["type": "clap"])
         case .take:
-            guard phase == .idle || phase == .wake || phase == .barge else { return }
+            // While Hydra speaks, one leaked word ("the") already opened a hands-free take. That take is not the
+            // owner's. A real double clap still interrupts.
+            guard Self.clapMayTake(phase: phase, via: takeVia) else { return }
+            if phase == .handsFree { yieldBargeTake() }
             endBarge("a double clap")
             // Over Hydra's voice, a take that hears no words gives the reply back in BargeGate.window s, not 8 (C7).
             log("double clap: listening"); startTake(via: "clap", wait: speaking ? BargeGate.window : nil)
         case .none: log("double clap: nothing to do (clap-to-talk off)")
         }
+    }
+    /// The talk-over take is in the way of a double clap. Drop it without telling the sidecar it went idle:
+    /// an idle there resumes the reply, and the clap take replaces this one.
+    private func yieldBargeTake() {
+        guard phase == .handsFree, takeVia == "barge" else { return }
+        phase = .idle
+        best = ""
+        woke = false
+        bargeWoke = false
+        reportEmpty = false
+        quietEmpty = false
+        finishTimer?.invalidate(); finishTimer = nil
+        stopAudio()
+        rec?.cancel(); rec = nil
+        ink.clear()
+        wave.hide()
     }
     // Barge-in: while Hydra speaks, the owner talking over it (or a double clap) stops the speech and starts a take.
     // The speech stops because a take starting does that already (the sidecar on voice_state listening).
@@ -1184,8 +1224,6 @@ final class Voice {
     }
     /// The take a wake opens (via 'wake'): if it hears nothing, Hydra just stays awake, with no "I didn't hear anything".
     private var quietEmpty = false
-    /// A clap or a wake take ignores words that were already being said when the chime started (a TV, a call).
-    private var roomTalk = false
     private var takeVia = ""
     /// The take open now is one an ask opened (listen via 'ask'): only that one is closed by the ask's cancel (only
     /// "ask"). Any other take (the owner's keys, a clap, the phrase) clears it, as does the owner taking this one over.
@@ -1204,7 +1242,6 @@ final class Voice {
         if !dryRun { OutputMute.begin() }
         quietEmpty = via == "wake"
         takeVia = via
-        roomTalk = false
         // The listen chime (cue.swift) only for the owner's own triggers; never the pending loop while he talks.
         Cue.pending(false)
         if !dryRun { if Cue.audible(via: via) { Cue.play("listen") } else { Cue.keepAudible() } }
@@ -1578,12 +1615,8 @@ final class Voice {
         }
         // A take started by the wake phrase: the phrase itself isn't part of what was said.
         let text = woke ? (WakeWord.match(raw) ?? WakeWord.dropping(wakeWords, from: raw)) : raw
-        // Speech already running when the chime started never confirms the take. Words after the chime do.
-        if (quietEmpty || takeVia == "clap"), uptime() < Cue.until + 0.05 {
-            roomTalk = true
-            return
-        }
-        if roomTalk { return }
+        // Speech already running while the chime plays does not confirm the take. Words after the chime do.
+        if Self.chimeCovers(quietEmpty: quietEmpty, via: takeVia, now: uptime(), cueUntil: Cue.until) { return }
         guard text != best else { return }
         best = text
         heardAt = uptime()
