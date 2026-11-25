@@ -143,11 +143,13 @@ final class ClapDetector {
         if peak < floorDb { return String(format: "under the %.0f dB floor", floorDb) }
         if let w = width, w < minWidthMs { return String(format: "a click, %.1f ms (a clap lasts %.1f ms or more: a key, a mouse, a pen)", w, minWidthMs) }
         if jump < riseNeed { return String(format: "rise needs %.1f dB at this level (a key, a tap, a fan)", riseNeed) }
-        // A wide hiss can be a palm clap when the thud pulls the centroid under 2 kHz. The live log's clap that
-        // should count was 1639 Hz with a 46 dB rise. A desk tap is also wide and dull (the false one was 1465 Hz
-        // and rose 32 dB; the bench's taps reach higher). Under 1600 Hz, or a rise under 40 dB, it stays a tap.
-        // A short click already failed the width check, so it still needs the strict brightness.
-        let hzNeed = (width ?? 0) >= palmMs && jump >= 40 ? 1600.0 : n.hz
+        // A palm on this mic is wide, and the thud pulls the centroid under 2 kHz. The live clap that should
+        // count was 1639 Hz. At a desk it is about -36 dB and rises about 20 dB, not 40: the 40 dB bar was a close
+        // clap, so a normal desk clap died here as "dull" after the level cap let it through. A wide sound may be
+        // that dull when its rise is still a clap's rise at this level. A desk tap that is this wide stays under
+        // 1600 Hz (the false one was 1465 Hz). A short click already failed the width check, so it still needs
+        // the strict brightness.
+        let hzNeed = (width ?? 0) >= palmMs && jump >= riseNeed ? 1600.0 : n.hz
         if hz < hzNeed { return String(format: "needs %.0f Hz at this level (dull: a knock, a thump, a desk)", hzNeed) }
         if decay < (smooth ? decayDb : n.decay) { return String(format: "needs down %.1f dB (kept sounding: a word, a key let go, a door)", smooth ? decayDb : n.decay) }
         return nil
@@ -340,11 +342,13 @@ final class ClapDetector {
             return settle()
         }
         // While Hydra speaks, a key's body tone (about 2.7 to 3.6 kHz, long enough to pass the width floor) is not a clap.
-        // A short sound still needs speakHz. A palm clap on this mic is wider and duller (the live log: 1.0 to 1.7 kHz,
-        // 10 ms or more) and still counts when it stands clear of the voice. The tone still breaks the quiet a later
-        // key would need, when it stands over Hydra's voice. It does not cancel a pair already open.
+        // A short sound still needs speakHz. A palm clap on this mic is wider and duller (the live log: 1.6 to 1.7 kHz,
+        // 10 ms or more). At a desk its rise is about 20 dB, so the old 40 dB bar dropped it and it could not interrupt.
+        // The dull band stops under 2.4 kHz, short of a key's tone. It still has to stand clear of the voice.
+        // The tone still breaks the quiet a later key would need, when it stands over Hydra's voice. It does not
+        // cancel a pair already open.
         if speaking, !calibrating, p.hz < Self.speakHz {
-            let palm = width >= Self.palmMs && p.hz >= 1600 && jump >= 40 && p.peak >= p.bed + Self.overVoiceDb
+            let palm = width >= Self.palmMs && p.hz >= 1600 && p.hz < 2400 && jump >= riseNeed && p.peak >= p.bed + Self.overVoiceDb
             if !palm {
                 if jump >= Self.jumpDb, p.hz >= Self.brightHz, p.peak >= p.bed + Self.overVoiceDb {
                     lastTransient = p.t; lastPeak = p.peak
@@ -751,6 +755,8 @@ enum ClapTest {
         let liveClap = ClapDetector.shapeMiss(peak: -18.6, jump: 46, hz: 1639, decay: 24.9, smooth: true, width: 10.1) == nil
         check("the live log's palm clap (1639 Hz, 10 ms, rise 46 dB) clears the shape", liveClap ? 1 : 0, 1)
         check("a duller 982 Hz sound stays out (a desk tap sits there)", ClapDetector.shapeMiss(peak: -21.2, jump: 38, hz: 982, decay: 13.3, smooth: true, width: 14.5) == nil ? 1 : 0, 0)
+        check("a wide desk tap at 1465 Hz stays a tap", ClapDetector.shapeMiss(peak: -26, jump: 32, hz: 1465, decay: 15, smooth: true, width: 13) == nil ? 1 : 0, 0)
+        check("a desk clap at -36 dB (1670 Hz, 12 ms, rise 23) clears the shape", ClapDetector.shapeMiss(peak: -36, jump: 23, hz: 1670, decay: 18, smooth: true, width: 12) == nil ? 1 : 0, 1)
         check("a 1.5 ms click in that log stays a click", ClapDetector.shapeMiss(peak: -19.0, jump: 43.6, hz: 7285, decay: 23.8, smooth: true, width: 1.5) == nil ? 1 : 0, 0)
         check("a 666 Hz sound that keeps going stays out", ClapDetector.shapeMiss(peak: -26.7, jump: 21.5, hz: 666, decay: -0.1, smooth: false, width: 19.2) == nil ? 1 : 0, 0)
         // The function the mic tap calls (ClapTap.feed), with the stuck calibration, on a dull palm double clap.
@@ -769,7 +775,51 @@ enum ClapTest {
         clap(&over, at: 1.65, rate: 48000, peak: 1.0, rng: &rng)
         check("a double clap over Hydra's voice, under the stuck calibration, stops it", wakes(over, rate: 48000, sensitivity: 0.5, calibration: stuck, guarded: true, speaking: true), 1)
         check("that same clap reaches the mic's feed while Hydra speaks", micFires(over, rate: 48000, calibration: stuck, speaking: true), 1)
+        // The level cap let a -36 dB clap through, then the shape asked for 3000 Hz unless the rise was 40 dB.
+        // A desk clap on this mic is about 1.7 kHz and rises about 20 dB. Same function the mic tap calls.
+        let desk = deskPair(rate: 48000)
+        check("the mic's feed wakes on a -36 dB desk clap under a calibration stricter than Medium", micFires(desk, rate: 48000, calibration: stuck), 1)
+        check("that desk clap interrupts while Hydra speaks", micFires(desk, rate: 48000, calibration: stuck, speaking: true), 1)
         return bad == 0 ? 0 : 1
+    }
+
+    /// A desk clap as this laptop mic hears it: a 1.1 kHz thud and a little hiss. The loudest 10 ms frame, once scaled,
+    /// sits near -36 dB and the centroid near 1.7 kHz. A close clap's 40 dB rise is not this.
+    static func deskClap(_ buf: inout [Float], at: Double, rate: Double, peak: Float) {
+        let start = Int(at * rate), n = Int(0.12 * rate)
+        var rng = Rng(s: UInt64(max(1, at * 1000)) &+ 17)
+        var lp: Float = 0
+        let pole = Float(1 - exp(-2 * .pi * 3500 / rate))
+        for i in 0 ..< n where start + i < buf.count {
+            let t = Double(i) / rate
+            let thud = Float(min(1, t / 0.0015) * exp(-t / 0.012) * sin(2 * .pi * 1100 * t))
+            let hissEnv = t < 0.008 ? Float(min(1, t / 0.0006)) : Float(exp(-(t - 0.008) / 0.006))
+            lp += pole * (rng.next() - lp)
+            buf[start + i] += peak * (thud + 0.05 * hissEnv * lp)
+        }
+    }
+
+    /// Two desk claps whose loudest 10 ms frames are -36 and -36.5 dBFS, in a quiet room.
+    static func deskPair(rate: Double) -> [Float] {
+        var rng = Rng(s: 11)
+        var buf = room(3, rate: rate, rng: &rng, level: 0.002)
+        func place(_ at: Double, _ db: Double) {
+            var one = [Float](repeating: 0, count: buf.count)
+            deskClap(&one, at: at, rate: rate, peak: 1)
+            let hop = max(64, Int(rate / 100))
+            var loud = -120.0, i = 0
+            while i + hop <= one.count {
+                var e = 0.0
+                for k in 0 ..< hop { let x = Double(one[i + k]); e += x * x }
+                loud = max(loud, 10 * log10(e / Double(hop) + 1e-12))
+                i += hop
+            }
+            let g = Float(pow(10, (db - loud) / 20))
+            for k in 0 ..< one.count { buf[k] += one[k] * g }
+        }
+        place(0.7, -36)
+        place(1.15, -36.5)
+        return buf
     }
 
     /// A palm clap as this laptop mic hears it: a 1.2 kHz thud and a hiss that lasts about 10 ms, then gone.
