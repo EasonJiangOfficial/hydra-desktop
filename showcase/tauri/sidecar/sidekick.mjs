@@ -332,13 +332,21 @@ function cleanPhrase(raw) {
   if (words.length === 1 && words[0].length < 5) return { ok: false, why: 'One short word is heard by mistake. Add a word, like Hey Nova.' };
   return { ok: true, phrase: t };
 }
-let wakeTakeFrom = null, ignoreWakeNothingHeard = false;
+let wakeTakeFrom = null, pendingWake = null, ignoreWakeNothingHeard = false;
+const WAKE_TAKE_WINDOW_MS = 10_000;
+const TAKE_HOLD_MS = 3 * 60_000;
+let voiceBusySince = null, voiceHoldTimer = null;
+function wakeTakePending() {
+  if (pendingWake && Date.now() - pendingWake.at > WAKE_TAKE_WINDOW_MS) pendingWake = null;
+  return pendingWake;
+}
+function clearWakeTake() { wakeTakeFrom = pendingWake = null; }
 const power = createPower({
-  // Never idle sleep while a turn, an ask or an explicit wake's take is open.
-  working: () => busy || pending.size > 0 || (voiceBusy && isExplicitWake(wakeTakeFrom)),
-  taking: () => voiceBusy,
+  working: () => busy || pending.size > 0,
+  taking: () => voiceBusy && Date.now() - voiceBusySince < TAKE_HOLD_MS,
   onChange: ({ asleep, why }) => {
-    wakeTakeFrom = asleep || why === 'talk' ? null : why;
+    wakeTakeFrom = null;
+    pendingWake = asleep || why === 'talk' ? null : { why, at: Date.now() };
     logLine('power', { asleep, why });
     if (asleep) { asksAsleep(); speech.stop(); send({ type: 'listen_cancel' }); interruptQuietly('sleep'); }
     voiceConfig();
@@ -2701,7 +2709,7 @@ let voiceConfigSent = '';
 const voiceConfig = () => {
   ui({ kind: 'wake_phrase', on: phraseListening() });
   const enabled = VOICE_OK && config.voice && voiceReady();
-  if (!enabled) { voiceHelperUp = false; wakeTakeFrom = null; } // the helper stops; it says when it's up again
+  if (!enabled) { voiceHelperUp = false; clearWakeTake(); } // the helper stops; it says when it's up again
   nativeNow();
   // The key phrase listens asleep too (it wakes Hydra, W5 contract 4); it's Hydra's own (agent_settings.wake_phrase).
   const msg = { type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: wakePhraseNow(), lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), clapCal: config.clapCalibration ?? null, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) };
@@ -2750,15 +2758,57 @@ const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecog
 // The mics the voice helper last listed (asked whenever the panel opens), and the pick sent to it ('' is automatic).
 let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
+function voiceTakeChanged(wasBusy) {
+  if (wasBusy === voiceBusy) return;
+  if (voiceBusy) {
+    voiceBusySince = Date.now();
+    // Start the idle countdown even if a stuck helper never sends idle.
+    voiceHoldTimer = setTimeout(() => { voiceHoldTimer = null; power.busy(); }, TAKE_HOLD_MS);
+    voiceHoldTimer.unref?.();
+  } else {
+    voiceBusySince = null;
+    clearTimeout(voiceHoldTimer);
+    voiceHoldTimer = null;
+    power.busy();
+  }
+}
+function emptyTakeEnded() {
+  const wake = wakeTakeFrom;
+  clearWakeTake();
+  power.takeEnded();
+  if (isExplicitWake(wake) && !power.asleep && !busy && !cutTake && pending.size === 0 && yesNoOpen.size === 0) {
+    logLine('nothing_heard', { explicit: true });
+    say("I didn't catch that. Tap and try again.", 'concerned');
+  }
+}
+function resetLostTake() {
+  clearWakeTake();
+  const lostTake = voiceBusy || emptyTake || cutTake;
+  if (!voiceHelperUp && !lostTake) return;
+  ignoreWakeNothingHeard ||= lostTake;
+  const wasVoiceBusy = voiceBusy;
+  voiceBusy = false;
+  emptyTake = false;
+  voiceTakeChanged(wasVoiceBusy);
+  addOnTake = false;
+  hush(false);
+  askTake = null;
+  for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w);
+  if (snap?.waitingVoice) snap.waitingVoice = false;
+  if (cutTake) resumeCut();
+  stir();
+  pendingNow();
+}
 function onVoice(m) {
-  if (m.type === 'voice_ready' && voiceHelperUp) { // A restarted helper lost the take it was holding.
-    voiceBusy = false; emptyTake = false; wakeTakeFrom = null;
-  }
+  const wasVoiceBusy = voiceBusy;
+  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') { emptyTake = true; takeAt = Date.now(); } stir(); pendingNow(); }
   if (m.type === 'voice_state') {
-    voiceBusy = m.state === 'listening' || m.state === 'processing';
-    if (m.state === 'listening') { emptyTake = true; ignoreWakeNothingHeard = false; takeAt = Date.now(); }
-    stir(); pendingNow();
-  }
+    voiceTakeChanged(wasVoiceBusy);
+    if (m.state === 'listening') {
+      if (pendingWake) { wakeTakeFrom = wakeTakePending()?.why ?? null; pendingWake = null; }
+      ignoreWakeNothingHeard = wakeTakeFrom !== null;
+    } else if (m.state === 'idle' && !emptyTake) clearWakeTake();
+  } else if (m.type === 'voice_ready') resetLostTake();
   // A take the helper says isn't the ask's (the owner's own, begun as the ask's was sent, so the helper never opened that
   // one): it isn't closed when the ask ends.
   if (m.type === 'voice_state' && m.state === 'listening' && askTake && m.ask !== true) askTake = null;
@@ -2787,23 +2837,7 @@ function onVoice(m) {
     if (typeof m.ms === 'number') logLine('voice_final', { ms: m.ms, via: String(m.via ?? ''), chars: m.text.trim().length });
     onSpoken(m.text.trim(), m.area);
   }
-  else if (m.type === 'voice_state' && m.state === 'idle') {
-    addOnTake = false; hush(false); askTake = null;
-    for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w);
-    const wake = wakeTakeFrom;
-    wakeTakeFrom = null;
-    if (emptyTake) {
-      emptyTake = false;
-      ignoreWakeNothingHeard ||= wake !== null;
-      power.takeEnded();
-      if (isExplicitWake(wake) && !power.asleep && !busy && !cutTake) {
-        logLine('nothing_heard', { explicit: true });
-        say("I didn't catch that. Tap and try again.", 'concerned');
-      }
-    }
-    if (snap?.waitingVoice) snap.waitingVoice = false;
-    if (cutTake) resumeCut();
-  } // the take ended (its words came first)
+  else if (m.type === 'voice_state' && m.state === 'idle') { addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (emptyTake) { emptyTake = false; emptyTakeEnded(); } if (snap?.waitingVoice) snap.waitingVoice = false; if (cutTake) resumeCut(); } // the take ended (its words came first)
   else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; voiceConfigSent = ''; voiceConfig(); }
   // "Clap twice" (the panel): the owner's claps set the detector for his room; the live level while the page is open.
   else if (m.type === 'voice_clap_calibrated') {
@@ -2820,9 +2854,9 @@ function onVoice(m) {
   else if (m.type === 'voice_lang') { langInfo = { id: String(m.id ?? ''), engine: String(m.engine ?? ''), online: !!m.online }; logLine('speech_lang', langInfo); panel(); }
   else if (m.type === 'voice_error') {
     if (m.code === 'nothing_heard' && snap) { snap.waitingVoice = false; return; }
-    // Some helpers report the empty take after idle. Wake takes already handled it there.
+    // Some helpers report the empty take after idle. The wake take has its own feedback there.
     if (m.code === 'nothing_heard' && ignoreWakeNothingHeard) return;
-    if (m.code !== 'nothing_heard' && wakeTakeFrom !== null) { ignoreWakeNothingHeard = true; wakeTakeFrom = null; }
+    if (m.code !== 'nothing_heard') clearWakeTake();
     if (m.code === 'model_missing') startVoiceDownload();
     else if (m.code === 'permission' && !MAC) {
       say('Windows is blocking the microphone. In the Privacy settings I just opened, turn on microphone access and "Let desktop apps access your microphone".', 'concerned');
@@ -3651,6 +3685,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'agent_power') { if (m.on) power.wake(String(m.from || 'asked')); else power.sleep(String(m.from || 'asked')); }
   // An orb tap (the web orb's bridge listen, or the desktop orb): asleep it wakes Hydra (and listens); during a take it
   // ends the take; otherwise it opens one, with the listen chime.
+  else if (m.type === 'orb_listen' && !power.asleep && !voiceBusy && wakeTakePending()) return; // the wake is already opening a take
   else if (m.type === 'orb_listen') {
     const from = m.from === 'orb' ? 'orb' : 'web';
     logLine('orb_listen', { from, asleep: power.asleep, taking: voiceBusy });
@@ -3673,8 +3708,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'reply_said') { heardTrack.finished(); power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
   else if (m.type === 'listen_cancel') {
     autoTurn = null;
-    ignoreWakeNothingHeard ||= wakeTakeFrom !== null;
-    wakeTakeFrom = null;
+    clearWakeTake();
     send({ type: 'listen_cancel' });
   } // Esc while the mic is on
   // A link clicked on the research card: web and mail links only.
