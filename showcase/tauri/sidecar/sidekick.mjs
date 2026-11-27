@@ -37,7 +37,7 @@ import { briefNote } from './brief.mjs';
 import { CHECK_MS, DEFAULT_DISTRACTIONS, check as focusCheck, parseDistractions, startBlock } from './focus.mjs';
 import { saveCardImage } from './cardimage.mjs';
 import { wakeName } from './wakename.mjs';
-import { cleanSleepWord, createPower, DEFAULT_SLEEP_WORD, heardSleepWord } from './power.mjs';
+import { cleanSleepWord, createPower, DEFAULT_SLEEP_WORD, heardSleepWord, isExplicitWake } from './power.mjs';
 import { cleanDeviceKey, cleanHydraUrl, createHydraLink, HYDRA_KEY_SECRET } from './hydralink.mjs';
 import { SystemVoice, systemStatus } from './sysvoice.mjs';
 import { HydraVoice } from './hydravoice.mjs';
@@ -332,10 +332,13 @@ function cleanPhrase(raw) {
   if (words.length === 1 && words[0].length < 5) return { ok: false, why: 'One short word is heard by mistake. Add a word, like Hey Nova.' };
   return { ok: true, phrase: t };
 }
+let wakeTakeFrom = null, ignoreWakeNothingHeard = false;
 const power = createPower({
-  // Never idle sleep while a turn or an ask is open (C4); prompt()'s end restarts the 5 minutes.
-  working: () => busy || pending.size > 0,
+  // Never idle sleep while a turn, an ask or an explicit wake's take is open.
+  working: () => busy || pending.size > 0 || (voiceBusy && isExplicitWake(wakeTakeFrom)),
+  taking: () => voiceBusy,
   onChange: ({ asleep, why }) => {
+    wakeTakeFrom = asleep || why === 'talk' ? null : why;
     logLine('power', { asleep, why });
     if (asleep) { asksAsleep(); speech.stop(); send({ type: 'listen_cancel' }); interruptQuietly('sleep'); }
     voiceConfig();
@@ -2698,7 +2701,7 @@ let voiceConfigSent = '';
 const voiceConfig = () => {
   ui({ kind: 'wake_phrase', on: phraseListening() });
   const enabled = VOICE_OK && config.voice && voiceReady();
-  if (!enabled) voiceHelperUp = false; // the helper stops; it says when it's up again
+  if (!enabled) { voiceHelperUp = false; wakeTakeFrom = null; } // the helper stops; it says when it's up again
   nativeNow();
   // The key phrase listens asleep too (it wakes Hydra, W5 contract 4); it's Hydra's own (agent_settings.wake_phrase).
   const msg = { type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: wakePhraseNow(), lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), clapCal: config.clapCalibration ?? null, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) };
@@ -2748,7 +2751,14 @@ const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecog
 let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
 function onVoice(m) {
-  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') { emptyTake = true; takeAt = Date.now(); } stir(); pendingNow(); }
+  if (m.type === 'voice_ready' && voiceHelperUp) { // A restarted helper lost the take it was holding.
+    voiceBusy = false; emptyTake = false; wakeTakeFrom = null;
+  }
+  if (m.type === 'voice_state') {
+    voiceBusy = m.state === 'listening' || m.state === 'processing';
+    if (m.state === 'listening') { emptyTake = true; ignoreWakeNothingHeard = false; takeAt = Date.now(); }
+    stir(); pendingNow();
+  }
   // A take the helper says isn't the ask's (the owner's own, begun as the ask's was sent, so the helper never opened that
   // one): it isn't closed when the ask ends.
   if (m.type === 'voice_state' && m.state === 'listening' && askTake && m.ask !== true) askTake = null;
@@ -2777,7 +2787,23 @@ function onVoice(m) {
     if (typeof m.ms === 'number') logLine('voice_final', { ms: m.ms, via: String(m.via ?? ''), chars: m.text.trim().length });
     onSpoken(m.text.trim(), m.area);
   }
-  else if (m.type === 'voice_state' && m.state === 'idle') { addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (emptyTake) { emptyTake = false; power.takeEnded(); } if (snap?.waitingVoice) snap.waitingVoice = false; if (cutTake) resumeCut(); } // the take ended (its words came first)
+  else if (m.type === 'voice_state' && m.state === 'idle') {
+    addOnTake = false; hush(false); askTake = null;
+    for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w);
+    const wake = wakeTakeFrom;
+    wakeTakeFrom = null;
+    if (emptyTake) {
+      emptyTake = false;
+      ignoreWakeNothingHeard ||= wake !== null;
+      power.takeEnded();
+      if (isExplicitWake(wake) && !power.asleep && !busy && !cutTake) {
+        logLine('nothing_heard', { explicit: true });
+        say("I didn't catch that. Tap and try again.", 'concerned');
+      }
+    }
+    if (snap?.waitingVoice) snap.waitingVoice = false;
+    if (cutTake) resumeCut();
+  } // the take ended (its words came first)
   else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; voiceConfigSent = ''; voiceConfig(); }
   // "Clap twice" (the panel): the owner's claps set the detector for his room; the live level while the page is open.
   else if (m.type === 'voice_clap_calibrated') {
@@ -2794,6 +2820,9 @@ function onVoice(m) {
   else if (m.type === 'voice_lang') { langInfo = { id: String(m.id ?? ''), engine: String(m.engine ?? ''), online: !!m.online }; logLine('speech_lang', langInfo); panel(); }
   else if (m.type === 'voice_error') {
     if (m.code === 'nothing_heard' && snap) { snap.waitingVoice = false; return; }
+    // Some helpers report the empty take after idle. Wake takes already handled it there.
+    if (m.code === 'nothing_heard' && ignoreWakeNothingHeard) return;
+    if (m.code !== 'nothing_heard' && wakeTakeFrom !== null) { ignoreWakeNothingHeard = true; wakeTakeFrom = null; }
     if (m.code === 'model_missing') startVoiceDownload();
     else if (m.code === 'permission' && !MAC) {
       say('Windows is blocking the microphone. In the Privacy settings I just opened, turn on microphone access and "Let desktop apps access your microphone".', 'concerned');
@@ -3642,7 +3671,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   // The player played an ask's question to its end (its mark): the voice helper on the Mac, else the overlay.
   else if (m.type === 'voice_played') askPlayed(String(m.mark ?? ''));
   else if (m.type === 'reply_said') { heardTrack.finished(); power.busy(); if (!busy) { holdWake(false); saidPending = false; clearTimeout(saidCap); stir(); } }
-  else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on
+  else if (m.type === 'listen_cancel') {
+    autoTurn = null;
+    ignoreWakeNothingHeard ||= wakeTakeFrom !== null;
+    wakeTakeFrom = null;
+    send({ type: 'listen_cancel' });
+  } // Esc while the mic is on
   // A link clicked on the research card: web and mail links only.
   else if (m.type === 'open_link') { const v = checkLink(m.url); if (v.level === SAFE) openUrl(String(m.url)); else console.error('open_link blocked:', v.reason); }
   else if (m.type === 'list_toggle') toggleItem(String(m.id)).catch((e) => console.error('list', e));

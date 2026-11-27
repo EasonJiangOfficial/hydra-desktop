@@ -11,6 +11,8 @@
 
 export const SLEEP_AFTER_MS = 5 * 60_000;
 export const DEFAULT_SLEEP_WORD = 'Hydra, sleep';
+const EXPLICIT_WAKES = new Set(['web', 'orb', 'panel', 'asked', 'talk']);
+export const isExplicitWake = (why) => EXPLICIT_WAKES.has(why);
 
 // Numbers as they're said ("3 kill" is "three kill"), digits apart from letters: voice/phrase.swift's Spoken.words.
 const SMALL = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty'];
@@ -103,8 +105,9 @@ export function createPower({ onChange, working = () => false, taking = () => fa
     sleep: (why = 'asked') => { provisional = false; clearConfirm(); return set(true, why); },
     wake: (why = 'asked') => {
       const ok = set(false, why);
-      // A typed message is a real wake. A clap, the phrase or a tap stays provisional until words arrive.
-      if (!asleep && why !== 'talk') { provisional = true; armConfirm(); } else { provisional = false; clearConfirm(); }
+      // A deliberate wake needs no confirmation. A late clap or phrase can't make an awake session provisional.
+      if (isExplicitWake(why)) { provisional = false; clearConfirm(); }
+      else if (ok) { provisional = true; armConfirm(); }
       return ok;
     },
     /** The take ended. No words, and nothing else confirmed the wake: back to sleep, with no sound. */
