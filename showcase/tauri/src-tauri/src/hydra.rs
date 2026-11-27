@@ -1,10 +1,14 @@
 // Hydra Desktop's main window: the Hydra web app (one codebase for every page), plus a small bridge so the web app's
 // orb can mirror the Hydra Agent that runs here. The window only loads Hydra, its Supabase sign-in and Plaid Link (which
-// Hydra embeds); any other page is blocked. wry asks about every frame's navigation, not just the top one, so a blocked
+// Hydra embeds), plus the matching Entertainment player iframe on macOS. Wry asks about every frame's navigation, so a blocked
 // load is never opened anywhere: only a link the owner opens in a new window (target=_blank) goes to the browser. The page gets no Tauri commands at all (main.rs refuses every invoke from this
 // window): it talks to the app only through `hydra-desktop://<command>` navigations, which are caught here.
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+
+#[cfg(target_os = "macos")]
+#[path = "playback.rs"]
+mod playback;
 
 pub const MAIN_LABEL: &str = "main";
 pub const HYDRA_ORIGIN: &str = "https://hydra-olive-one.vercel.app";
@@ -270,6 +274,8 @@ pub fn open_main(app: &AppHandle) {
         .build();
     match built {
         Ok(w) => {
+            #[cfg(target_os = "macos")]
+            playback::install(&w);
             let w2 = w.clone();
             // Closing hides it, so the page (and the orb in it) is there again at once from the Dock or the menu.
             w.on_window_event(move |e| {

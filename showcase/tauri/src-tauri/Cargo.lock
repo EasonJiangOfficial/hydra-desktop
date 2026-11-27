@@ -2848,10 +2848,12 @@ dependencies = [
 name = "roamies"
 version = "1.0.0"
 dependencies = [
+ "block2",
  "global-hotkey",
  "gtk",
  "objc2",
  "objc2-service-management",
+ "objc2-web-kit",
  "serde_json",
  "tauri",
  "tauri-build",
