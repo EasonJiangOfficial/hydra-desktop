@@ -7,7 +7,7 @@ description = "Hydra Desktop: the Hydra Agent and the Hydra interface for macOS"
 repository = "https://github.com/EasonJiangOfficial/hydra-desktop"
 
 [build-dependencies]
-tauri-build = { version = "=2.7.5", features = [] }
+tauri-build = { version = "=2.7.6", features = [] }
 
 [dependencies]
 tauri = { version = "=2.12.6", features = ["tray-icon", "macos-private-api"] }
