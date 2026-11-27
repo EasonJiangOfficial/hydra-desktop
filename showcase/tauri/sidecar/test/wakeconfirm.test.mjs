@@ -72,7 +72,7 @@ const powerSource = sidekick.match(/^let [^\n]*pendingWake = null,[\s\S]*?^const
 const voiceSource = sidekick.match(/^const micPick = [^\n]*\n([\s\S]*?^function onVoice\(m\) \{[\s\S]*?^\})/m)[1];
 const voiceConfigSource = sidekick.match(/^let voiceConfigSent = [^\n]*\nconst voiceConfig = \(\) => \{[\s\S]*?^\};/m)[0];
 const wakeSource = readFileSync(new URL('../voiceturn.mjs', import.meta.url), 'utf8').match(/^export (function wakeActions\(why\) \{[\s\S]*?^\})/m)[1];
-const wakeRoutes = sidekick.match(/^  else if \(m\.type === 'agent_power'\)[\s\S]*?^  \}/m)[0];
+const wakeRoutes = sidekick.match(/^  else if \(m\.type === 'agent_power'\)[\s\S]*?^  else if \(m\.type === 'orb_listen'\) \{[\s\S]*?^  \}/m)[0];
 const panelWake = sidekick.match(/^  else if \(id === 'power:wake'\) [^\n]*/m)[0];
 const cancelRoute = sidekick.match(/^  else if \(m\.type === 'listen_cancel'\)[\s\S]*?\} \/\/ Esc while the mic is on/m)[0];
 
@@ -89,7 +89,7 @@ function sidecar({ busy = false, holdReply = false, wakeCueDelay = 0 } = {}) {
     voiceReady: () => true, phraseListening: () => false, phraseOn: () => false, wakePhraseNow: () => 'Hey Hydra',
     clapTalkOn: () => false, bargeOn: () => false, clapSensitivity: () => 0.5, notchMode: () => 'off',
     busy, voiceBusy: false, voiceHelperUp: true, saidPending: false, emptyTake: false, addOnTake: false,
-    pending: new Map(), yesNoOpen: new Map(), askTake: null, takeVia: null, cutTake: false, snap: null,
+    pending: new Map(), yesNoOpen: new Map(), approvalOpen: 0, askTake: null, takeVia: null, cutTake: false, snap: null,
     resumedAt: -Infinity, talkHowLong: () => 'Try again', VOICE_ON: () => false,
     whileBusy: ({ busy }) => busy ? 'add_on' : 'new', overReply: () => holdReply ? 'hold' : 'stop',
     afterHeld: () => 'stop', heardTrack: { said: () => '' },
@@ -99,7 +99,7 @@ function sidecar({ busy = false, holdReply = false, wakeCueDelay = 0 } = {}) {
       sent.push({ ...message });
       if (wakeCueDelay && message.type === 'cue' && message.name === 'wake') clock.advance(wakeCueDelay);
     },
-    onSpoken: (words) => spoken.push(words),
+    onSpoken: (words) => { power.talked(); spoken.push(words); },
     asksAsleep: noop, interruptQuietly: noop, nativeNow: noop, ui: noop, menu: noop, pushWeb: noop,
     stir: () => refreshed.push(['stir', state.voiceBusy]), pendingNow: () => refreshed.push(['pendingNow', state.voiceBusy]),
     speech: { stop: noop }, warmUp: noop, hush: (on) => hushed.push(on), whereNow: noop, micPick: noop, askArm: noop,
@@ -109,60 +109,93 @@ function sidecar({ busy = false, holdReply = false, wakeCueDelay = 0 } = {}) {
   const menuSource = `function menuAction(id) { if (false) {}\n${panelWake}\n}`;
   const { power, onVoice, route, menuAction, voiceConfig } = runInNewContext(
     `${wakeSource}\n${powerSource}\n${voiceConfigSource}\n${voiceSource}\n${routeSource}\n${menuSource}\n({ power, onVoice, route, menuAction, voiceConfig });`, state);
-  const voiceState = (state, mode = 'handsfree') => onVoice({ type: 'voice_state', state, mode: state === 'listening' ? mode : null });
+  const voiceState = (state, mode = 'handsfree') => onVoice({
+    type: 'voice_state', state, mode: state === 'listening' ? mode : null, ask: state === 'listening' ? false : null,
+  });
   const nothingHeard = () => onVoice({ type: 'voice_error', code: 'nothing_heard', spoke: false });
+  const silentCancel = () => onVoice({ type: 'voice_state', state: 'idle', mode: null, ask: null, cancelled: true });
+  const finishEmpty = (via) => {
+    voiceState('processing');
+    voiceState('idle');
+    if (via !== 'wake') nothingHeard();
+  };
+  const finishWords = (text) => {
+    voiceState('processing');
+    onVoice({ type: 'voice', text, area: null, ms: 300, via: 'recognizer' });
+    voiceState('idle');
+  };
   power.sleep();
   sent.length = 0;
-  return { clock, power, route, menuAction, voiceConfig, onVoice, voiceState, nothingHeard, said, logged, sent, spoken, state, hushed, refreshed };
+  return { clock, power, route, menuAction, voiceConfig, onVoice, voiceState, silentCancel, finishEmpty, finishWords, said, logged, sent, spoken, state, hushed, refreshed };
 }
 
 const tapRetry = "I didn't catch that. Tap and try again.";
 const helperRetry = "I didn't hear anything. Try again.";
 
-test('a tap wake stays awake and gives one retry line even if the helper reports no words too', () => {
-  for (const reason of ['web', 'orb', 'panel', 'asked']) {
-    const { clock, power, route, menuAction, voiceState, nothingHeard, said, logged, sent } = sidecar();
-    if (reason === 'panel') menuAction('power:wake');
-    else if (reason === 'web') route({ type: 'orb_listen', from: 'web' });
-    else route({ type: 'agent_power', on: true, from: reason === 'asked' ? undefined : reason });
-    assert.deepEqual(sent.at(-1), { type: 'listen', via: 'wake', wait: 8 });
-    voiceState('listening');
-    clock.advance(40_000);
-    assert.equal(power.asleep, false, `${reason}: still awake during the take`);
-    if (reason === 'orb') {
-      route({ type: 'orb_listen', from: 'orb' });
-      assert.deepEqual(sent.at(-1), { type: 'listen_finish' });
-      voiceState('processing');
-    } // A quiet timeout goes straight to idle.
-    voiceState('idle');
-    voiceState('idle');
-    if (reason === 'orb') nothingHeard(); // The Windows/Linux helper reports this after idle.
-    assert.equal(power.asleep, false, `${reason}: still awake after the take`);
-    assert.deepEqual(said, ["I didn't catch that. Tap and try again."], reason);
-    assert.deepEqual(logged.filter(([kind]) => kind === 'nothing_heard'), [['nothing_heard', { explicit: true }]], reason);
-  }
-});
+const takePaths = [
+  ...['web', 'orb', 'panel', 'asked'].map((wake) => ({ name: `wake from ${wake}`, wake, via: 'wake', explicit: true })),
+  ...['orb', 'web'].map((from) => ({ name: `awake tap from ${from}`, from, via: 'orb', explicit: true })),
+  ...['clap', 'phrase'].flatMap((wake) => [true, false].map((claim) => ({
+    name: `${wake} ${claim ? 'with' : 'without'} an orb tap`, wake, claim,
+    via: wake === 'clap' ? 'wake' : 'phrase', mode: wake === 'phrase' ? 'wake' : 'handsfree',
+    explicit: claim, provisional: !claim,
+  }))),
+  { name: 'keys hold', via: 'keys', mode: 'hold' },
+  { name: 'keys tap', via: 'keys' },
+];
 
-test('the confirmation timer holds a hands-free take open and an empty take ends silently', () => {
-  for (const reason of ['clap', 'phrase']) {
-    const { clock, power, route, voiceState, nothingHeard, said, logged, sent } = sidecar();
-    route({ type: 'agent_power', on: true, from: reason });
-    assert.equal(sent.some(({ type }) => type === 'listen'), reason === 'clap', 'the phrase already opened its own take');
-    voiceState('listening', reason === 'phrase' ? 'wake' : 'handsfree');
-    clock.advance(12_000);
-    assert.equal(power.asleep, false, `${reason}: still awake during the take`);
-    voiceState('processing');
-    voiceState('idle');
-    nothingHeard();
-    assert.equal(power.asleep, true, reason);
-    assert.deepEqual(logged.at(-1), ['power', { asleep: true, why: 'unconfirmed' }], reason);
-    assert.deepEqual(said, [], reason);
+for (const path of takePaths) {
+  for (const end of ['silent cancel', 'finished empty', 'words']) {
+    test(`${path.name} / ${end}`, () => {
+      const { clock, power, route, menuAction, voiceState, silentCancel, finishEmpty, finishWords, said, logged, sent, spoken } = sidecar();
+      if (path.wake === 'panel') menuAction('power:wake');
+      else if (path.wake) route({ type: 'agent_power', on: true, from: path.wake === 'asked' ? undefined : path.wake });
+      else power.talked();
+      if (path.from) route({ type: 'orb_listen', from: path.from });
+      const listen = path.via === 'wake' ? [{ type: 'listen', via: 'wake', wait: 8 }]
+        : path.via === 'orb' ? [{ type: 'listen', via: 'orb' }] : [];
+      assert.deepEqual(sent.filter(({ type }) => type === 'listen'), listen);
+      voiceState('listening', path.mode);
+
+      clock.advance(1100);
+      if (path.claim || (path.explicit && end === 'finished empty')) {
+        route({ type: 'orb_listen', from: path.from ?? 'orb' });
+        assert.deepEqual(sent.at(-1), { type: 'listen_finish' });
+      }
+      if (end === 'silent cancel') { clock.advance(6901); silentCancel(); }
+      else if (end === 'finished empty') finishEmpty(path.via);
+      else finishWords('hello');
+      voiceState('idle');
+
+      const empty = end !== 'words';
+      const retry = empty && path.explicit ? [tapRetry]
+        : end === 'finished empty' && path.via === 'keys' ? [helperRetry] : [];
+      assert.deepEqual(said, retry, 'spoken lines');
+      assert.deepEqual(spoken, empty ? [] : ['hello']);
+      assert.equal(power.asleep, empty && path.provisional === true, 'power state');
+      if (empty && path.provisional) assert.deepEqual(logged.at(-1), ['power', { asleep: true, why: 'unconfirmed' }]);
+    });
+  }
+}
+
+test('untapped clap and phrase takes hold confirmation up to the 30-second cap', () => {
+  for (const from of ['clap', 'phrase']) {
+    const { clock, power, route, voiceState, silentCancel, said, logged } = sidecar();
+    route({ type: 'agent_power', on: true, from });
+    voiceState('listening', from === 'phrase' ? 'wake' : 'handsfree');
+    clock.advance(29_999);
+    assert.equal(power.asleep, false);
+    clock.advance(1);
+    assert.equal(power.asleep, true);
+    assert.deepEqual(logged.at(-1), ['power', { asleep: true, why: 'unconfirmed' }]);
+    silentCancel();
+    assert.deepEqual(said, []);
   }
 });
 
 for (const ends of [false, true]) {
   test(`an awake orb take ${ends ? 'restarts idle time when it ends' : 'holds idle sleep for at most three minutes'}`, () => {
-    const { clock, power, route, voiceState, nothingHeard, said, sent, logged } = sidecar();
+    const { clock, power, route, voiceState, finishEmpty, said, sent, logged } = sidecar();
     const idle = powerModule.SLEEP_AFTER_MS;
     power.talked();
     clock.advance(idle - 1000);
@@ -172,11 +205,12 @@ for (const ends of [false, true]) {
     clock.advance(2000);
     assert.equal(power.asleep, false, 'still awake at five minutes and one second into the session');
     clock.advance(60_000);
-    voiceState('processing');
     if (ends) {
-      voiceState('idle');
-      nothingHeard();
+      route({ type: 'orb_listen', from: 'orb' });
+      assert.deepEqual(sent.at(-1), { type: 'listen_finish' });
+      finishEmpty('orb');
     } else {
+      voiceState('processing');
       clock.advance(3 * 60_000 - 62_001);
       assert.equal(power.asleep, false, 'still awake one millisecond before the continuous hold expires');
       clock.advance(1);
@@ -185,7 +219,7 @@ for (const ends of [false, true]) {
     assert.equal(power.asleep, false, 'has a full five minutes from take end or expiry');
     clock.advance(1);
     assert.deepEqual(logged.at(-1), ['power', { asleep: true, why: 'idle' }]);
-    assert.deepEqual(said, ends ? [helperRetry] : []);
+    assert.deepEqual(said, ends ? [tapRetry] : []);
   });
 }
 
@@ -198,14 +232,17 @@ test('a web wake stays awake when the helper never opens a take', () => {
   assert.deepEqual(said, []);
 });
 
-for (const open of ['yesNoOpen', 'pending']) {
-  test(`an empty tap does not speak over ${open === 'pending' ? 'an approval' : 'a yes/no ask'}`, () => {
-    const { power, route, voiceState, nothingHeard, said, state } = sidecar();
+for (const [open, label] of [['yesNoOpen', 'a yes/no ask'], ['pending', 'a local approval'], ['approvalOpen', 'a Hydra approval']]) {
+  test(`an empty tap does not speak over ${label}`, () => {
+    const { clock, power, route, voiceState, finishEmpty, said, state } = sidecar();
+    power.talked();
     route({ type: 'orb_listen', from: 'orb' });
     voiceState('listening');
-    state[open].set('ask', { a: { voiced: true } });
-    voiceState('idle');
-    nothingHeard();
+    if (open === 'approvalOpen') state.approvalOpen = 1;
+    else state[open].set('ask', { a: { voiced: true } });
+    clock.advance(1100);
+    route({ type: 'orb_listen', from: 'orb' });
+    finishEmpty('orb');
     assert.equal(power.asleep, false);
     assert.deepEqual(said, [], 'no retry with an open ask');
   });
@@ -213,7 +250,7 @@ for (const open of ['yesNoOpen', 'pending']) {
 
 for (const helperWasUp of [true, false]) {
   test(`a ready helper resumes the cut reply after losing a tap take (helper was up: ${helperWasUp})`, () => {
-    const { power, route, voiceState, nothingHeard, onVoice, said, state, hushed, refreshed } = sidecar({ holdReply: true });
+    const { power, route, voiceState, silentCancel, onVoice, said, state, hushed, refreshed } = sidecar({ holdReply: true });
     route({ type: 'orb_listen', from: 'orb' });
     voiceState('listening');
     assert.equal(state.voiceBusy, true);
@@ -230,7 +267,7 @@ for (const helperWasUp of [true, false]) {
     assert.equal(hushed.at(-1), false);
     assert.deepEqual(refreshed.slice(-2), [['stir', false], ['pendingNow', false]]);
     state.snap = null;
-    nothingHeard();
+    silentCancel();
     assert.deepEqual(said, []);
     assert.equal(power.asleep, false);
   });
@@ -245,6 +282,8 @@ test('two desktop orb taps 100 ms apart wake once without an extra listen', () =
     voiceState('listening');
     assert.equal(power.asleep, false);
     assert.deepEqual(logged.filter(([kind, meta]) => kind === 'power' && !meta.asleep), [['power', { asleep: false, why: 'orb' }]]);
+    const ignore = secondType === 'agent_power' ? { ignored: 'awake', from: 'orb' } : { ignored: 'wake_opening' };
+    assert.deepEqual(logged.filter(([kind]) => kind === secondType), [[secondType, ignore]]);
     assert.deepEqual(sent.filter(({ type }) => ['cue', 'listen', 'listen_finish'].includes(type)),
       [{ type: 'cue', name: 'wake' }, { type: 'listen', via: 'wake', wait: 8 }], 'only one cue and listen before the helper opens');
     assert.deepEqual(said, []);
@@ -253,7 +292,7 @@ test('two desktop orb taps 100 ms apart wake once without an extra listen', () =
 
 for (const from of ['orb', 'web']) {
   test(`the ${from === 'orb' ? 'desktop' : 'web'} orb ignores a tap at 999 ms and finishes at 1000 ms from wake`, () => {
-    const { clock, power, route, voiceState, said, logged, sent, state } = sidecar();
+    const { clock, power, route, voiceState, finishEmpty, said, logged, sent, state } = sidecar();
     route(from === 'orb' ? { type: 'agent_power', on: true, from } : { type: 'orb_listen', from });
     clock.advance(50);
     voiceState('listening');
@@ -269,8 +308,7 @@ for (const from of ['orb', 'web']) {
     clock.advance(1);
     route({ type: 'orb_listen', from });
     assert.deepEqual(sent.slice(beforeTap), [{ type: 'listen_finish' }]);
-    voiceState('processing');
-    voiceState('idle');
+    finishEmpty('wake');
     assert.equal(state.voiceBusy, false);
     assert.equal(power.asleep, false);
     assert.deepEqual(said, [tapRetry]);
@@ -289,7 +327,7 @@ test('a stop tap at 2300 ms finishes a wake take that started listening at 1400 
 });
 
 test('an unopened wake ignores a tap at 1499 ms and retries listening at 1500 ms', () => {
-  const { clock, route, voiceState, logged, sent, said, nothingHeard } = sidecar();
+  const { clock, route, voiceState, silentCancel, logged, sent, said } = sidecar();
   route({ type: 'agent_power', on: true, from: 'orb' });
   const beforeTap = sent.length;
   const beforeLog = logged.length;
@@ -303,66 +341,67 @@ test('an unopened wake ignores a tap at 1499 ms and retries listening at 1500 ms
     early: [], earlyLogs: [['orb_listen', { ignored: 'wake_opening' }]], later: [{ type: 'listen', via: 'orb' }],
   });
   voiceState('listening');
-  voiceState('idle');
+  clock.advance(8001);
+  silentCancel();
   assert.deepEqual(said, [tapRetry], 'the fresh tap gets feedback even if the queued wake listen opened first');
-  nothingHeard();
-  assert.deepEqual(said, [tapRetry], 'the helper cannot add a second line');
 });
 
 for (const delay of [2500, 9000]) {
   test(`the Mac's quiet wake take gets one retry after opening at ${delay} ms`, () => {
-    const { clock, power, route, voiceState, said } = sidecar();
+    const { clock, power, route, voiceState, silentCancel, said } = sidecar();
     route({ type: 'agent_power', on: true, from: 'orb' });
     clock.advance(delay);
     voiceState('listening');
-    voiceState('processing');
-    voiceState('idle');
+    clock.advance(8001);
+    silentCancel();
     assert.equal(power.asleep, false);
-    assert.deepEqual(said, [tapRetry]); // The Mac skips nothing_heard for via: 'wake'.
+    assert.deepEqual(said, [tapRetry]);
   });
 }
 
 for (const [from, why, delay] of [['orb', 'orb', 1600], ['web', 'clap', 1600], ['web', 'orb', 11_000]]) {
   test(`the ${from} tap at ${delay} ms claims the queued wake take from ${why} and speaks once`, () => {
-    const { clock, power, route, voiceState, sent, said } = sidecar();
+    const { clock, power, route, voiceState, silentCancel, sent, said } = sidecar();
     route({ type: 'agent_power', on: true, from: why });
     clock.advance(delay);
     const beforeTap = sent.length;
     route({ type: 'orb_listen', from });
     assert.deepEqual(sent.slice(beforeTap), [{ type: 'listen', via: 'orb' }]);
     voiceState('listening'); // The helper opens the queued wake listen and ignores the later orb listen.
-    voiceState('processing');
-    voiceState('idle');
+    clock.advance(8001);
+    silentCancel();
     assert.deepEqual({ asleep: power.asleep, said }, { asleep: false, said: [tapRetry] });
   });
 }
 
-test('wake flag matches at 9999 ms and expires at 10000 ms from the listen send', () => {
-  const lines = [];
-  for (const delay of [9999, 10_000]) {
-    const { clock, route, voiceState, sent, said } = sidecar({ wakeCueDelay: 250 });
-    route({ type: 'agent_power', on: true, from: 'orb' });
-    assert.deepEqual(sent.at(-1), { type: 'listen', via: 'wake', wait: 8 });
-    assert.equal(clock.now(), 250, 'the cue delayed the listen send');
-    clock.advance(delay);
-    voiceState('listening');
-    voiceState('idle');
-    lines.push(said);
-  }
-  assert.deepEqual(lines, [[tapRetry], []]);
+test('a wake take opening 12 seconds after the listen still gets one retry', () => {
+  const { clock, power, route, voiceState, silentCancel, sent, said } = sidecar({ wakeCueDelay: 250 });
+  route({ type: 'agent_power', on: true, from: 'orb' });
+  assert.deepEqual(sent.at(-1), { type: 'listen', via: 'wake', wait: 8 });
+  assert.equal(clock.now(), 250, 'the cue delayed the listen send');
+  clock.advance(12_000);
+  voiceState('listening');
+  clock.advance(8001);
+  silentCancel();
+  assert.equal(power.asleep, false);
+  assert.deepEqual(said, [tapRetry]);
 });
 
 for (const [keys, mode, delay, line] of [['hold', 'hold', 1000, helperRetry], ['tap', 'handsfree', 3000, tapRetry]]) {
   test(`an empty keys ${keys} at ${delay} ms after an unopened wake gets one line`, () => {
-    const { clock, power, route, voiceState, nothingHeard, said } = sidecar();
+    const { clock, power, route, voiceState, finishEmpty, silentCancel, said } = sidecar();
     route({ type: 'agent_power', on: true, from: 'orb' });
     clock.advance(delay);
     voiceState('listening', mode);
-    voiceState('processing');
-    voiceState('idle');
-    nothingHeard();
+    finishEmpty('keys');
     assert.equal(power.asleep, false);
     assert.deepEqual(said, [line]);
+    if (mode === 'hold') {
+      voiceState('listening');
+      clock.advance(8001);
+      silentCancel();
+      assert.deepEqual(said, [helperRetry, tapRetry], 'the hold left the pending wake intact');
+    }
   });
 }
 
@@ -416,12 +455,46 @@ test('a helper restart leaves confirmation of a provisional wake to its timer', 
   assert.deepEqual(said, []);
 });
 
-for (const event of ['idle', 'cancel', 'error', 'ready', 'disable', 'sleep']) {
+for (const oldTake of ['open', 'unopened']) {
+  test(`idle from an ${oldTake} take after sleep leaves the newer wake pending`, () => {
+    const { clock, power, route, voiceState, silentCancel, sent, said } = sidecar();
+    route({ type: 'agent_power', on: true, from: 'web' });
+    if (oldTake === 'open') voiceState('listening');
+    route({ type: 'agent_power', on: false, from: 'web' });
+    assert.ok(sent.some(({ type }) => type === 'listen_cancel'));
+    route({ type: 'agent_power', on: true, from: 'orb' });
+    assert.deepEqual(sent.at(-1), { type: 'listen', via: 'wake', wait: 8 });
+    if (oldTake === 'open') silentCancel(); else voiceState('idle'); // Rust omits cancelled.
+    assert.deepEqual(said, [], 'ending the old take says nothing');
+    voiceState('listening');
+    clock.advance(8001);
+    silentCancel();
+    assert.equal(power.asleep, false);
+    assert.deepEqual(said, [tapRetry]);
+  });
+}
+
+test('a cancelled take cannot end a provisional wake that has yet to open', () => {
+  for (const from of ['clap', 'phrase']) {
+    const { power, route, voiceState, silentCancel, said, logged } = sidecar();
+    route({ type: 'agent_power', on: true, from: 'web' });
+    voiceState('listening');
+    route({ type: 'agent_power', on: false, from: 'web' });
+    route({ type: 'agent_power', on: true, from });
+    silentCancel();
+    assert.equal(power.asleep, false, 'the old idle leaves the newer wake awake');
+    voiceState('listening', from === 'phrase' ? 'wake' : 'handsfree');
+    silentCancel();
+    assert.deepEqual(logged.at(-1), ['power', { asleep: true, why: 'unconfirmed' }]);
+    assert.deepEqual(said, []);
+  }
+});
+
+for (const event of ['cancel', 'error', 'ready', 'disable', 'sleep']) {
   test(`${event} clears a wake whose take has not opened`, () => {
-    const { clock, power, route, voiceState, onVoice, voiceConfig, said, state } = sidecar();
+    const { clock, power, route, voiceState, silentCancel, onVoice, voiceConfig, said, state } = sidecar();
     route({ type: 'agent_power', on: true, from: 'web' });
     clock.advance(100);
-    if (event === 'idle') voiceState('idle');
     if (event === 'cancel') route({ type: 'listen_cancel' });
     if (event === 'error') onVoice({ type: 'voice_error', code: 'recognition' });
     if (event === 'ready') onVoice({ type: 'voice_ready' });
@@ -433,43 +506,43 @@ for (const event of ['idle', 'cancel', 'error', 'ready', 'disable', 'sleep']) {
     }
     if (event === 'sleep') { power.sleep(); power.talked(); }
     voiceState('listening');
-    voiceState('idle');
+    clock.advance(8001);
+    silentCancel();
     assert.deepEqual(said, event === 'error' ? ['Recognition failed'] : [], 'the later ordinary take gives no tap retry');
   });
 }
 
 test('an empty tap take gives no retry line over a live turn or a resumed reply', () => {
   for (const options of [{ busy: true }, { holdReply: true }]) {
-    const { power, route, voiceState, nothingHeard, said } = sidecar(options);
+    const { power, route, voiceState, finishEmpty, said, state } = sidecar(options);
+    power.talked();
     route({ type: 'orb_listen', from: 'web' });
     voiceState('listening');
-    voiceState('idle');
-    nothingHeard();
+    finishEmpty('orb');
     assert.equal(power.asleep, false);
+    assert.equal(state.cutTake, false);
     assert.deepEqual(said, []);
   }
 });
 
 test('a cancel or final words clears the wake and a later ordinary take keeps its feedback', () => {
   for (const cancel of [false, true]) {
-    const { power, route, onVoice, voiceState, nothingHeard, said, spoken, sent } = sidecar();
+    const { power, route, voiceState, silentCancel, finishEmpty, finishWords, said, spoken, sent } = sidecar();
     route({ type: 'orb_listen', from: 'web' });
     voiceState('listening');
     if (cancel) {
       route({ type: 'listen_cancel' });
       assert.deepEqual(sent.at(-1), { type: 'listen_cancel' });
+      silentCancel();
     } else {
-      voiceState('processing');
-      onVoice({ type: 'voice', text: 'hello' });
+      finishWords('hello');
       assert.deepEqual(spoken, ['hello']);
     }
-    voiceState('idle');
     assert.equal(power.asleep, false);
     assert.deepEqual(said, []);
     voiceState('listening');
-    voiceState('idle');
-    nothingHeard();
-    assert.deepEqual(said, ["I didn't hear anything. Try again."]);
+    finishEmpty('keys');
+    assert.deepEqual(said, [helperRetry]);
   }
 });
 
