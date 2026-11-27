@@ -48,3 +48,35 @@ stopping the release; `latest.json` lists Linux only when its AppImage is there.
 - Never commit with `--no-verify`.
 - Never commit experiments (prototypes, test pages, design tools). They stay local and are listed in `.git/info/exclude`; check `git status` before every commit.
 - Never commit secrets (Apple ID passwords, certificates, `~/.gg/auth.json`); signing credentials go in GitHub Actions secrets.
+
+## Build it right the first time
+
+Most review rounds on Hydra fix the same kinds of bugs. This list comes from 1,254 review findings across the web app
+and Hydra Desktop (2026-11-21 to 2026-11-27). The number is how many high or medium bugs each line would have stopped.
+Work through every line before you ask for review, and say in the commit or PR which lines applied and how you met them.
+
+1. **(139) Cover every path into a rule.** For each guard, list every way to reach the guarded action and every input
+   shape: click, Return, Space, a newline in typed text, press-and-drag, every modifier combo (Shift+Cmd+V is still
+   paste), quotes, Unicode, other languages, empty and null. One test per path. Safety rules (passwords, card numbers,
+   money, Approve all) hold 26% of the serious bugs: be most careful there.
+2. **(39) Error, cancel and Stop paths.** For every async flow, test the stored state after an error, a timeout, Stop,
+   a decline and a restart. Cleanup goes in `finally`. Stop must stop every running turn, not only the local one.
+3. **(38) Nothing ships unwired.** Every new function, job, route, dependency or write needs a real call site and one
+   real run: a test that actually imports it or hits the route. A dependency must be in the lockfile and the bundle.
+4. **(35) One source for shared shapes.** Anything both the web app and the Mac app use (message schemas, safety
+   rules, voice lines) has one source of truth, or a byte/fixture test against the other side. Never a hand copy.
+5. **(35) One attacker test per route and permission.** Try it as another user, signed out, and with a forged or
+   replayed id. One approval covers exactly one action.
+6. **(34) Thresholds against real data.** When you change a heuristic or a threshold (clap detection, word lists,
+   limits), report the old and new pass rate on real recorded data and on a held-out set.
+7. **(32) Races.** For every state change, test a double fire, two at once, and the world changing between the check
+   and the act. Name the guard: a unique index, `FOR UPDATE`, compare-and-set, or an idempotency key.
+8. **(32) Every UI state.** Screenshots with 0, 1 and many items and the longest value, at phone size (390x844) and the
+   Mac app window size. Include loading, empty and error. Look at them before you say done.
+9. **(29) Tests must prove something.** Show the test failing on the old code. Test fakes replay real captured payloads,
+   including repeats and delays, not only the happy path.
+10. **(24) Global changes.** If you touch something shared (shell CSS, a header, a policy, a key, audio routing),
+    prove one unrelated feature still works.
+
+Reviews stop when a round finds only low-severity bugs. Every finding goes into the bug ledger with a pattern and an
+area, so this list can be re-ranked as the numbers change.
