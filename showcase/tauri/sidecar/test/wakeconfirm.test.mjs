@@ -245,6 +245,87 @@ test('two desktop orb taps 100 ms apart wake once without an extra listen', () =
   }
 });
 
+for (const from of ['orb', 'web']) {
+  test(`the ${from === 'orb' ? 'desktop' : 'web'} orb ignores a tap 200 ms into a wake take and finishes on a later tap`, () => {
+    const { clock, power, route, voiceState, said, logged, sent, state } = sidecar();
+    route(from === 'orb' ? { type: 'agent_power', on: true, from } : { type: 'orb_listen', from });
+    clock.advance(50);
+    voiceState('listening');
+    const beforeTap = sent.length;
+    clock.advance(200);
+    route({ type: 'orb_listen', from });
+    assert.deepEqual(sent.slice(beforeTap), [], 'the second tap sends no listen_finish');
+    assert.deepEqual(logged.at(-1), ['orb_listen', { ignored: 'double_tap' }]);
+    assert.deepEqual(said, []);
+    assert.equal(power.asleep, false);
+    assert.equal(state.voiceBusy, true);
+
+    clock.advance(1000);
+    route({ type: 'orb_listen', from });
+    assert.deepEqual(sent.slice(beforeTap), [{ type: 'listen_finish' }]);
+    voiceState('processing');
+    voiceState('idle');
+    assert.equal(state.voiceBusy, false);
+    assert.equal(power.asleep, false);
+    assert.deepEqual(said, ["I didn't catch that. Tap and try again."]);
+  });
+}
+
+test('an unopened wake take logs the early tap and lets the next tap open an ordinary take', () => {
+  const { clock, route, voiceState, logged, sent, said } = sidecar();
+  route({ type: 'agent_power', on: true, from: 'orb' });
+  const beforeTap = sent.length;
+  const beforeLog = logged.length;
+  clock.advance(500);
+  route({ type: 'orb_listen', from: 'orb' });
+  const early = sent.slice(beforeTap);
+  const earlyLogs = logged.slice(beforeLog);
+  clock.advance(1100);
+  route({ type: 'orb_listen', from: 'orb' });
+  assert.deepEqual({ early, earlyLogs, later: sent.slice(beforeTap) }, {
+    early: [], earlyLogs: [['orb_listen', { ignored: 'wake_opening' }]], later: [{ type: 'listen', via: 'orb' }],
+  });
+  voiceState('listening');
+  voiceState('idle');
+  assert.deepEqual(said, [], 'the ordinary take does not inherit the pending wake');
+});
+
+for (const [keys, mode, delay] of [['hold', 'hold', 1000], ['tap', 'handsfree', 3000]]) {
+  test(`an empty keys ${keys} ${delay} ms after an unopened wake keeps ordinary feedback`, () => {
+    const { clock, power, route, voiceState, nothingHeard, said } = sidecar();
+    route({ type: 'agent_power', on: true, from: 'orb' });
+    clock.advance(delay);
+    voiceState('listening', mode);
+    voiceState('processing');
+    voiceState('idle');
+    nothingHeard();
+    assert.equal(power.asleep, false);
+    assert.deepEqual(said, ["I didn't hear anything. Try again."]);
+  });
+}
+
+test('a new listening restarts the capped hold after a lost idle, including through processing', () => {
+  const { clock, power, voiceState, state } = sidecar();
+  const minute = 60_000;
+  power.talked();
+  voiceState('listening');
+  // A running turn keeps Hydra awake past the first take's hold and five-minute idle countdown.
+  state.busy = true;
+  clock.advance(8 * minute);
+  state.busy = false;
+  clock.advance(2 * minute);
+  assert.equal(state.voiceBusy, true, 'the first take never sent idle');
+  voiceState('listening');
+  clock.advance(2 * minute);
+  voiceState('processing');
+  clock.advance(2 * minute);
+  assert.equal(power.asleep, false, 'still awake four minutes after the new listening');
+  clock.advance(4 * minute - 1);
+  assert.equal(power.asleep, false, 'the new hold gets its own five-minute idle countdown');
+  clock.advance(1);
+  assert.equal(power.asleep, true, 'processing keeps the same hold cap');
+});
+
 test('a talk wake sends no second listen and arbitrary agent_power reasons stay provisional', () => {
   const { clock, power, route, logged, sent, said } = sidecar();
   power.talked();

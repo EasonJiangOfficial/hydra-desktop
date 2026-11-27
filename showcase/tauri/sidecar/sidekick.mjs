@@ -333,20 +333,38 @@ function cleanPhrase(raw) {
   return { ok: true, phrase: t };
 }
 let wakeTakeFrom = null, pendingWake = null, ignoreWakeNothingHeard = false;
-const WAKE_TAKE_WINDOW_MS = 10_000;
+const WAKE_DOUBLE_TAP_MS = 1000;
+const WAKE_OPENING_MS = 1500;
+const WAKE_TAKE_WINDOW_MS = 2000;
 const TAKE_HOLD_MS = 3 * 60_000;
 let voiceBusySince = null, voiceHoldTimer = null;
 function wakeTakePending() {
-  if (pendingWake && Date.now() - pendingWake.at > WAKE_TAKE_WINDOW_MS) pendingWake = null;
+  if (pendingWake && Date.now() - (pendingWake.sentAt ?? pendingWake.wokeAt) >= WAKE_TAKE_WINDOW_MS) pendingWake = null;
   return pendingWake;
 }
 function clearWakeTake() { wakeTakeFrom = pendingWake = null; }
+function ignoreOrbTap() {
+  if (power.asleep) return false;
+  if (voiceBusy) {
+    if (!isExplicitWake(wakeTakeFrom) || Date.now() - takeAt >= WAKE_DOUBLE_TAP_MS) return false;
+    logLine('orb_listen', { ignored: 'double_tap' });
+    return true;
+  }
+  const wake = wakeTakePending();
+  if (!wake) return false;
+  if (Date.now() - wake.wokeAt < WAKE_OPENING_MS) {
+    logLine('orb_listen', { ignored: 'wake_opening' });
+    return true;
+  }
+  clearWakeTake();
+  return false;
+}
 const power = createPower({
   working: () => busy || pending.size > 0,
   taking: () => voiceBusy && Date.now() - voiceBusySince < TAKE_HOLD_MS,
   onChange: ({ asleep, why }) => {
     wakeTakeFrom = null;
-    pendingWake = asleep || why === 'talk' ? null : { why, at: Date.now() };
+    pendingWake = asleep || why === 'talk' ? null : { why, wokeAt: Date.now(), sentAt: null };
     logLine('power', { asleep, why });
     if (asleep) { asksAsleep(); speech.stop(); send({ type: 'listen_cancel' }); interruptQuietly('sleep'); }
     voiceConfig();
@@ -358,7 +376,10 @@ const power = createPower({
       const w = wakeActions(why);
       if (w.woke) { pushWeb({ woke: { at: Date.now(), from: why } }); ui({ kind: 'woke', from: why }); }
       if (w.cue) send({ type: 'cue', name: 'wake' });
-      if (w.listen) send({ type: 'listen', via: 'wake', wait: 8 });
+      if (w.listen) {
+        if (pendingWake) pendingWake.sentAt = Date.now();
+        send({ type: 'listen', via: 'wake', wait: 8 });
+      }
     }
   },
 });
@@ -2758,8 +2779,9 @@ const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecog
 // The mics the voice helper last listed (asked whenever the panel opens), and the pick sent to it ('' is automatic).
 let mics = { list: [], auto: '' };
 const micPick = () => send({ type: 'voice_mic', id: config.mic ?? '' });
-function voiceTakeChanged(wasBusy) {
-  if (wasBusy === voiceBusy) return;
+function voiceTakeChanged(wasBusy, state) {
+  if (wasBusy === voiceBusy && state !== 'listening') return;
+  clearTimeout(voiceHoldTimer);
   if (voiceBusy) {
     voiceBusySince = Date.now();
     // Start the idle countdown even if a stuck helper never sends idle.
@@ -2767,10 +2789,9 @@ function voiceTakeChanged(wasBusy) {
     voiceHoldTimer.unref?.();
   } else {
     voiceBusySince = null;
-    clearTimeout(voiceHoldTimer);
     voiceHoldTimer = null;
-    power.busy();
   }
+  power.busy(); // The previous idle deadline can coincide with the new take's hold cap.
 }
 function emptyTakeEnded() {
   const wake = wakeTakeFrom;
@@ -2803,9 +2824,15 @@ function onVoice(m) {
   const wasVoiceBusy = voiceBusy;
   if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') { emptyTake = true; takeAt = Date.now(); } stir(); pendingNow(); }
   if (m.type === 'voice_state') {
-    voiceTakeChanged(wasVoiceBusy);
+    voiceTakeChanged(wasVoiceBusy, m.state);
     if (m.state === 'listening') {
-      if (pendingWake) { wakeTakeFrom = wakeTakePending()?.why ?? null; pendingWake = null; }
+      const wake = wakeTakePending();
+      wakeTakeFrom = null;
+      // A phrase already has its own take. A hold belongs to the talk keys, even just after a wake.
+      if (wake && (wake.why === 'phrase' ? m.mode === 'wake' : wake.sentAt !== null && m.mode !== 'hold')) {
+        wakeTakeFrom = wake.why;
+        pendingWake = null;
+      }
       ignoreWakeNothingHeard = wakeTakeFrom !== null;
     } else if (m.state === 'idle' && !emptyTake) clearWakeTake();
   } else if (m.type === 'voice_ready') resetLostTake();
@@ -3685,7 +3712,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'agent_power') { if (m.on) power.wake(String(m.from || 'asked')); else power.sleep(String(m.from || 'asked')); }
   // An orb tap (the web orb's bridge listen, or the desktop orb): asleep it wakes Hydra (and listens); during a take it
   // ends the take; otherwise it opens one, with the listen chime.
-  else if (m.type === 'orb_listen' && !power.asleep && !voiceBusy && wakeTakePending()) return; // the wake is already opening a take
+  else if (m.type === 'orb_listen' && ignoreOrbTap()) return;
   else if (m.type === 'orb_listen') {
     const from = m.from === 'orb' ? 'orb' : 'web';
     logLine('orb_listen', { from, asleep: power.asleep, taking: voiceBusy });
