@@ -11,6 +11,8 @@
 
 export const SLEEP_AFTER_MS = 5 * 60_000;
 export const DEFAULT_SLEEP_WORD = 'Hydra, sleep';
+const EXPLICIT_WAKES = new Set(['web', 'orb', 'panel', 'asked', 'talk']);
+export const isExplicitWake = (why) => EXPLICIT_WAKES.has(why);
 
 // Numbers as they're said ("3 kill" is "three kill"), digits apart from letters: voice/phrase.swift's Spoken.words.
 const SMALL = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty'];
@@ -62,20 +64,22 @@ export function cleanSleepWord(raw) {
  * The state machine. onChange({ asleep, why }) runs on every change; the caller tells the voice helper and the screens.
  * talked(): the owner spoke or typed to it (wakes it if asleep, and restarts the 5 minutes).
  */
-/** working(): a turn or an ask is open; idle sleep never comes then, and the 5 minutes count from when it ends. */
+/** working() and taking() hold idle sleep while a turn, ask or active take is open. */
 export function createPower({ onChange, working = () => false, taking = () => false, now = () => Date.now(), setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (h) => clearTimeout(h), sleepAfterMs = SLEEP_AFTER_MS, confirmMs = 12_000 } = {}) {
-  let asleep = false, last = now(), timer = null, provisional = false, confirmTimer = null;
+  let asleep = false, last = now(), timer = null, provisional = false, wokeAt = null, confirmTimer = null;
   const clearConfirm = () => { if (confirmTimer) clearTimer(confirmTimer); confirmTimer = null; };
-  const armConfirm = () => {
+  const armConfirm = (delay = confirmMs) => {
     clearConfirm();
     if (!provisional || asleep) return;
     confirmTimer = setTimer(() => {
       confirmTimer = null;
       if (!provisional || asleep) return;
-      if (taking() || working()) { armConfirm(); return; }
+      if (working()) { armConfirm(); return; }
+      const remaining = wokeAt + 30_000 - now();
+      if (remaining > 0 && taking()) { armConfirm(Math.min(confirmMs, remaining)); return; }
       provisional = false;
       set(true, 'unconfirmed');
-    }, confirmMs);
+    }, delay);
     confirmTimer?.unref?.();
   };
   const arm = () => {
@@ -86,7 +90,7 @@ export function createPower({ onChange, working = () => false, taking = () => fa
   function check() {
     timer = null;
     if (asleep) return;
-    if (working()) { last = now(); arm(); return; }
+    if (working() || taking()) { last = now(); arm(); return; }
     if (now() - last >= sleepAfterMs) set(true, 'idle'); else arm();
   }
   function set(on, why) {
@@ -102,9 +106,11 @@ export function createPower({ onChange, working = () => false, taking = () => fa
     get asleep() { return asleep; },
     sleep: (why = 'asked') => { provisional = false; clearConfirm(); return set(true, why); },
     wake: (why = 'asked') => {
+      const at = now();
       const ok = set(false, why);
-      // A typed message is a real wake. A clap, the phrase or a tap stays provisional until words arrive.
-      if (!asleep && why !== 'talk') { provisional = true; armConfirm(); } else { provisional = false; clearConfirm(); }
+      // A deliberate wake needs no confirmation. A late clap or phrase can't make an awake session provisional.
+      if (isExplicitWake(why)) { provisional = false; clearConfirm(); }
+      else if (ok) { provisional = true; wokeAt = at; armConfirm(); }
       return ok;
     },
     /** The take ended. No words, and nothing else confirmed the wake: back to sleep, with no sound. */

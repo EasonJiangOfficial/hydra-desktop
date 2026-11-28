@@ -37,6 +37,41 @@ advance(1);
 assert.equal(p.asleep, true);
 p.stop();
 
+let taking = true, working = false;
+const provisionalChanges = [];
+const provisional = createPower({ ...clock, taking: () => taking, working: () => working, onChange: (c) => provisionalChanges.push(c) });
+provisional.sleep();
+provisional.wake('clap');
+advance(12_000);
+assert.equal(provisional.asleep, false, 'a clap take continues after 12 seconds');
+advance(17_999);
+assert.equal(provisional.asleep, false, 'a clap take continues until 30 seconds');
+advance(1);
+assert.deepEqual(provisionalChanges.at(-1), { asleep: true, why: 'unconfirmed' }, 'a clap take alone has a 30-second cap');
+
+working = true;
+provisional.wake('clap');
+advance(60_000);
+assert.equal(provisional.asleep, false, 'a live turn or approval still holds a clap wake after 60 seconds');
+working = false;
+advance(12_000);
+assert.deepEqual(provisionalChanges.at(-1), { asleep: true, why: 'unconfirmed' }, 'the expired take cannot hold after work ends');
+
+taking = false;
+provisional.wake('phrase');
+advance(11_999);
+assert.equal(provisional.asleep, false);
+advance(1);
+assert.deepEqual(provisionalChanges.at(-1), { asleep: true, why: 'unconfirmed' }, 'a phrase wake without a take sleeps after 12 seconds');
+
+taking = true;
+provisional.wake('clap');
+advance(29_999);
+provisional.talked();
+advance(1);
+assert.equal(provisional.asleep, false, 'speech confirms even just before the cap');
+provisional.stop();
+
 // The sleep word, anywhere in what was said; words of 5 letters or more may be one letter off.
 assert.ok(heardSleepWord('Hydra, sleep.'));
 assert.ok(heardSleepWord('okay hydra sleep now'));
