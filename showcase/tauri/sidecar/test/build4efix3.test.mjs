@@ -216,10 +216,10 @@ function askRig({ paused = false } = {}) {
   q.st.askTakeEnd('a1');
   assert.deepEqual(q.sent.at(-1), { type: 'listen_cancel', only: 'ask' });
   // The bridge and the helper carry it.
-  assert.match(mainRs, /Some\("listen_cancel"\) => to_voice\(app, &json!\(\{ "cmd": "cancel", "only": msg\.get\("only"\)/);
+  assert.match(mainRs, /Some\("listen_cancel"\) => \{[\s\S]{0,300}to_voice\(app, &json!\(\{ "cmd": "cancel", "only": msg\.get\("only"\)/);
   assert.match(voiceRs, /"type": "voice_state", "state": msg\.get\("state"\), "mode": msg\.get\("mode"\), "ask": msg\.get\("ask"\)/);
   assert.match(swift, /func externalCancel\(onlyAsk: Bool = false\) \{\n        guard Self\.cancels\(onlyAsk: onlyAsk, askTake: askTake\) else \{ return \}/);
-  assert.match(swift, /"state": "listening", "mode": mode, "wave": cursor, "ask": askTake\]/);
+  assert.match(swift, /"state": "listening", "mode": mode, "wave": cursor, "ask": askTake, "take": currentTake/);
   assert.match(swift, /if chord && !prevChord && !blocked \{ phase = \.holding; releasedAt = nil; askTake = false; return \}/, 'his keys take the ask\'s take over');
 }
 
@@ -228,34 +228,37 @@ const noop = async () => {};
 const run = async (mode, fn, { owner = () => null } = {}) => {
   fs.writeFileSync(stState, JSON.stringify({ mode })); fs.writeFileSync(stLog, ''); fs.writeFileSync(launched, '');
   const asks = [];
-  const ask = async (o) => { const auto = approveAllSays(true, o); const q = String(o.placeholder).split('\n')[0]; asks.push({ auto, deletion: o.deletion, q }); return auto ? 'yes' : owner(q); };
+  const ask = async (o) => { const auto = approveAllSays(true, o); const q = String(o.placeholder).split('\n')[0]; asks.push({ auto, deletion: o.deletion, secret: !!o.secret, q }); return auto ? 'yes' : owner(q); };
   const t = createTools({ allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: tmp, ask });
   t.nextTurn?.();
   const r = await fn((n) => t.tools.find((x) => x.name === n)).then(String, (e) => `ERR ${e.message}`);
   return { asks, r, calls: fs.readFileSync(stLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).a), opened: fs.readFileSync(launched, 'utf8') };
 };
 const tags = (x) => x.asks.map((a) => [a.auto, a.deletion]);
+// The owner's hard limits (hardlimits.test.mjs): a password manager put on screen is a hard ask (secret), Approve all
+// never answers it; reading or acting in its window is refused, never asked.
+const hard = (x) => x.asks.map((a) => [a.auto, a.secret]);
 {
   // 7. manage_app switch / arrange on a password manager.
   for (const args of [{ do: 'switch', app: '1Password' }, { do: 'arrange', app: '1Password', layout: 'full' }]) {
     const x = await run('vault', (T) => T('manage_app').execute(args, {}));
-    assert.deepEqual(tags(x), [[true, true]], `${args.do} 1Password runs under Approve all: ${JSON.stringify(x)}`);
-    assert.ok(x.calls.some((c) => c[0] === 'manage'), `${args.do}: it ran`);
+    assert.deepEqual(hard(x), [[false, true]], `${args.do} 1Password asks under Approve all: ${JSON.stringify(x)}`);
+    assert.ok(!x.calls.some((c) => c[0] === 'manage'), `${args.do}: nothing done on a no`);
   }
   const plain = await run('notes', (T) => T('manage_app').execute({ do: 'switch', app: 'Notes' }, {}));
   assert.deepEqual(tags(plain), [[true, false]], 'Notes still runs under Approve all');
   // 8. open, read_window and act_in_app opening a password manager.
   for (const args of [{ target: '1Password' }, { target: 'https://example.com', app: '1Password' }, { target: '/Applications/1Password.app' }]) {
     const x = await run('gone', (T) => T('open').execute(args, {}));
-    assert.deepEqual(tags(x), [[true, true]], `open ${JSON.stringify(args)} runs under Approve all`);
-    assert.match(x.opened, /1Password/, 'it opened');
+    assert.deepEqual(hard(x), [[false, true]], `open ${JSON.stringify(args)} asks under Approve all`);
+    assert.doesNotMatch(x.opened, /1Password/, 'nothing opened on a no');
   }
   const rw = await run('gone', (T) => T('read_window').execute({ target: '1Password' }, {}));
-  assert.deepEqual(tags(rw), [[true, true]], `read_window opening 1Password runs under Approve all: ${JSON.stringify(rw)}`);
-  assert.match(rw.opened, /1Password/);
+  assert.deepEqual(rw.asks, [], `read_window 1Password is refused, never asked: ${JSON.stringify(rw)}`);
+  assert.match(rw.r, /Blocked for safety/); assert.doesNotMatch(rw.opened, /1Password/);
   const act = await run('gone', (T) => T('act_in_app').execute({ target: '1Password', steps: [{ do: 'key', key: 'tab' }] }, {}), { owner: (q) => (q.startsWith('In ') ? 'yes' : null) });
-  assert.deepEqual(tags(act), [[true, true], [true, true]], `the plan and the launch both run under Approve all: ${JSON.stringify(act)}`);
-  assert.match(act.opened, /1Password/, 'it launched');
+  assert.deepEqual(act.asks, [], `act_in_app in 1Password is refused, never asked: ${JSON.stringify(act)}`);
+  assert.match(act.r, /Blocked for safety/); assert.doesNotMatch(act.opened, /1Password/, 'never launched'); assert.ok(!act.calls.some((c) => c[0] === 'act'));
   // 9, 10 (build4efix4: one safe-step whitelist, safety.mjs stepsLose). Delete keys and chords, selections, replace-all
   // plans, cut, copy, paste, fill and any key not in the safe set are deletions. Approve all runs them.
   for (const steps of [[{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'ctrl+h' }], [{ do: 'key', key: 'cmd+a' }, { do: 'type', text: 'x' }], [{ do: 'key', key: 'cmd+a' }, { do: 'key', key: 'cmd+x' }],

@@ -172,6 +172,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     if (current) { current.abort(); current = null; }
     emit({ kind: 'speech', stop: true });
   }
+  const replyEmitter = (id, guideEpoch) => (msg) => emit({ kind: 'speech', id, ...msg, ...(guideEpoch ? { guideEpoch } : {}) });
 
   // VoiceStudio: on while picked (it needs no key); local is its last check ({ ok, reason, message, engine, voices, … }).
   let localOn = false, localVoice = null, local = null, studioMode = 'short';
@@ -222,16 +223,17 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
   }
   // A reply in VoiceStudio: its socket opens now, one request per sentence, played as each streams in.
   let lastFiller = null;
-  function startLocal() {
+  function startLocal(guideEpoch) {
     stopAll();
     lastReq = now(); keepWarm();
     const id = `s${++seq}`, said = [], kinds = [], t0 = Date.now();
+    const publish = replyEmitter(id, guideEpoch);
     let heard = false, done = false, v = null, filled = false, asks = 0;
     const finish = (whole = false) => {
       if (done) return;
       done = true;
       const chars = whole && heard ? said.join(' ').replace(/\[[^\]]*\]\s*/g, '').length : 0;
-      emit({ kind: 'speech', id, end: true, ...(chars ? { chars } : {}) });
+      publish({ end: true, ...(chars ? { chars } : {}) });
       if (current === me) current = null;
     };
     const me = {
@@ -256,7 +258,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         log('speech_beat', { id, ms: Date.now() - t0, [kind]: true });
         if (kind !== 'ask') { v.say(line); return true; }
         const m = `${id}q${++asks}`;
-        v.say(line, () => { if (!done) emit({ kind: 'speech', id, mark: m }); });
+        v.say(line, () => { if (!done) publish({ mark: m }); });
         return m;
       },
       end() { if (!done) v.end(); },
@@ -268,7 +270,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
         if (done) return;
         if (!heard) { heard = true; log('speech_first_audio', { id, provider: 'voicestudio', ms: Date.now() - t0 }); if (local && !local.ok) checkLocal(); } // working again: refresh the panel's status
         const filler = kinds.shift() === true;
-        emit({ kind: 'speech', id, rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'), ...(filler ? { filler: true } : {}) });
+        publish({ rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64'), ...(filler ? { filler: true } : {}) });
       },
       onEnd: () => finish(true),
       onError: (err) => {
@@ -320,21 +322,22 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
   }
 
   /** A new reply's voice, its socket opening now. say(sentence) as they come, then end(). */
-  function start() {
-    if (localOn) return startLocal();
+  function start({ guideEpoch } = {}) {
+    if (localOn) return startLocal(guideEpoch);
     if (!key) return null;
     stopAll();
     const id = `s${++seq}`, said = [];
+    const publish = replyEmitter(id, guideEpoch);
     let ended = false, heard = false, done = false, beat = false, t0 = Date.now(), asks = 0;
     // The face follows the voice: a sentence whose feeling differs from the last one's (speech.mjs cueFeel) is marked
     // with where it starts, in characters spoken so far (cues left out); the overlay times it by the audio played.
     let spoken = 0, feel = null;
     const mark = (s) => {
       const f = cueFeel(s);
-      if (f !== feel) { feel = f; emit({ kind: 'speech', id, feel: f, at: spoken }); }
+      if (f !== feel) { feel = f; publish({ feel: f, at: spoken }); }
       spoken += s.replace(/\[[^\]]*\]\s*/g, '').length + 1;
     };
-    const play = (rate, pcm) => emit({ kind: 'speech', id, rate, pcm });
+    const play = (rate, pcm) => publish({ rate, pcm });
     // The reply's sockets, oldest first. An ask's question ends the socket that says it (sealed), so that socket's end
     // is exactly when all of the question's audio has come: its mark ({ kind: 'speech', id, mark }) follows its last
     // chunk, and the player reports when it has played it (voice_played). The reply goes on in a new socket, whose
@@ -347,7 +350,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
       s.over = true;
       while (segs[0]?.over) {
         const o = segs.shift();
-        if (o.mark) emit({ kind: 'speech', id, mark: o.mark });
+        if (o.mark) publish({ mark: o.mark });
         if (!segs.length) return finish(true);
         for (const [r, p] of segs[0].held.splice(0)) play(r, p);
       }
@@ -390,7 +393,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
       done = true;
       for (const s of segs) s.v?.abort();
       const chars = whole && heard ? said.join(' ').replace(/\[[^\]]*\]\s*/g, '').length : 0;
-      emit({ kind: 'speech', id, end: true, ...(chars ? { chars } : {}) });
+      publish({ end: true, ...(chars ? { chars } : {}) });
       if (current === me) current = null;
     };
     // lazy: a socket for after an ask opens with its first sentence (it may wait a minute for the answer).

@@ -15,7 +15,7 @@ const PEAK_MAX = -4; // dBFS sample peak ceiling (keeps true peak under -3 dBTP)
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '../../showcase/roamies/sounds');
 
 // Notes of the key family.
-const N = { A4: 440, C5: 523.25, E5: 659.26, F5: 698.46, G5: 783.99, A5: 880, C6: 1046.5, E6: 1318.51, F6: 1396.91, G6: 1567.98 };
+const N = { F4: 349.23, A4: 440, C5: 523.25, E5: 659.26, F5: 698.46, G5: 783.99, A5: 880, C6: 1046.5, E6: 1318.51, F6: 1396.91, G6: 1567.98 };
 
 // Seeded noise, so every render is identical.
 let seed = 0x9e3779b9;
@@ -120,7 +120,7 @@ function lufs(buf) {
 }
 
 // Dry voices -> low-pass -> room -> DC block -> loudness -> fades so the first and last samples are 0.
-function finish(dry, { len, lp = 7000, wet = 0.2, rt = 0.55, trim = 0 }) {
+function finish(dry, { len, lp = 7000, wet = 0.2, rt = 0.55, trim = 0, peak }) {
   const n = Math.round(len * SR);
   let x = each(dry, (c) => biquad(biquad(c, 'lp', lp, 0.6), 'lp', lp * 1.3, 0.6));
   const ir = roomIR(rt), dryG = Math.sqrt(1 - wet * wet);
@@ -128,7 +128,8 @@ function finish(dry, { len, lp = 7000, wet = 0.2, rt = 0.55, trim = 0 }) {
   x = each(x, (c) => biquad(c, 'hp', 30, 0.6));
   let g = 10 ** ((TARGET + trim - lufs(x)) / 20), pk = 0;
   for (const c of [x.L, x.R]) for (const v of c) pk = Math.max(pk, Math.abs(v * g));
-  if (20 * Math.log10(pk) > PEAK_MAX) g *= 10 ** ((PEAK_MAX - 20 * Math.log10(pk)) / 20);
+  if (peak !== undefined) g *= 10 ** ((peak - 20 * Math.log10(pk)) / 20); // a set sample peak, not the loudness target
+  else if (20 * Math.log10(pk) > PEAK_MAX) g *= 10 ** ((PEAK_MAX - 20 * Math.log10(pk)) / 20);
   const fin = Math.round(0.001 * SR), fout = Math.round(Math.min(0.12, len * 0.3) * SR);
   for (const c of [x.L, x.R]) for (let i = 0; i < n; i++) {
     let w = g;
@@ -248,6 +249,21 @@ function pending() {
   return b;
 }
 SOUNDS.pending = pending;
+
+// Hydra starts (with the launch animation): one note per ring, low to high, an open F major (F - C - A) with a quiet
+// ninth over it, blooming and settling in 1.2 s. Softer than the chimes: its sample peak is set to STARTUP_PEAK, not
+// to the loudness target. Rendered last and reseeded, so its bytes are the same alone or in a full render, and no
+// other sound changes.
+const STARTUP_PEAK = -20; // dBFS
+SOUNDS.startup = () => {
+  seed = 0x9e3779b9;
+  const b = blank(1.2);
+  add(b, 0.0, 0.5, -0.2, bell(N.F4, { attack: 0.01, tau: 0.6, index: 0.6 }), 1.2);
+  add(b, 0.09, 0.4, 0.0, bell(N.C5, { attack: 0.01, tau: 0.55, index: 0.6 }), 1.11);
+  add(b, 0.18, 0.34, 0.2, bell(N.A5, { attack: 0.01, tau: 0.5, index: 0.6 }), 1.02);
+  add(b, 0.2, 0.06, 0.0, glass(N.G6, { attack: 0.012, tau: 0.4 }), 1.0);
+  return finish(b, { len: 1.2, lp: 5500, wet: 0.26, rt: 0.7, peak: STARTUP_PEAK });
+};
 
 function wav24(buf) {
   const n = buf.L.length, data = n * 2 * 3, b = Buffer.alloc(44 + data);

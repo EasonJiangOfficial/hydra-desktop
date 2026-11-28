@@ -248,7 +248,7 @@ enum ClapBench {
             ("the owner says \"hold on a second\"", { r, e in var b = playback(6, r, echo: e); let t = u(2, 3.5); ClapTest.speech(&b, from: t, to: t + 1.1, rate: r, rng: &rng, level: Float(u(0.2, 0.4))); return (b, [(t + 0.4, "Hold"), (t + 0.7, "Hold on"), (t + 1.1, "Hold on a second")]) }),
             ("a clean double clap", { r, e in var b = playback(5, r, echo: e); let t = u(1.5, 3); ClapTest.clap(&b, at: t, rate: r, peak: Float(u(0.7, 1.2)), rng: &rng); ClapTest.clap(&b, at: t + u(0.25, 0.6), rate: r, peak: Float(u(0.7, 1.2)), rng: &rng); return (b, []) }),
         ]
-        // Second verify pass: how Hydra's voice plays in the default setup (interrupting on, Hydra idle, the mic allowed)
+        // Second verify pass: how Hydra's voice plays with interrupting on (the owner's choice; off by default), Hydra idle and the mic allowed
         // is Voice's own decision (echoAtPlay), not assumed: were it to play output only, talking could never stop it and
         // the "says wait / stop" sets below would fail.
         let echoByDefault = Voice.echoAtPlay(macOS14: true, busy: false, bargeWanted: true, bargeBroken: false, asleep: false, phase: "idle", test: false,

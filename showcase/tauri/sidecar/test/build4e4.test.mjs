@@ -84,10 +84,11 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
 
 // ---- The listen and wake chimes play in the voice helper (never muted), only for the owner's own triggers.
 {
-  assert.match(swift, /if !dryRun \{ OutputMute\.begin\(\) \}\n        quietEmpty = via == "wake"\n[\s\S]{0,200}Cue\.pending\(false\)\n        if !dryRun \{ if Cue\.audible\(via: via\) \{ Cue\.play\("listen"\) \} else \{ Cue\.keepAudible\(\) \} \}/,
-    'the chime plays as the mute begins, in the same process (it lifts the mute for its length)');
+  // No mute any more (audit 2026-11-26, 02 A1): the chime simply plays as the take opens.
+  assert.match(swift, /quietEmpty = via == "wake"\n[\s\S]{0,200}Cue\.pending\(false\)\n        if !dryRun && Cue\.audible\(via: via\) \{ Cue\.play\("listen"\) \}/,
+    'the chime plays as the take opens, in the same process');
   assert.match(cue, /static func audible\(via: String\) -> Bool \{ \["clap", "phrase", "keys", "orb"\]\.contains\(via\) \}/);
-  assert.match(cue, /OutputMute\.lift\(for: p\.duration \+ 0\.05\)/);
+  assert.doesNotMatch(cue, /OutputMute|kAudioDevicePropertyMute/, 'a cue never touches the system mute');
   assert.match(swift, /listenNow\(wait: wait, via: via\)/, 'a clap take passes what started it');
   assert.match(swift, /showListening\("handsfree", uptime\(\), via: "barge"\)/, 'a talk-over take passes barge');
   assert.match(swift, /\["orb", "wake"\]\.contains\(\$0\) \? \$0 : nil \} \?\? "listen"/, "the sidecar's listen: orb, wake, else a silent auto-listen");
@@ -149,7 +150,7 @@ const voiceRs = read('../../src-tauri/src/voice.rs'), macConf = JSON.parse(read(
   assert.match(side, /voice\.say\(t\); if \(!answerSaid\) \{ answerSaid = true; pendingNow\(\); \}/);
   assert.match(side, /msg\.e\?\.type === 'tool' && answerSaid\) \{ answerSaid = false; pendingNow\(\); \}/);
   assert.match(side, /power\.busy\(\); \/\/ the 5 minutes[^\n]*\n    pendingVoice = null; pendingNow\(\);/);
-  assert.match(side, /voiceBusy = m\.state === 'listening' \|\| m\.state === 'processing'; if \(m\.state === 'listening'\) \{ emptyTake = true; takeAt = Date\.now\(\); \} stir\(\); pendingNow\(\);/);
+  assert.match(side, /voiceBusy = m\.state === 'listening' \|\| m\.state === 'processing';\s+if \(m\.state === 'listening'\) \{ emptyTake = true; takeAt = Date\.now\(\); \}\s+stir\(\); pendingNow\(\);/);
   assert.match(side, /yesNoOpen\.set\(id, \{ a, to, voice \}\); pendingNow\(\);/);
   assert.match(side, /yesNoOpen\.delete\(id\); pendingNow\(\);/);
   assert.match(side, /if \(on !== pendingSent\) \{\n    pendingSent = on;\n    send\(\{ type: 'pending', on \}\);\n    ui\(\{ kind: 'pending', on \}\);\n  \}/);

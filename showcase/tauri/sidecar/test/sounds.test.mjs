@@ -37,8 +37,8 @@ assert.equal(play('done'), 'done');
 
 // Host chimes: every overlay window gets the sidecar's messages; only the one holding Hydra plays them.
 assert.match(host, /m\.kind === 'power'\) \{ Roamie\.asleep = !!m\.asleep; if \(m\.asleep && m\.sound && getAgent\(\)\) Roamie\.sfx\?\.play\('sleep'\);/);
-// Build 4 E4: the wake and listen chimes moved to the voice helper (cue.swift), where mute-while-listening can't silence
-// them; the overlay plays neither, and the wake greeting and its listen_after are gone (every wake listens at once).
+// Build 4 E4: the wake and listen chimes moved to the voice helper (cue.swift), which plays every cue; the overlay
+// plays neither, and the wake greeting and its listen_after are gone (every wake listens at once).
 assert.doesNotMatch(host, /listen_after|play\('hydra_wake'\)|play\('listen'\)/);
 assert.match(host, /m\.kind === 'woke'\) \{ Roamie\.wokeAt = performance\.now\(\); return; \}/);
 // Every other host play sits after the overlay's agent check (agentEvent and onVoice return without one).
@@ -73,8 +73,18 @@ assert.doesNotMatch(over, /orbAttached/);
 assert.match(host, /case 'done':\n        responding = false;\n        if \(toolsRan && !e\.stopped\) Roamie\.sfx\?\.play\('done'\);\n        toolsRan = false;/);
 assert.match(side, /if \(retryNext\) \{ if \(!controller\.signal\.aborted\) voice\?\.end\(\); ui\(\{ kind: 'agent', e: \{ type: 'done', stopped: true \} \}\); \}/);
 // Build 4 E1: a quiet stop (sleep) now says why, as an error line, which never chimes 'done' either.
-assert.match(side, /const how = stalled \? 'stall' : controller\.signal\.aborted \? \(quiet \? 'sleep' : 'stop'\) : 'error';/);
+const failure = side.match(/const exhausted = retryEnd[^\n]*\n\s*const how = stalled[^\n]*;/)?.[0];
+assert.ok(failure, 'the prompt determines how its failure ended');
+for (const [stalled, aborted, quiet, retryEnd, viewStopped, want] of [
+  [false, false, false, false, false, 'error'], [true, true, false, false, false, 'stall'],
+  [false, true, true, false, false, 'sleep'], [false, true, false, false, false, 'stop'],
+  [false, true, false, true, true, 'stop'], [false, true, false, true, false, 'retry'],
+]) {
+  const got = vm.runInNewContext(`${failure}\nhow`, { stalled, quiet, retryEnd, controller: { signal: { aborted } }, rvTurn: { signal: { aborted: viewStopped } } });
+  assert.equal(got, want);
+}
 assert.match(side, /ui\(\{ kind: 'agent', e: \{ type: 'error', message: msg, speech: sid \} \}\);/);
+assert.doesNotMatch(host.match(/\n      case 'error':\n([\s\S]*?)\n        break;/)[1], /sfx\?\.play\('done'\)/, 'every error ending remains silent');
 // The real case 'done' block, run against stubs: one chime with tools, none without, none when stopped.
 const doneCase = host.match(/\n      case 'done':\n([\s\S]*?)\n        break;/)[1].split('\n').slice(0, 3).join('\n');
 for (const [ran, e, want] of [[true, {}, ['done']], [false, {}, []], [true, { stopped: true }, []]]) {

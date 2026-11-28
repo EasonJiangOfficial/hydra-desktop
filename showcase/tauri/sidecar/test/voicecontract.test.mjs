@@ -26,6 +26,27 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (ok, ms = 5000) => { const end = Date.now() + ms; while (!ok() && Date.now() < end) await wait(2); assert.ok(ok(), 'timed out'); };
 const res = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: new Headers(), json: async () => body, text: async () => JSON.stringify(body ?? null) });
 
+{
+  const host = fs.readFileSync(new URL('../../../roamies/host.js', import.meta.url), 'utf8');
+  const start = host.indexOf('  function onVoice(m) {');
+  const source = host.slice(start, host.indexOf('\n  }\n', start) + 4);
+  let closed = 0;
+  const clear = new Function('heard', 'getAgent', 'notchOn', 'N', 'responding', 'ask', 'setTimeout', `
+    let hearing2 = true, hearing = true, heardText = true, waveTurn = false, listen = null;
+    ${source}
+    onVoice({ type: 'state', state: 'idle', cancelled: true, pairingReset: true });
+    return heard;
+  `);
+  const oldHeard = { close: () => { closed += 1; } };
+  const delay = () => assert.fail('pairing reset must not linger');
+  assert.equal(clear(oldHeard, () => ({}), () => false, null, false, null, delay), null);
+  const notch = { heard: 'Old transcript', close: 0 };
+  const activeNotch = () => ({ heard: (text) => { notch.heard = text; }, close: () => { notch.close += 1; } });
+  assert.equal(clear(oldHeard, () => ({}), () => true, activeNotch, false, { choices: ['Allow'] }, delay), null);
+  assert.equal(closed, 2);
+  assert.deepEqual(notch, { heard: '', close: 0 });
+}
+
 // ---- 1. Shared settings.
 {
   // clapSensitivity (W6): null until Hydra sends one, so the Mac keeps its own (an older server sends none).
@@ -65,6 +86,28 @@ const res = (status, body) => ({ status, ok: status >= 200 && status < 300, head
   timers.at(-1).f();
   await until(() => w.current.model === 'claude-haiku-5-5');
   assert.equal(asked.length, n + 1, 'the 60 s timer reads them');
+  w.stop();
+}
+
+{
+  const pending = [];
+  const w = createSettingsWatch({ api: { req: () => new Promise((resolve) => pending.push(resolve)) }, setTimer: () => 1, clearTimer: () => {} });
+  const a = w.start();
+  pending.shift()(res(200, { settings: { approve_all: true } }));
+  await a;
+  assert.equal(w.current.approveAll, true);
+  const oldRead = w.refresh();
+  const oldPatch = w.patch({ approveAll: true });
+  w.stop({ reset: true });
+  assert.equal(w.current.approveAll, false);
+  const newRead = w.start();
+  assert.equal(pending.length, 3, 'the new account gets its own request');
+  pending.pop()(res(200, { settings: { approve_all: false } }));
+  await newRead;
+  for (const finish of pending) finish(res(200, { settings: { approve_all: true } }));
+  await oldRead;
+  assert.equal((await oldPatch).ok, false);
+  assert.equal(w.current.approveAll, false);
   w.stop();
 }
 
@@ -338,8 +381,7 @@ const done = { type: 'result', subtype: 'success', is_error: false, result: 'ok'
   // cancels a turn quietly any more, only sleep does.
   assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{\n\s+addOnTake = true;[\s\S]*?else hush\(true\);/, 'any take while thinking adds on; a clap cuts the speech');
   assert.doesNotMatch(side, /interruptQuietly\('listening'\)|interruptQuietly\('new request'\)/, 'never a quiet cancel by a take or a request');
-  assert.match(side, /if \(addOnTake\) \{ addOnTake = false; if \(addOn\(text\)\) return; \}/);
-  assert.match(side, /const into = addOnTo\(text, \{ busy, addInput: \(t\) => agent\?\.addInput\?\.\(t\), enqueue \}\);/, 'addOnTo (behavior in voiceturn.test.mjs)');
+  // gptroute.test.mjs exercises additions through onSpoken; voiceturn.test.mjs covers routing into the turn or queue.
   assert.match(side, /await relaySession\(\{\n\s+agent: agentRun, text: said\.text, h,/, 'relay additions into the session (relaySession: behavior in relayup.test.mjs)');
   assert.match(side, /if \(m\.via === 'barge' \|\| \(m\.via === 'clap' && heardTrack\.playing\)\) noteInterrupted\(\);/, 'barge-in and a clap while speech plays note what was heard');
   assert.match(side, /the owner heard only: "\$\{cut\}"/, 'and the next turn carries it');

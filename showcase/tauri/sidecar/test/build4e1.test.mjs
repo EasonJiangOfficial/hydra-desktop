@@ -11,7 +11,8 @@
 // Run: npm test
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { ASK_DEADLINE_MS, FILLER_MS, PROGRESS_MS, endNote, skippedLine, spokenAnswer, spokenQuestion, startProgress, trackAsk, whileBusy } from '../voiceturn.mjs';
+import { runInNewContext } from 'node:vm';
+import { ASK_DEADLINE_MS, FILLER_MS, PROGRESS_MS, addOnTo, endNote, skippedLine, spokenAnswer, spokenQuestion, startProgress, trackAsk, whileBusy } from '../voiceturn.mjs';
 import { FILLERS, PROGRESS, createSpeaker } from '../speaker.mjs';
 import { createPower, heardSleepWord, SLEEP_AFTER_MS } from '../power.mjs';
 import { oneYesNoAtATime } from '../tools.mjs';
@@ -49,9 +50,30 @@ function fakeClock() {
   assert.doesNotMatch(side, /interruptQuietly\('listening'\)/, 'a take never cancels the turn');
   assert.doesNotMatch(side, /interruptQuietly\('new request'\)/, 'nor does a request sent while it works');
   assert.deepEqual([...side.matchAll(/interruptQuietly\('(\w+)'\)/g)].map((m) => m[1]), ['sleep'], 'only sleep cancels quietly');
-  assert.match(side, /if \(interrupt && busy && !image && addOn\(text\)\) return running;/, 'typed, clicked or spoken while busy: joins the turn');
+  const fromSource = (name) => side.match(new RegExp(`^function ${name}\\([\\s\\S]*?^}`, 'm'))[0];
+  const additions = [], queuedPrompts = [];
+  const life = new AbortController();
+  let pairing = 'pair-a';
+  const enqueue = runInNewContext(`${fromSource('enqueue')}\n${fromSource('addOn')}\nenqueue`, {
+    busy: true, running: Promise.resolve(), queued: 0, requestPair: 'pair-a', pairingLife: life,
+    notePairing: () => pairing, localRequestPair: { run: (_binding, fn) => fn() },
+    prompt: (text, _image, _note, _voice, _news, _listen, pair, signal) => queuedPrompts.push([text, pair, signal.aborted]),
+    addOnTo, agent: { addInput: (text) => { additions.push(text); return true; } },
+    turnWords: 'first', turnIntent: 'first', logLine: () => {}, turnProgress: null, maybeCompact: () => {},
+  });
+  await enqueue('same pairing', { interrupt: true });
+  assert.equal(additions.length, 1);
+  assert.match(additions[0], /same pairing$/);
+  assert.deepEqual(queuedPrompts, []);
+  pairing = 'pair-b';
+  await enqueue('new pairing', { interrupt: true, pairingSignal: new AbortController().signal });
+  pairing = 'pair-a';
+  life.abort();
+  await enqueue('retired pairing', { interrupt: true, pairBinding: 'pair-a', pairingSignal: life.signal });
+  assert.equal(additions.length, 1, 'a replacement or retired pairing cannot add to the old turn');
+  assert.deepEqual(queuedPrompts, [['new pairing', 'pair-b', false], ['retired pairing', 'pair-a', true]]);
   assert.match(side, /state === 'listening' && whileBusy\(\{ busy \}\) === 'add_on'\) \{\n\s+addOnTake = true;[\s\S]*?else hush\(true\);/, 'Hydra holds its voice while the owner talks; a clap cuts it');
-  assert.match(side, /m\.state === 'idle'\) \{ addOnTake = false; hush\(false\);/, 'a take that ends (heard nothing) clears the add-on and lets the voice go on');
+  assert.match(side, /m\.state === 'idle'\) \{ voicePairing = null; addOnTake = false; hush\(false\);/, 'a take that ends (heard nothing) clears the add-on and lets the voice go on');
 }
 
 // ---- C2: the opener, then progress lines.
@@ -255,8 +277,8 @@ function fakeClock() {
   assert.deepEqual(endNote({ how: 'sleep', voice: true }), { line: "I stopped that because I'm going to sleep.", spoken: false }, 'so is sleep, but it is shown');
   assert.equal(endNote({ how: 'stop', answered: true }).line, 'Okay, stopping.', 'a stop always says so');
   assert.match(side, /else if \(e\.type === 'max_turns'\) hitMax = true;/, 'the step limit is noticed');
-  assert.match(side, /if \(note\.line && !cutOff\) \{[^\n]*reply\.push\(n\);/, 'said in the reply when the voice is live');
-  assert.match(side, /localSync\.record\(\{ user: turnWords, assistant: \[shown, endLine\]\.filter\(Boolean\)\.join\('\\n'\) \}\);/, 'written to the thread, a stopped turn too');
+  assert.match(side, /if \(ending\.line && !cutOff\) \{[^\n]*reply\.push\(n\);/, 'said in the reply when the voice is live');
+  assert.match(side, /localSync\.record\(\{ user: turnWords, assistant: \[shown, endLine\]\.filter\(Boolean\)\.join\('\\n'\), pairBinding: drawPair \}\);/, 'written to its own thread, a stopped turn too');
   assert.doesNotMatch(side, /!\(controller\.signal\.aborted && quiet\)\) \{\n\s+const c = new CueFilter\(\);/, 'a quiet stop is no longer left out of the thread');
 }
 

@@ -57,7 +57,8 @@ assert.ok(!/"(oneOf|anyOf|allOf)"/.test(drawSchema), 'draw is one flat object sc
   for (const k of ['flow', 'table', 'bars', 'map', 'math', 'geometry', 'quiz']) assert.ok(mark.kind.enum.includes(k), `${k} is a kind of mark`);
   assert.ok(mark.parts.items.properties.motion, 'a part can move');
   assert.ok(d.description.includes('\\frac{a}{b}, \\sqrt{x}') && d.description.includes('no \\begin, & or \\\\ line breaks'), 'the LaTeX in the description reaches the model with single backslashes');
-  assert.ok(d.description.includes(`At most ${LIMITS.cardsShown} cards show at once (one more closes the oldest)`), 'the model knows only a few cards stay up');
+  assert.ok(d.description.includes('A drawing stays on screen until the user closes it. Every drawing is saved to their Notes page by itself: never save it again with a notes tool.'), 'the model knows drawings stay and are saved');
+  assert.ok(!/At most \d+ cards|the window changes or the next one replaces it/.test(d.description), 'no card cap, nothing replaces it');
   assert.ok(d.description.length < 9000, `the draw description stays a readable size (${d.description.length})`);
 }
 console.log('tool schema ok');

@@ -132,6 +132,6 @@ assert.ok(side.indexOf('\nSpeed: ') < side.indexOf('\nSeveral things in one requ
 assert.ok(!/Be fast:|screenshot just that app/.test(side), 'no second copy of the speed rules');
 // Regression (#139): a drawing that went with its window was still talked about as on screen; each message now says.
 assert.match(side, /\$\{inkLine\(\)\}/, 'the live state says what is drawn now');
-assert.match(side, /onInkGone: \(why\) => \{ inkGone = true;/, 'and when a drawing has gone');
+assert.doesNotMatch(side, /onInkGone/, 'nothing takes a drawing away by itself (owner, 2026-11-26)');
 assert.match(side, /m\.type === 'ink_cleared'\) \{ inkGone = true;/, 'closed by them too');
 console.log('prompt (speed) tests: passed');

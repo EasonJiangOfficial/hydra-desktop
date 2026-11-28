@@ -253,13 +253,13 @@ const run = async (steps, { owner = () => null, on = true } = {}) => {
 // ---- 8 (low, principle 4). A retry that ends before its run (not ready): its words go to the thread with why.
 {
   const AsyncFunction = (async () => {}).constructor;
-  for (const retrying of [{ count: 1 }, null]) {
+  for (const [retrying, changed] of [[{ count: 1 }, false], [null, false], [{ count: 1 }, true]]) {
     const thread = [], said = [];
-    const st = { readyAgent: async () => 'Pick another model on the Model page.', desk: { started() {} }, news: null, retrying, turnWords: 'open the page\n\n[added] also the volume',
-      toThread: (u, a) => thread.push([u, a]), say: (t) => { said.push(t); return 'said'; } };
-    assert.equal(await piece('  const notReady = await readyAgent();', '  busy = true; quiet = false; autoTurn = null;', [], st, AsyncFunction), 'said', 'the prompt ends there');
-    assert.deepEqual(said, ['Pick another model on the Model page.'], 'said why');
-    assert.deepEqual(thread, retrying ? [['open the page\n\n[added] also the volume', 'Pick another model on the Model page.']] : [], retrying ? 'a retry: its words to the thread' : 'a first try: as before');
+    const st = { readyAgent: async () => 'Pick another model on the Model page.', pairingChanged: () => changed, desk: { started() {} }, news: null, retrying, drawPair: 'fixture-pair', turnWords: 'open the page\n\n[added] also the volume',
+      toThread: (u, a, pair) => thread.push([u, a, pair]), say: (t) => { said.push(t); return 'said'; } };
+    assert.equal(await piece('  const notReady = await readyAgent();', '  busy = true; quiet = false; autoTurn = null;', [], st, AsyncFunction), changed ? undefined : 'said', 'the prompt ends there');
+    assert.deepEqual(said, changed ? [] : ['Pick another model on the Model page.'], 'only the current pairing hears why');
+    assert.deepEqual(thread, retrying && !changed ? [['open the page\n\n[added] also the volume', 'Pick another model on the Model page.', 'fixture-pair']] : [], 'only a current retry records its words, bound to its original pairing');
   }
 }
 

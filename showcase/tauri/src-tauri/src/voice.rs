@@ -6,6 +6,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::Child;
 use std::sync::atomic::AtomicU32;
 
+pub(crate) struct VoiceWorker {
+    child: Child,
+    #[cfg(target_os = "macos")]
+    area: voice_area::VoiceArea,
+}
+
 /// Id of the registered show/hide hotkey, read by the hotkey event handler.
 static SUMMON_ID: AtomicU32 = AtomicU32::new(0);
 /// Id of the registered "ask about an area" hotkey.
@@ -34,6 +40,7 @@ pub(crate) fn voice_binary() -> Option<PathBuf> {
 
 pub(crate) fn start_voice(app: &AppHandle) {
     let state = app.state::<Voice>();
+    state.3.store(true, Ordering::Relaxed);
     if state.0.lock().unwrap().is_some() {
         return;
     }
@@ -43,6 +50,14 @@ pub(crate) fn start_voice(app: &AppHandle) {
     };
     let chord = app.state::<TalkChord>().0.lock().unwrap().join(",");
     let mut cmd = Command::new(bin);
+    #[cfg(target_os = "macos")]
+    let area = match voice_area::VoiceArea::new() {
+        Ok(area) => area,
+        Err(e) => { eprintln!("voice helper temporary directory failed: {e}"); return; }
+    };
+    // Foundation's NSTemporaryDirectory follows this setting, including on older bundled helpers.
+    #[cfg(target_os = "macos")]
+    cmd.env("TMPDIR", area.path());
     cmd.arg("--chord").arg(chord);
     if let Some(dir) = app.state::<VoiceModel>().0.lock().unwrap().clone() {
         cmd.arg("--model").arg(dir);
@@ -71,27 +86,36 @@ pub(crate) fn start_voice(app: &AppHandle) {
     };
     let stdout = child.stdout.take().expect("piped stdout");
     let pid = child.id();
-    *state.0.lock().unwrap() = Some(child);
+    let epoch = state.2.advance();
+    *state.0.lock().unwrap() = Some(VoiceWorker {
+        child,
+        #[cfg(target_os = "macos")]
+        area,
+    });
     let app = app.clone();
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
             let app2 = app.clone();
-            let _ = app.run_on_main_thread(move || handle_voice(&app2, msg));
+            let _ = app.run_on_main_thread(move || {
+                if app2.state::<Voice>().2.owns(epoch) { handle_voice(&app2, msg); }
+            });
         }
         // Exited: anything it was drawing is gone, so the page draws the sidekick again.
         {
             let app2 = app.clone();
-            let _ = app.run_on_main_thread(move || to_sidekick_buddy(&app2, &json!({ "state": "gone" })));
+            let _ = app.run_on_main_thread(move || {
+                if app2.state::<Voice>().2.owns(epoch) { to_sidekick_buddy(&app2, &json!({ "state": "gone" })); }
+            });
         }
         // If it is still the wanted helper, it died on its own: retry a few times.
         let state = app.state::<Voice>();
         let ours = {
             let mut slot = state.0.lock().unwrap();
-            let ours = slot.as_ref().map(Child::id) == Some(pid);
+            let ours = state.2.owns(epoch) && slot.as_ref().map(|worker| worker.child.id()) == Some(pid);
             if ours {
                 if let Some(mut c) = slot.take() {
-                    if let Ok(status) = c.wait() {
+                    if let Ok(status) = c.child.wait() {
                         let how = exit_info(status);
                         eprintln!("voice helper exited: {how}");
                         if let Ok(mut e) = VOICE_EXIT.lock() {
@@ -106,24 +130,41 @@ pub(crate) fn start_voice(app: &AppHandle) {
         if ours && state.1.fetch_add(1, Ordering::Relaxed) < 3 {
             thread::sleep(Duration::from_secs(1));
             let app2 = app.clone();
-            let _ = app.run_on_main_thread(move || start_voice(&app2));
+            let _ = app.run_on_main_thread(move || {
+                if app2.state::<Voice>().2.owns(epoch) { start_voice(&app2); }
+            });
         }
     });
 }
 
 pub(crate) fn stop_voice(app: &AppHandle) {
+    app.state::<Voice>().3.store(false, Ordering::Relaxed);
+    retire_voice(app);
+    to_overlays(app, &json!({ "kind": "voice", "type": "state", "state": "idle" }));
+}
+
+fn retire_voice(app: &AppHandle) {
     let state = app.state::<Voice>();
+    state.2.advance();
     let child = state.0.lock().unwrap().take();
     if let Some(mut c) = child {
-        let _ = c.kill();
-        let _ = c.wait();
+        let _ = c.child.kill();
+        let _ = c.child.wait();
     }
-    to_overlays(app, &json!({ "kind": "voice", "type": "state", "state": "idle" }));
+}
+
+/// A replacement pairing needs a fresh audio process, including for helpers that predate reset acknowledgments.
+pub(crate) fn reset_voice_pairing(app: &AppHandle, reset: &str) {
+    let wanted = app.state::<Voice>().3.load(Ordering::Relaxed);
+    retire_voice(app);
+    to_sidekick_buddy(app, &json!({ "state": "gone" }));
+    to_sidecar(app, &json!({ "type": "voice_take_reset", "reset": reset }));
+    if wanted { start_voice(app); }
 }
 
 pub(crate) fn to_voice(app: &AppHandle, msg: &Value) {
     if let Some(child) = app.state::<Voice>().0.lock().unwrap().as_mut() {
-        if let Some(stdin) = child.stdin.as_mut() {
+        if let Some(stdin) = child.child.stdin.as_mut() {
             let _ = writeln!(stdin, "{msg}");
         }
     }
@@ -307,21 +348,19 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         to_overlays(app, &ui);
         return;
     }
-    // While the setup guide is open, talking is just the "try it" test: it never reaches the agent.
-    if ONBOARDING.load(Ordering::Relaxed) {
-        // Nothing answers here, so the listening pill goes as soon as the words are in.
-        if msg.get("type").and_then(Value::as_str) == Some("final") {
-            to_voice(app, &json!({ "cmd": "handoff" }));
-        }
+    let kind = msg.get("type").and_then(Value::as_str);
+    let onboarding = ONBOARDING.load(Ordering::Relaxed);
+    // The sidecar validates and routes transcript and take data for both the guide and ordinary overlays.
+    if voice_epoch::setup_only(onboarding, kind) {
         to_onboarding(app, &ui);
         return;
     }
-    match msg.get("type").and_then(Value::as_str) {
+    match kind {
+        Some("take_started") => to_sidecar(app, &json!({ "type": "voice_take_started", "take": msg.get("take"), "onboarding": onboarding })),
         Some("state") => {
-            to_overlays(app, &ui);
             // mode: what opened a take (hold, handsfree, wake): a phrase take while Hydra thinks adds to the turn.
             // ask: the take an ask opened (listen via ask), so only that one is closed when the ask ends.
-            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state"), "mode": msg.get("mode"), "ask": msg.get("ask") }));
+            to_sidecar(app, &json!({ "type": "voice_state", "state": msg.get("state"), "mode": msg.get("mode"), "ask": msg.get("ask"), "take": msg.get("take"), "wave": msg.get("wave"), "cancelled": msg.get("cancelled"), "onboarding": onboarding }));
         }
         // The orb's spectrum (W5 contract 5), straight to the Hydra window (at most 30 a second, from the helper).
         Some("bands") => { if let Some(p) = bands_push(&msg) { hydra::push(app, &p); } }
@@ -332,15 +371,20 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         Some("level") => to_overlays(app, &ui),
         // The words as they're recognised, for the Hydra window's orb card too (bridge v3: heard).
         Some("partial") => {
-            to_overlays(app, &ui);
-            // The owner talks again: a new turn, so the last reply clears (W3 contract-fixes 10).
-            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": false }, "reply": Value::Null }));
+            to_sidecar(app, &json!({ "type": "voice_partial", "text": msg.get("text"), "take": msg.get("take"), "onboarding": onboarding }));
         }
         Some("final") => {
-            to_overlays(app, &ui);
-            hydra::push(app, &json!({ "heard": { "text": msg.get("text").cloned().unwrap_or(Value::Null), "final": true }, "reply": Value::Null }));
+            if onboarding { to_voice(app, &json!({ "cmd": "handoff" })); }
             // area: the part of the screen marked with the pen while talking (a PNG, its rect and the strokes).
-            to_sidecar(app, &json!({ "type": "voice", "text": msg.get("text"), "area": msg.get("area"), "ms": msg.get("ms"), "via": msg.get("via") }));
+            let area = msg.get("area");
+            #[cfg(target_os = "macos")]
+            let area = area.filter(|area| {
+                let state = app.state::<Voice>();
+                let worker = state.0.lock().unwrap();
+                area.get("file").and_then(Value::as_str).zip(worker.as_ref())
+                    .is_some_and(|(file, worker)| worker.area.owns_image(std::path::Path::new(file)))
+            });
+            to_sidecar(app, &json!({ "type": "voice", "text": msg.get("text"), "area": area, "ms": msg.get("ms"), "via": msg.get("via"), "take": msg.get("take"), "onboarding": onboarding }));
         }
         Some("error") => {
             let mut m = msg.clone();

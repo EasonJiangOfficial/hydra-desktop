@@ -70,7 +70,7 @@ test('a late hands-free wake cannot make a tap wake provisional', () => {
 const sidekick = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
 const powerSource = sidekick.match(/^let [^\n]*pendingWake = null,[\s\S]*?^const power = createPower\(\{[\s\S]*?^\}\);/m)[0];
 const voiceSource = sidekick.match(/^const micPick = [^\n]*\n([\s\S]*?^function onVoice\(m\) \{[\s\S]*?^\})/m)[1];
-const voiceConfigSource = sidekick.match(/^let voiceConfigSent = [^\n]*\nconst voiceConfig = \(\) => \{[\s\S]*?^\};/m)[0];
+const voiceConfigSource = sidekick.match(/^let voiceConfigSent = [^\n]*\n[\s\S]*?^const voiceConfig = \(\) => \{[\s\S]*?^\};/m)[0];
 const wakeSource = readFileSync(new URL('../voiceturn.mjs', import.meta.url), 'utf8').match(/^export (function wakeActions\(why\) \{[\s\S]*?^\})/m)[1];
 const wakeRoutes = sidekick.match(/^  else if \(m\.type === 'agent_power'\)[\s\S]*?^  else if \(m\.type === 'orb_listen'\) \{[\s\S]*?^  \}/m)[0];
 const panelWake = sidekick.match(/^  else if \(id === 'power:wake'\) [^\n]*/m)[0];
@@ -85,10 +85,11 @@ function sidecar({ busy = false, holdReply = false, wakeCueDelay = 0 } = {}) {
     ...powerModule,
     createPower: (options) => powerModule.createPower({ ...options, ...clock }),
     Date: { now: clock.now }, setTimeout: clock.setTimer, clearTimeout: clock.clearTimer,
-    config, VOICE_OK: true, MAC: false, NEEDS_MODEL: false,
+    config, VOICE_OK: true, MAC: false, NEEDS_MODEL: false, viewGate: { owner: () => false },
     voiceReady: () => true, phraseListening: () => false, phraseOn: () => false, wakePhraseNow: () => 'Hey Hydra',
     clapTalkOn: () => false, bargeOn: () => false, clapSensitivity: () => 0.5, notchMode: () => 'off',
     busy, voiceBusy: false, voiceHelperUp: true, saidPending: false, emptyTake: false, addOnTake: false,
+    voicePairing: null, voiceResetPending: null, notePairing: () => null, pairingLife: new AbortController(),
     pending: new Map(), yesNoOpen: new Map(), approvalOpen: 0, askTake: null, takeVia: null, cutTake: false, snap: null,
     resumedAt: -Infinity, talkHowLong: () => 'Try again', VOICE_ON: () => false,
     whileBusy: ({ busy }) => busy ? 'add_on' : 'new', overReply: () => holdReply ? 'hold' : 'stop',
@@ -129,8 +130,46 @@ function sidecar({ busy = false, holdReply = false, wakeCueDelay = 0 } = {}) {
   return { clock, power, route, menuAction, voiceConfig, onVoice, voiceState, silentCancel, finishEmpty, finishWords, said, logged, sent, spoken, state, hushed, refreshed };
 }
 
+test('idle releases the take and unhushes before arming a waiting voiced ask', () => {
+  const { state, voiceState, hushed } = sidecar();
+  state.voicePairing = { take: 'fixture' };
+  state.addOnTake = true;
+  state.askTake = { id: 'finished' };
+  const pending = { a: { voiced: true }, took: false };
+  state.yesNoOpen.set('pending', pending);
+  state.yesNoOpen.set('answered', { a: { voiced: true }, took: true });
+  state.yesNoOpen.set('silent', { a: { voiced: false }, took: false });
+  const armed = [];
+  state.askArm = (id, ask) => {
+    assert.equal(state.voicePairing, null);
+    assert.equal(state.addOnTake, false);
+    assert.equal(state.askTake, null);
+    assert.equal(hushed.at(-1), false);
+    armed.push([id, ask]);
+  };
+  voiceState('idle');
+  assert.deepEqual(armed, [['pending', pending]]);
+});
+
 const tapRetry = "I didn't catch that. Tap and try again.";
 const helperRetry = "I didn't hear anything. Try again.";
+
+test('listening stamps the take and refreshes the pending cue through processing and idle', () => {
+  const { clock, voiceState, state, refreshed } = sidecar();
+  clock.advance(37);
+  const startedAt = clock.now();
+  voiceState('listening');
+  assert.equal(state.takeAt, startedAt);
+  assert.equal(state.emptyTake, true);
+  assert.deepEqual(refreshed.slice(-2), [['stir', true], ['pendingNow', true]]);
+  clock.advance(19);
+  voiceState('processing');
+  assert.equal(state.takeAt, startedAt);
+  assert.deepEqual(refreshed.slice(-2), [['stir', true], ['pendingNow', true]]);
+  voiceState('idle');
+  assert.equal(state.voiceBusy, false);
+  assert.deepEqual(refreshed.slice(-2), [['stir', false], ['pendingNow', false]]);
+});
 
 const takePaths = [
   ...['web', 'orb', 'panel', 'asked'].map((wake) => ({ name: `wake from ${wake}`, wake, via: 'wake', explicit: true })),

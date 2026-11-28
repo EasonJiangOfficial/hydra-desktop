@@ -149,7 +149,8 @@ func resolveWin(_ target: String) -> Win? {
     return nil
 }
 
-func winInfo(_ w: Win) -> [String: Any] { ["id": w.id, "app": w.app, "title": w.title, "bounds": [Int(w.x), Int(w.y), Int(w.w), Int(w.h)]] }
+/// The app's bundle id too (round 4): a password manager is known by it under any localized name.
+func winInfo(_ w: Win) -> [String: Any] { ["id": w.id, "app": w.app, "title": w.title, "bounds": [Int(w.x), Int(w.y), Int(w.w), Int(w.h)], "bundle": NSRunningApplication(processIdentifier: w.pid)?.bundleIdentifier ?? ""] }
 /// winInfo plus what the window shows (its file, its address): for every result that carries the window's text or picture,
 /// and for the windows the sidecar checks before it reads any (windows, locate). url: false leaves out a browser's
 /// address (a walk of its window), so the whole window list stays cheap.
@@ -508,8 +509,179 @@ func pressText(_ e: AXUIElement) -> Bool {
 // Clicks that delete, pay, send or sign out (in English and other common languages) run only when the sidecar
 // has asked the user ("confirmed").
 // Kept in sync with RISKY_CLICK in sidecar/safety.mjs.
-let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|quit anyway|quit|replace|trash|empty (the )?bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃"#, options: .caseInsensitive)
+let RISKY = try! NSRegularExpression(pattern: #"(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|quit anyway|quit|replace|trash|empty (the )?bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|sell|trade|swap|subscribe|deposit|donate|tip|bid|wire|top up|add funds|redeem|stake|cash out|order now|submit order|complete order|book now|start (?:a )?(?:free )?trial|upgrade now|bestellen|verkaufen|vender|vendre|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃|转账|轉帳|下单|下單|卖出|賣出|买入|買入|提现|提現|充值|注文|送金|入金|出金|売却|송금|이체|주문|충전|매수|매도|출금"#, options: .caseInsensitive)
 func risky(_ s: String) -> Bool { RISKY.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+/// Owner's hard limit 2 (B2): money words stop a click by a spot or an id, so the sidecar asks with the label and
+/// judges it with the window the plan is in by then: a clear pay label in many languages (Pay now, Place order, Kopen,
+/// Оплатить, 提交订单), a money word (Trade, Short, Long, Rent, Order, Open position) or a price button ($4.99, Rent
+/// $3.99). With plan.money (the sidecar sends it on every plan) a plain Confirm, Continue, Next or OK, in many
+/// languages, stops too; the sidecar lets one that is not money there run on. Generated from hardlimits-core.mjs
+/// (PAY_WORDS, PAY_FOREIGN, MONEY_WORD, PAY_CJK, PAY_AMOUNT, PRICE; CONFIRM_WORD, CONFIRM_CJK): kept in sync with
+/// moneyStop and confirmWord there.
+let MONEY = try! NSRegularExpression(pattern: #"^(pay|pay now|pay (it|the bill|the balance|the invoice|in full|securely|online|today)|pay with [\w .-]+|buy|buy (it )?now|buy with [\w .-]+|buy for .+|purchase|purchase now|complete (my |the |your )?(purchase|payment|booking|reservation|transfer|order)|confirm (and pay|payment|purchase|order|transfer|booking|reservation|trade|subscription)|confirm (&|and) (pay|buy|book)|place (my |your |the )?order|submit (my |your |the )?order|order now|book now|reserve now|request to book|get tickets|buy tickets|checkout now|proceed to (checkout|payment)|continue to (checkout|payment)|go to checkout|send money|send payment|transfer (money|funds|now)|move money|make (a )?payment|add money|add funds|top up|cash out|donate( now)?|start (a |your |my )?(free )?trial|start (my |your )?subscription|subscribe now|upgrade now|upgrade to [\w ]+|place bid|pledge|pledge now|back (this|the) project|make (an |a )?offer|submit (my |your |an |a )?(bid|offer|pledge)|confirm (my |your |the |an |a )?(bid|offer|pledge)|request (a |an )?(uber\w*|lyft\w*|ride|taxi|cab|car|driver|pickup)|confirm (uber\w*|lyft\w*|ride|pickup)|(create|send|make|initiate|request|schedule|start) (an |a )?(instant |manual )?payouts?|instant payouts?|pay ?out( now)?|1-click|buy with 1-click|apple pay|google pay|paypal|venmo|zelle|klarna|afterpay|slide to (send|pay)|hold to (confirm|pay|send)|swipe to (pay|send)|betalen|nu betalen|afrekenen|kopen|nu kopen|bestellen|jetzt bestellen|kostenpflichtig bestellen|zahlungspflichtig bestellen|jetzt kaufen|kaufen|zur kasse|bezahlen|jetzt bezahlen|uberweisen|überweisen|paga|paga ora|ordina|ordina ora|acquista|acquista ora|compra|compra ora|compra ahora|comprar|comprar ahora|pagar|pagar ahora|realizar pedido|finalizar pedido|finalizar compra|tramitar pedido|transferir|valider la commande|commander|passer la commande|payer|acheter|acheter maintenant|bayar|bayar sekarang|beli|beli sekarang|kop|köp|köp nu|betala|kup|kup teraz|zaplac|zapłać|kupuje|satin al|satın al|ode|öde|thanh toan|thanh toán|mua ngay|ชําระเงิน|ซื้อเลย|ادفع|ادفع الآن|اشتر الآن|שלם|לתשלום|оплатить|купить|оформить заказ|перевести|खरीदें|भुगतान करें|अभी खरीदें|transfer|withdraw|deposit|wire|tip|swap|trade|sell|sell all|vender|vendre|vendi|verkaufen|buy|short|long|go long|go short|stake|bid|bet|place bet|wager|order|set order|checkout|check out|subscribe|rent|book|reserve|upgrade|renew|redeem|exercise|roll|repay|broadcast|open position|close position|open (a )?(long|short)|close (all|position|trade)|review (order|trade|transfer|payment)|schedule (transfer|payment)|send now|transfer now|sign|convert|convert now|capture|charge|refund|give|give now|approve [a-z0-9]{2,10}|(un)?wrap( [a-z0-9]{2,10})?|bridge|mint|(go )?(long|short) [a-z0-9]{2,10}(-perp)?|request (uber|lyft)( [a-z0-9]+){0,2}|request (a )?ride|提交订单|去结算|结算|立即购买|立即支付|确认支付|确认付款|支付|付款|购买|下单|立即下单|买入|卖出|转账|充值|提现|提交訂單|結帳|立即購買|確認付款|購買|轉帳|買う|購入|購入する|今すぐ購入|お支払い|支払う|注文する|注文を確定する|送金|送金する|入金|出金|売却|결제|결제하기|구매|구매하기|주문하기|송금|이체|충전|매수|매도|출금)(\s*(→|>|›|»))?$|(^|[^\p{L}-])(pay|payer|payez|pagar|pague|paga|zahlen|bezahlen|betalen|betala|bayar|buy|purchase|transfer|withdraw|sell|trade|swap|renew|refund|donate|compra|comprar|achat|acheter|acquista|acquisto|kaufen|kopen|bestellung|commande|ordine|pedido)(?![\p{L}-])(?!\s+((to|for|on|in|with|from|of|by) )?((the|our|my|your|this|these|that|a|an) )?(attention|heed|tribute|respects?|history|details?|status|summary|settings|preferences|options?|methods?|info|information|overview|reports?|statements?|activity|records?|logs?|lists?|ideas?|guides?|tracking|photos?|pictures?|images?|videos?|files?|folders?|documents?|data|ownership|applications?|requests?|newsletters?|channels?|updates|calendars?|feeds?|podcasts?|notifications|emails?|threads?|comments?|alerts?|branch(es)?|calculator|periods?|stubs?|slips?|rates?|scale|grades?|cycles?|columns?|rows?|layers?|panes?|tabs?|views?|themes?|instances?|components?|variants?|colou?rs?|sides|layouts?|loans?|books?|articles?|posts?|pages?|links?|show|shows|secrets|domains? (list|settings)|policy|policies|terms|consent|repository|repo|issues?|project|projects|board|boards|call|calls|chat|chats|conversation|contacts?|lease|dhcp|certificate|certs?|screens?|displays?|monitors?|audio|left|right|on (amazon|ebay|etsy|shopify|facebook|marketplace|craigslist|poshmark|depop|mercari|google|apple)|by (date|name|newest|oldest|price|size|type|relevance|status|title))(\s|$))|(支付|付款|下单|下單|购买|購買|買う|購入|支払|送金|결제|송금|구매|주문|이체|转账|轉帳|振込)(?!\s?(履歴|历史|歷史|記録|记录|紀錄|内訳|明細|明细|내역|方式|方法|設定|设置|設置|설정|수단|기록))|\b(confirm|confirmar|confirmer|conferma|bestatigen|approve|authori[sz]e|submit|complete|finish|finali[sz]e|process|make|send|accept|agree|valider|place|run|issue|review and|go to|proceed to|continue to)( (and|&|to|the|my|your|this|a|an|le|la|il|el|o))* (l'|d')?(payments?|purchase|order|transaction|transfer|withdrawal|swap|sale|trade|checkout|payroll|refund|charge|bid|offer|pledge|pagamento|pago|compra|achat|ordine|commande|pedido|bestellung|zahlung|paiement|acquisto)\b|^(run|submit|approve|process|pay|send|finish|confirm|preview) payroll\b|^charge( (the|this|a))? (customer|card|client|[$€£¥]\d)|^upgrade (plan|subscription|membership|account|tier|workspace|team)\b|(^|[^\p{L}\p{M}])((zahlung|bezahlung|bestellung|kauf|auftrag|zahlungsauftrag|überweisung|uberweisung) (jetzt )?(bestätigen|bestatigen|ausführen|ausfuhren|absenden|freigeben|abschließen|abschliessen|durchführen|durchfuhren|senden)|(jetzt |sofort )?(überweisen|uberweisen)|geld (senden|überweisen|uberweisen)|(confirmer|valider|effectuer|finaliser|faire) (le |la |l'|mon |ma |votre )?(paiement|virement|achat|commande|transfert|versement)|passer (la |ma )?commande|(confirmar|realizar|hacer|completar|finalizar|tramitar|efetuar|fazer|concluir) (el |la |mi |tu |su |o |a |meu |minha )?(pago|pagamento|transferencia|transferência|compra|pedido|pix)|transferir (agora|ahora|ya)|enviar (dinero|dinheiro)|(conferma|effettua|esegui|completa) (il |la |l'|lo )?(pagamento|bonifico|acquisto|ordine|trasferimento)|invia denaro|(bestelling|betaling|overboeking|overschrijving) (plaatsen|bevestigen|afronden|uitvoeren|voltooien)|(nu )?overboeken|geld overmaken|zapłać( teraz)?|płacę|kupuję|kup teraz|zamawiam|zamów|(wykonaj|zleć|wyślij) przelew|potwierdź (płatność|zamówienie|przelew|zakup)|(ödemeyi|ödeme|siparişi|sipariş|satın almayı) (tamamla|onayla|yap|ver|gönder)|para gönder|şimdi öde|hemen al|оплатить|оплатите|оплатити|купить|купите|купити|перевести (деньги|средства)|переказати кошти|отправить деньги|подтвердить (оплату|заказ|перевод|покупку)|оформить заказ|(إتمام|اتمام|تأكيد|تاكيد) (الشراء|الطلب|الدفع)|تحويل (الأموال|الاموال|المال)|ادفع|اشتر|ऑर्डर (करें|दें)|भुगतान करें|खरीदें|पैसे भेजें|đặt hàng|chuyển tiền|thanh toán|mua ngay|buat pesanan|kirim uang|transfer sekarang|bayar sekarang|beli sekarang|קנה|בצע הזמנה|לתשלום|שלם|העבר כסף|העברת כסף)(?![\p{L}\p{M}])|で払う|を払う|チャージする|チップを送る|สั่งซื้อ|โอนเงิน|ชําระเงิน|ซื้อเลย|ซื้อทันที|转账|轉帳|抢购|搶購|马上抢|立即抢|振込|振り込|お振込|^(pay|pay now|pay (it|the bill|the balance|the invoice|in full|securely|online|today)|pay with [\w .-]+|buy|buy (it )?now|buy with [\w .-]+|buy for .+|purchase|purchase now|complete (my |the |your )?(purchase|payment|booking|reservation|transfer|order)|confirm (and pay|payment|purchase|order|transfer|booking|reservation|trade|subscription)|confirm (&|and) (pay|buy|book)|place (my |your |the )?order|submit (my |your |the )?order|order now|book now|reserve now|request to book|get tickets|buy tickets|checkout now|proceed to (checkout|payment)|continue to (checkout|payment)|go to checkout|send money|send payment|transfer (money|funds|now)|move money|make (a )?payment|add money|add funds|top up|cash out|donate( now)?|start (a |your |my )?(free )?trial|start (my |your )?subscription|subscribe now|upgrade now|upgrade to [\w ]+|place bid|pledge|pledge now|back (this|the) project|make (an |a )?offer|submit (my |your |an |a )?(bid|offer|pledge)|confirm (my |your |the |an |a )?(bid|offer|pledge)|request (a |an )?(uber\w*|lyft\w*|ride|taxi|cab|car|driver|pickup)|confirm (uber\w*|lyft\w*|ride|pickup)|(create|send|make|initiate|request|schedule|start) (an |a )?(instant |manual )?payouts?|instant payouts?|pay ?out( now)?|1-click|buy with 1-click|apple pay|google pay|paypal|venmo|zelle|klarna|afterpay|slide to (send|pay)|hold to (confirm|pay|send)|swipe to (pay|send)|betalen|nu betalen|afrekenen|kopen|nu kopen|bestellen|jetzt bestellen|kostenpflichtig bestellen|zahlungspflichtig bestellen|jetzt kaufen|kaufen|zur kasse|bezahlen|jetzt bezahlen|uberweisen|überweisen|paga|paga ora|ordina|ordina ora|acquista|acquista ora|compra|compra ora|compra ahora|comprar|comprar ahora|pagar|pagar ahora|realizar pedido|finalizar pedido|finalizar compra|tramitar pedido|transferir|valider la commande|commander|passer la commande|payer|acheter|acheter maintenant|bayar|bayar sekarang|beli|beli sekarang|kop|köp|köp nu|betala|kup|kup teraz|zaplac|zapłać|kupuje|satin al|satın al|ode|öde|thanh toan|thanh toán|mua ngay|ชําระเงิน|ซื้อเลย|ادفع|ادفع الآن|اشتر الآن|שלם|לתשלום|оплатить|купить|оформить заказ|перевести|खरीदें|भुगतान करें|अभी खरीदें|перевест(и|ь)|переведи(те)?|перечисл(ить|ите|и)|оплат(ить|ите|и)|заплат(ить|ите|и)|куп(ить|ите|и)|отправить (деньги|средства|перевод)|сплатити|оплатити|переказати|купити|zapłać|zapłacić|zaplac|zaplacic|przelej|przelać|przelac|przelew|kupuję|kupię|kupuje|kupie|zamów|zamow|zamawiam|overmaken|maak over|overboeken|betaal( nu)?|koop( nu)?|bestel( nu)?|virer|virez|envoyer (de )?l['’]argent|payez|achetez|pague|compre|enviar pix|pagar (com|con) pix|enviar (dinero|dinheiro)|(havale|eft|fast) yap|havale gönder|havale gonder|ödeme yap|odeme yap|para gönder|para gonder|satın alın|satin alin|شراء|اشتري|اشتر|ادفع|ادفع الآن|إرسال الأموال|ارسال الاموال|ซื้อ|ชําระ|ชําระเลย|จ่าย|จ่ายเงิน|โอน|โอนเลย|注文(を)?確定(する)?|購入(を)?確定(する)?|支払(い)?(を)?確定(する)?|今すぐ支払う|送金(を)?確定(する)?|确认购买|確認購買)( (za |for |pour |por |für |fur |per )?(\d[\d .,]*\s?(₽|руб|р|₴|грн|zł|zl|pln|₺|tl|₹|rs|₩|₫|đ|฿|บาท|₪|kr|chf|r\$|\$|€|£|¥|eur|usd|gbp)?|(r\$|₽|₺|₹|₩|₫|฿|₪|\$|€|£|¥|zł)\s?\d[\d .,]*))?$|^((pay|buy|purchase|sell|trade|swap|subscribe|donate|bid|bet|wager|order|tip|stake|redeem|repay|re-?order|pre-?order) (?!((to|for|on|in|with|from|of) )?((the|our|my|your|this|a|an) )?(attention|history|details?|status|summary|settings|preferences|options?|methods?|info|information|overview|reports?|statements?|activity|records?|logs?|lists?|ideas?|guides?|tracking|numbers?|ids?|dates?|photos?|pictures?|images?|videos?|files?|folders?|documents?|data|ownership|applications?|requests?|newsletters?|channels?|updates|calendars?|feeds?|podcasts?|notifications|emails?|threads?|comments?|alerts?|branch(es)?|of|by (date|name|newest|oldest|price|size|type|relevance|status|title)|calculator|offs?|periods?|stubs?|slips?|rates?|scale|grades?|cycles?|days?|columns?|rows?|layers?|panes?|tabs?|places|sides|views?|colou?rs?|themes?|instances?|components?|variants?|screens?|displays?|monitors?|audio|left|right|policy|policies|consent|on (amazon|ebay|etsy|shopify|facebook|marketplace|craigslist|poshmark|depop|mercari|google|apple)|#\d*|no\.? ?\d+|\d+$)(\s|$))\S.*|send (money|payment|funds|cash|crypto|bitcoin|btc|eth|usdc|usdt|sol|tokens?|coins?|(with|via|by) (zelle|venmo|paypal|cash app|apple cash|wise|revolut|interac))\b.*|make (a |the )?(transfer|payment|deposit|withdrawal|purchase|trade|bet|donation)\b.*|submit (a |my |your |the )?((buy|sell|limit|market|stop) )?(order|payment|transfer|trade|bet)\b.*|place (a |my |your |the )?([$€£¥]?[\d.,]+ )?(bet|bid|order|trade|wager)s?\b.*|open (a |new )?(trade|position|long|short)\b.*|(get|try|join|start) ([\w-]+ )?(premium|pro|plus|gold|ultimate|unlimited|membership)\b.*)$|^(pay|send|transfer|donate|tip|buy|purchase|deposit|withdraw|give|top up|add|join|subscribe|bet|wager|order|renew|upgrade|book|place|start|try)\b.{0,20}([$€£¥]\s?\d|\d[\d,.]*\s?([$€£¥]|(dollars?|bucks|usd|eur|euros?|gbp|pounds|yen|btc|eth|usdc|usdt|sol)\b)|\b(usd|eur|gbp) ?\d)|^(withdraw|deposit|transfer|send|move)\b.{0,30}\b(funds|money|cash|to (checking|savings|bank|account|wallet|card)|from (checking|savings|bank|account|wallet))\b|^([\p{L}'-]+ ){0,4}(from |for |only |just |under )?([$€£¥]\s?\d|\d[\d,.]*\s?([$€£¥]|(dollars?|bucks|usd|eur|euros?|gbp|pounds|yen|btc|eth|usdc|usdt|sol)\b)|\b(usd|eur|gbp) ?\d)[\d.,]*( ?/ ?(mo|month|yr|year|wk|week))?( [\p{L}'-]+){0,2}$"#, options: [.caseInsensitive])
+let AMBIG = try! NSRegularExpression(pattern: #"^[^\p{L}\p{N}]*(schedule|confirm|confirm (on|in|with|via) [\w .-]+|submit|continue|send|approve|authori[sz]e|proceed|place|finish|complete|slide|swipe|hold to confirm|slide to send|join( now)?|enroll( now)?|become a member|start membership|activate( plan| membership| subscription)?|weiter|bestatigen|bestätigen|senden|absenden|fortfahren|abschicken|confirmar|continuar|enviar|confirmer|continuer|valider|envoyer|conferma|continua|invia|bevestigen|doorgaan|verzenden|fortsatt|fortsätt|bekrafta|bekräfta|skicka|potwierdz|potwierdź|wyslij|wyślij|devam|onayla|gonder|gönder|продолжить|подтвердить|отправить|xac nhan|xác nhận|tiep tuc|tiếp tục|konfirmasi|lanjutkan|kirim|review|get|install|done|ok|okay|next|return|enter|accept|agree|yes|verify|go|siguiente|aceptar|suivant|avanti|volgende|dalej|далее|确认|確認|确定|確定|继续|繼續|提交|发送|發送|送信|続ける|확인|계속|보내기|전송|제출|下一步|同意|次へ|다음|request)(?![\p{L}])|^[^\p{L}\p{N}]*[\u0370-\u03FF\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]"#, options: .caseInsensitive)
+var moneyPlan = false
+/// A label as the money rules read it: compatibility forms folded, lower case, no outer punctuation (a trailing →).
+func labelForms(_ s: String) -> [String] {
+    var l = s.precomposedStringWithCompatibilityMapping.lowercased().replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+    l = l.replacingOccurrences(of: #"^[^\p{L}\p{N}$€£¥]+|[^\p{L}\p{M}\p{N}$€£¥%)]+$"#, with: "", options: .regularExpression)
+    let folded = l.folding(options: [.diacriticInsensitive, .widthInsensitive], locale: nil)
+    return folded == l ? [l] : [l, folded]
+}
+/// A spot's words come as "words | words" (its text and the button it sits in, wordsAt): each part is a label of its
+/// own, and any part that is money makes the whole money (round 3: "Pay now | Pay now" and "$4.99 | $4.99" slipped by).
+func labelParts(_ s: String) -> [String] {
+    let p = s.components(separatedBy: " | ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    return p.isEmpty ? [s] : p
+}
+func moneyWord(_ s: String) -> Bool {
+    labelParts(s).contains { labelForms($0).contains { $0.split(separator: " ").count <= 6 && !$0.isEmpty && MONEY.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil } }
+}
+func ambiguous(_ s: String) -> Bool {
+    labelParts(s).contains { labelForms($0).contains { AMBIG.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil && $0.split(whereSeparator: { $0 == " " }).count <= 5 } }
+}
+/// Owner's hard limit 1: a control that copies or shows a secret (Copy password, Show password, Copy verification code)
+/// reads a credential, so it is never clicked, whatever the sidecar sent. Generated from hardlimits-core.mjs REVEAL.
+let REVEAL = try! NSRegularExpression(pattern: #"^(copy|show|reveal|view|display|unhide|unmask|see)( the| my| your)? (password|passcode|passphrase|pin|secret|secret key|api key|access key|token|access token|recovery (phrase|key|codes?)|seed phrase|secret phrase|private key|card number|cvv|cvc)s?$|^copy( the| my| your)? (verification|one-time|2fa|otp|sms|authenticator|security|sign-?in|login|backup) codes?$|^copy (otp|2fa|totp)$|^copy username and password$|^(toggle|show/hide|show or hide|hide/show)( the| my| your)? (password|passcode|passphrase|pin)( visibility)?$|^(show |reveal |toggle )?(password|passcode|pin) visibility( toggle)?$|^copy one-time (password|code)$|^(passwort|kennwort|pin|code) (kopieren|anzeigen|einblenden)$|^(copier|afficher|voir) (le |la |l')?(mot de passe|code)$|^(copiar|mostrar|ver) (la |el |a |o )?(contraseña|contrasena|senha|código|codigo|clave)$|^(copia|mostra) (la |il )?(password|codice)$|^(kopieer|toon) (het |de )?(wachtwoord|code)$|^(kopiuj|pokaż|pokaz) hasło$|^(скопировать|показать|копировать) (пароль|код)$|^(复制|显示|查看|複製|顯示)(密码|密碼|验证码|驗證碼)$|^パスワードを(コピー|表示)$|^비밀번호 (복사|보기|표시)$"#, options: [.caseInsensitive])
+func revealRefused(_ s: String) -> Bool {
+    labelParts(s).contains { labelForms($0).contains { REVEAL.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil } }
+}
+/// A terminal's last line asks for a password or passphrase (sudo, ssh, gpg): typing there is typing the password, and
+/// the shell shows no secure field. Generated from hardlimits-core.mjs PROMPT.
+let PROMPT = try! NSRegularExpression(pattern: #"^(?:(?=.*\b(paste|enter|type|provide|input)\s+((the|this|that|a|an|your|new|my)\s+)*(api[ _-]?key|token|access key|secret key|key|secret|password)\b)|(?!.*\b((name|label|description|title|comment|note)\s+(for|of)|name)\s+((the|this|that|a|an|your|new|my)\s+)*(api[ _-]?key|token|access key|secret key|key)\b)(?!.*\bgive\s+((the|this|that|a|an|your|new|my)\s+)*(api[ _-]?key|token|access key|secret key|key)\s+a\s+name\b)).*?((pass(word|phrase|code)|\bpin\b|verification code|one-time code|\botp\b|\btotp\b|\bmfa\b|\b2fa\b|two-factor|authenticator|authentication (code|token)|recovery code|backup code)|(\btoken\b|api[ _-]?key|secret key|access key)(?!\s+(name|nickname|alias|label|description|title|comment|note|limit|expiration|expiry|expires|lifetime|ttl|scopes?|type)\b))[^:]{0,80}:\s*$|^enter passphrase\b|^password for\b"#, options: [.caseInsensitive])
+let TERMINAL_APPS: Set<String> = ["terminal", "iterm", "iterm2", "warp", "ghostty", "kitty", "alacritty", "wezterm", "hyper", "tabby", "rio", "wave"]
+func passwordPrompt(_ text: String) -> Bool {
+    guard let last = text.components(separatedBy: .newlines).map({ $0.trimmingCharacters(in: .whitespaces) }).last(where: { !$0.isEmpty }), last.count <= 160 else { return false }
+    return PROMPT.firstMatch(in: last, range: NSRange(last.startIndex..., in: last)) != nil
+}
+/// The pure rule (self-tested): typing into a terminal whose shown text ends at a password prompt.
+func promptRefused(app: String, text: String?) -> Bool {
+    TERMINAL_APPS.contains(app.lowercased()) && passwordPrompt(String((text ?? "").suffix(4000)))
+}
+/// A window that became a password manager's vault mid-plan (a click on Passwords in Settings): nothing more is done in
+/// it. By its title, as the sidecar's vault rule reads a browser's title.
+func vaultTitle(_ t: String) -> Bool {
+    let first = t.components(separatedBy: CharacterSet(charactersIn: "-–—|·:")).first?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+    // Round 6: in other languages too (System Settings' Passwords pane and the Passwords app as macOS names them, Google's
+    // password manager in a browser's title), and in any part of the title.
+    let parts = t.components(separatedBy: CharacterSet(charactersIn: "-–—|·:")).map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+    let local = #"^(passwörter|passworter|kennwörter|mots de passe|contraseñas|contrasenas|senhas|wachtwoorden|lösenord|adgangskoder|passord|salasanat|hasła|hesla|jelszavak|şifreler|пароли|密码|密碼|パスワード|암호|비밀번호|كلمات السر|סיסמאות|รหัสผ่าน|mật khẩu|kata sandi)$"#
+    let manager = #"(google[- ]passwortmanager|gestionnaire de mots de passe( google)?|administrador de contraseñas( de google)?|gestore delle password( di google)?|gerenciador de senhas( do google)?|wachtwoordmanager( van google)?|менеджер паролей|密码管理器|密碼管理工具|パスワード マネージャー|비밀번호 관리자)"#
+    return first.range(of: #"^(passwords|saved passwords|google password manager|password manager|(1password|bitwarden|vaultwarden|lastpass|dashlane|keeper|nordpass|proton pass|roboform|enpass|keepass\w*)( web vault| vault| password manager)?)$"#, options: .regularExpression) != nil
+        || t.lowercased().contains("google password manager")
+        || first.range(of: local, options: .regularExpression) != nil
+        || parts.contains { $0.range(of: manager, options: .regularExpression) != nil }
+}
+/// A click the sidecar must ask about (or judge) first: risky anywhere, a money word or price, or (plan.money) one
+/// whose words don't say.
+func stopsAt(_ s: String, money: Bool = moneyPlan) -> Bool { risky(s) || moneyWord(s) || (money && ambiguous(s)) }
+
+/// Owner's hard limit 1 (B1): no password, credential or card number is typed, into any field, whatever the sidecar
+/// sent. A password field, or a field whose label, placeholder or title asks for a password, a PIN, a code, a key, a
+/// recovery phrase or a card's number, CVV or expiry (in several languages), is never typed, filled, set, keyed or
+/// pasted into. Kept in sync with CRED_FIELD in sidecar/hardlimits-core.mjs (the sidecar's early check).
+let CRED_FIELD = try! NSRegularExpression(pattern: #"pass ?(word|wd|code|phrase|key)|passwort|\bpwd\b|^pw$|kennwort|contrasena|contraseña|mot de passe|senha|parola d'ordine|^parola$|wachtwoord|losenord|lösenord|adgangskode|haslo|hasło|heslo|jelszo|jelszó|sifre|şifre|kata ?sandi|mat khau|mật khẩu|salasana|lozinka|geslo|parool|jelszó|κωδικ(ος|ός) προσβασης|κωδικός πρόσβασης|סיסמה|סיסמא|كلمة (ال)?(مرور|سر)|รหัสผ่าน|пароль|密码|密碼|口令|パスワード|暗証番号|비밀번호|암호|पासवर्ड|रहस्यशब्द|^clave$|clave de acceso|clave secreta|^nip$|geheimzahl|geheimnummer|^((enter|your|card|atm|sim|new|current|confirm|security|bank|debit) )?pin( ?(number|#|code))?[ :*]*$|\b(card|atm|sim|bank|debit|security) pin\b|\bssn\b|social security|security answer|secret answer|answer to (your |the )?security question|mother'?s maiden name|recovery (phrase|key|code|words)|seed (phrase|words)|wallet seed|\b(12|24)[- ]word|secret (recovery )?phrase|mnemonic|private key|secret key|secret access key|client secret|^secret$|api[ _-]?key(?! (name|label|description|title))|access key(?! (name|label|description|title))|access token|auth(entication)? token|bearer token|personal access token|^token$|auth(entication)? code|verification code|security code|one[- ]time (code|password|passcode)|\b\d[- ]digit code|\b2fa\b|\bmfa\b|\botp\b|\btotp\b|(sign|log)[- ]?in code|backup code|recovery code|confirmation code|access code|codigo de (verificacion|seguridad|acceso)|code de (verification|securite|confirmation)|bestatigungscode|verifizierungscode|sicherheitscode|codice di verifica|verificatiecode|kod weryfikacyjny|kod (sms|jednorazowy)|код подтверждения|验证码|驗證碼|校验码|認証コード|確認コード|인증 ?번호|인증 ?코드|otp कोड|(?<!gift )card ?(number|no\b)|cardnumber|credit card|debit card|card information|card details|numero de (la )?tarjeta|número de (la )?tarjeta|numero do cartao|número do cartão|numero de carte|numéro de carte|kartennummer|numero (della )?carta|kaartnummer|numer karty|номер карты|卡号|卡號|カード番号|카드 ?번호|kortnummer|kart numarasi|kart numarası|\bcvv2?\b|\bcvc2?\b|\bcvn\b|\bcsc\b|card (verification|security)|\bmm ?/ ?(yy|aa|jj)(yy|aa|jj)?\b|card expir|codigo de (verificacao|seguranca|confirmacao)|código de (verificação|segurança|confirmação)|cryptogramme|kartenprufnummer|kartenprüfnummer|prufnummer|prüfnummer|einmalcode|einmalpasswort|codice di sicurezza|codice (otp|monouso)|beveiligingscode|eenmalige code|セキュリティコード|安全码|安全碼|보안 ?코드|ma bao mat|mã bảo mật|engangskode|engangskod|engångskod|bekræftelseskode|bekraftelseskode|bekreftelseskode|verifieringskod|verifiseringskode|bekraftelsekod|bekräftelsekod|sikkerhedskode|sikkerhetskode|sakerhetskod|säkerhetskod|vahvistuskoodi|turvakoodi|kertakayttokoodi|kertakäyttökoodi|overovaci kod|ověřovací kód|bezpecnostni kod|bezpečnostní kód|kod bezpieczenstwa|kod bezpieczeństwa|passord|contrasenya|^parole$|slaptazodis|slaptažodis|kata laluan|lykilorð|lykilord|парола|лозинка|құпия сөз|رمز عبور|پاس ورڈ|পাসওয়ার্ড|^[•●*·]{4,}$|\b(two|2)[- ]?(factor|step) (auth(entication)? )?(code|pin)|card code|^cid$|^pin-code$|\bpin[- ](kode|kod)\b|\b(code|codigo|código|kod|kode|ma|mã|numero|número|numéro) (pin|nip)\b|\b(verify|verification|2fa|mfa|otp|sms|security|authenticator|authentication|confirmation|login|sign-?in) (pin|kod|kode|codigo|código)\b|رمز التحقق|رمز الأمان|cod de verificare|codul de verificare|bevestigingscode|код підтвердження|kod potwierdzający|kod potwierdzajacy|ellenőrző kód|ellenorzo kod|biztonsági kód|קוד אימות|סיסמה חד פעמית|सत्यापन कोड|ओटीपी|รหัสยืนยัน|รหัส otp|κωδικός επαλήθευσης|κωδικος επαληθευσης|kod pengesahan|kode keamanan|kod keselamatan|prüfziffer|prufziffer|kartenprüfziffer|^sandi$|kode sandi|kata kunci sandi|^κωδικός$|^κωδικος$|şifrə|sifrə|contrasinal|introduceți parola|introduceti parola|parola (ta|dvs|contului)|nenosiri|cyfrinair|գաղտնաբառ|პაროლი|கடவுச்சொல்|పాస్‌వర్డ్|ពាក្យសម្ងាត់|စကားဝှက်|^((please|enter|re-?enter|type|confirm|create|choose|set|change|verify|your|the|a|new|current|old|existing|card|atm|sim|bank|debit|credit|security|transaction|transfer|port-?out|account|carrier|wireless|mobile|phone|app|device|login|sign-?in|unlock|access|personal|spending|payment|wallet|voicemail|parental|\d+-?digit|four-?digit|six-?digit) ){1,4}pin( ?(number|#|code))?[ :*]*$|^(?!(search|select|choose|find|import|custom|crypto|erc-?20|bep-?20|nft|swap|from|to|receive|sell|buy|send|reward|game|gift|loyalty|bonus|gas) )(?!.*\b(max|maximum|min|minimum|output|input|context|total|design|number|prompt|completion|cached|reasoning|remaining|used)\b)([a-z0-9'-]+ ){0,3}token[ :*]*$|^((enter|paste|your|the|a|new|app|application|consumer|signing|webhook|shared|api|client|oauth|jwt|hmac|bot|totp|otp|2fa|mfa|account|session|encryption|access|integration|auth|authentication|cookie) ){1,3}secret( value| key| token)?[ :*]*$|^secret value\b|\(secret\)|(?<!(select|choose|pick) (a |your |the )?)security question(?!s)|\bdigit (code|pin)\b|code (we|that we|i|you've been) (just )?(sent|texted|emailed)|code (from|in) (your |the )?(authenticator|app|sms|text|texts|email|phone)|authenticator|\b(sms|text( message)?|texted|e-?mail(ed)?) code\b|enter the \d+ digits?|\b\d+[- ]digit (code|number|pin)\b|unlock code|\bpuk\d?\b|network key|wi-?fi (network )?(key|password)|\bwpa\d?(-psk)?( (key|passphrase))?\b|\bpsk\b|security key|master key|encryption key|decryption key|memorable (word|information|phrase)|security number|answer to\b|mã xác minh|ma xac minh|mã otp|kode verifikasi|kode otp|doğrulama kodu|dogrulama kodu|код из (смс|sms)|sms[- ]?код|код из сообщения|驗證碼|认证码|ワンタイム|일회용"#, options: [.caseInsensitive])
+func credentialLabel(_ s: String) -> Bool {
+    let raw = s.precomposedStringWithCompatibilityMapping.lowercased().replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+    if raw.isEmpty { return false }
+    let folded = raw.folding(options: [.diacriticInsensitive, .widthInsensitive], locale: nil)
+    return [raw, folded].contains { CRED_FIELD.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil }
+}
+/// The pure rule (self-tested): a secure field, or any of its words naming a credential.
+func credentialRefused(role: String?, subrole: String?, words: [String]) -> Bool {
+    role == "AXSecureTextField" || subrole == "AXSecureTextField" || words.contains(where: credentialLabel)
+}
+/// A field on screen: its role, and every word it shows for itself (title, description, placeholder, help, the label
+/// element that names it) plus the label the walk read for it.
+func credentialEl(_ e: AXUIElement?, label: String = "") -> Bool {
+    guard let e else { return credentialLabel(label) }
+    var words = [label] + [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXHelpAttribute, "AXIdentifier"].compactMap { str(e, $0) }
+    if let t = attr(e, kAXTitleUIElementAttribute), CFGetTypeID(t) == AXUIElementGetTypeID() {
+        let te = t as! AXUIElement
+        words += [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute].compactMap { str(te, $0) }
+    }
+    return credentialRefused(role: axRole(e), subrole: str(e, kAXSubroleAttribute), words: words)
+}
+/// Text that looks like a password: one word of 6 to 64 characters with letters and digits or symbols, not an email
+/// address, a web address, a path or a number. Kept in sync with passwordLike in sidecar/hardlimits-core.mjs.
+func passwordLike(_ text: String) -> Bool {
+    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    func m(_ p: String) -> Bool { t.range(of: p, options: [.regularExpression, .caseInsensitive]) != nil }
+    return m(#"^\S{6,64}$"#) && m(#"\p{L}"#) && m(#"[\d\W_]"#) && !m(#"^[^@\s]+@[^@\s]+\.[a-z]{2,}$"#) && !m(#"^([a-z][a-z0-9+.-]*:|www\.|[~/.])"#) && !m(#"^[\w-]+\.(com|org|net|io|dev|app|co|ai)(/\S*)?$"#)
+}
+/// B1 when focus can't be seen (an app that hides its fields, focus on the window after a click at a spot): typing,
+/// keys and paste are refused where the window shows a credential field, and typed text that looks like a password is
+/// refused on a sign-in or verify window (round 4: a layer name like "Scene2" typed in a canvas app is no password).
+func blindRefused(editable: Bool, pageHasCredential: Bool, text: String?, signin: Bool = true) -> Bool {
+    !editable && (pageHasCredential || (signin && (text.map(passwordLike) ?? false)))
+}
+/// A sign-in or verify window by its title (sign in, log in, verify, two-step, 2FA, the code we sent), in several
+/// languages. Generated from hardlimits-core.mjs SIGNIN_WORDS.
+let SIGNIN = try! NSRegularExpression(pattern: #"\b(sign.?in|log.?in|sign.?on|verif\w*|2-step|two-step|two-factor|2fa|mfa|authenticat\w*|one-time|otp|security code|confirm (it'?s you|your (identity|account|email|phone|number))|enter (the |your )?code|code (we|was|has been) (just )?(sent|texted|emailed)|anmeld\w*|connexion|iniciar sesi\w*|accedi|inloggen|bestatig\w*|bestätig\w*)\b|登录|登錄|ログイン|認証|로그인|인증"#, options: [.caseInsensitive])
+func signinTitle(_ t: String) -> Bool {
+    let f = t.folding(options: [.diacriticInsensitive, .widthInsensitive, .caseInsensitive], locale: nil)
+    return [t, f].contains { SIGNIN.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil }
+}
+/// A key step that types into the focused field: a character (with shift or opt: opt+h types ˙, round 4) or a paste
+/// (cmd+v).
+func keyTypes(_ combo: String) -> Bool {
+    guard let (flags, key) = parseKey(combo) else { return false }
+    if key == 9, flags.contains(.maskCommand) { return true } // cmd+v
+    if !flags.isDisjoint(with: [.maskCommand, .maskControl]) { return false }
+    // Return, tab, delete, escape, enter, home/end/page keys, forward delete, arrows and the F keys type nothing.
+    let k = Int(key)
+    return ![36, 48, 51, 53, 71, 76].contains(k) && !(96 ... 126).contains(k)
+}
+/// Owner's hard limit 1 (B1, round 6): a card number in what is typed, or in what this plan typed so far, joined in order
+/// (a card split over four boxes, or typed digit by digit). Digit groups with up to two separators between them (space,
+/// dot, slash, dash, en dash, underscore, tab), any script's digits; every window of whole groups of 13 to 19 digits
+/// with a card brand's prefix and Luhn. Kept close to cardNumber in sidecar/hardlimits-core.mjs (the early check).
+/// ponytail: brand prefixes only, no brand lengths; a Luhn-valid 16-digit id that starts with 4 is refused too.
+func cardIn(_ text: String) -> Bool {
+    var runs: [[[Int]]] = [], groups: [[Int]] = [], cur: [Int] = [], gap = 0
+    func endGroup() { if !cur.isEmpty { groups.append(cur); cur = [] } }
+    func endRun() { endGroup(); if !groups.isEmpty { runs.append(groups); groups = [] }; gap = 0 }
+    let seps = Set(" .-/_\t\u{2013}\u{00A0}".unicodeScalars)
+    for ch in text.unicodeScalars {
+        if ch.properties.numericType == .decimal, let v = ch.properties.numericValue { cur.append(Int(v)); gap = 0 }
+        else if seps.contains(ch), !(cur.isEmpty && groups.isEmpty), gap < 2 { endGroup(); gap += 1 }
+        else { endRun() }
+    }
+    endRun()
+    func luhn(_ d: [Int]) -> Bool {
+        var sum = 0
+        for (i, x) in d.reversed().enumerated() { let y = i % 2 == 1 ? x * 2 : x; sum += y > 9 ? y - 9 : y }
+        return sum % 10 == 0
+    }
+    // A brand's prefix and its length: Amex 15, Diners 14, the others 16 to 19 (an IMEI's 15 digits are no card).
+    func brand(_ d: [Int]) -> Bool {
+        let p = d.prefix(6).map(String.init).joined(), n2 = Int(p.prefix(2)) ?? 0, n3 = Int(p.prefix(3)) ?? 0, n4 = Int(p.prefix(4)) ?? 0
+        if [34, 37].contains(n2) { return d.count == 15 }
+        if (300 ... 305).contains(n3) || [36, 38, 39].contains(n2) { return d.count == 14 || d.count == 16 }
+        return d.count >= 16 && (d[0] == 4 || (51 ... 55).contains(n2) || (2221 ... 2720).contains(n4) || [35, 62, 65].contains(n2)
+            || (644 ... 649).contains(n3) || n4 == 6011 || (2200 ... 2204).contains(n4) || [60, 81, 82, 50, 56, 57, 58, 63, 67].contains(n2))
+    }
+    for r in runs {
+        for i in r.indices {
+            var digits: [Int] = []
+            for j in i ..< r.count {
+                digits += r[j]
+                if digits.count > 19 { break }
+                if digits.count >= 13, brand(digits), luhn(digits) { return true }
+            }
+        }
+    }
+    return false
+}
+/// What this plan typed so far (type, fill, set and keys that type a character), joined in order: a fill or a set
+/// starts a new piece.
+var typedJoin = ""
+func typedCard(_ text: String, newPiece: Bool) -> Bool {
+    typedJoin = String((typedJoin + (newPiece && !typedJoin.isEmpty ? " " : "") + text).suffix(400))
+    return cardIn(text) || cardIn(typedJoin)
+}
+let CARD_REFUSAL = "types a card number. I never type passwords, credentials or card numbers, Approve all or not. Ask the user to type it in themselves."
+let CRED_REFUSAL = "types into a field that takes a password, a code, a key or a card number. I never type passwords, credentials or card numbers, Approve all or not. Ask the user to type it in themselves."
 
 /// Key chords that quit, delete or send: what it does, or nil. Read by parseKey, exactly as pressKey presses them.
 /// Any chord with cmd and q; cmd with delete or forward delete; cmd+return; cmd+shift+d (Mail's Send).
@@ -555,12 +727,12 @@ func hasLineBreak(_ s: String) -> Bool { s.unicodeScalars.contains { [0x0A, 0x0D
 /// target: the field the step acts on (set, fill), else whatever has keyboard focus.
 func sendChecks(_ app: AXUIElement, appName: String, returnKey: Bool, target: AXUIElement? = nil) -> [(label: String, why: String)] {
     var out: [(label: String, why: String)] = []
-    if returnKey, let b = defaultButtonTitle(app), risky(b) { out.append((b, "Return would press \"\(b)\" in \(appName).")) }
+    if returnKey, let b = defaultButtonTitle(app), stopsAt(b) { out.append((b, "Return would press \"\(b)\" in \(appName).")) }
     let f = target ?? focusedEl(app)
     let role = f.map { axRole($0) }
     if let f, ["AXButton", "AXLink", "AXMenuItem", "AXRadioButton", "AXCheckBox", "AXPopUpButton"].contains(role ?? "") {
         let l = str(f, kAXTitleAttribute) ?? str(f, kAXDescriptionAttribute) ?? ""
-        if risky(l) { out.append((l, "That presses \"\(l)\" in \(appName).")) }
+        if stopsAt(l) { out.append((l, "That presses \"\(l)\" in \(appName).")) }
     }
     if returnKey {
         var inWeb = false, up = f
@@ -2040,6 +2212,138 @@ case "--self-test":
     check("quit asks for a browser", quitUnproved(name: "Google Chrome", bundle: nil, listed: 2, unlisted: 0, editedCount: 0) != nil)
     check("quit asks for an edited window", quitUnproved(name: "TextEdit", bundle: nil, listed: 1, unlisted: 0, editedCount: 1) != nil)
     check("quit goes ahead when every window was checked and is clean", quitUnproved(name: "TextEdit", bundle: nil, listed: 1, unlisted: 0, editedCount: 0) == nil)
+    // A3 B1 (owner's hard limit 1): typing, filling, setting, keying or pasting into a password or credential field is
+    // refused by the helper itself, whatever the sidecar sent.
+    for l in ["Password", "Passcode", "Contraseña", "Mot de passe", "Passwort", "Kennwort", "密码", "パスワード", "비밀번호", "Пароль", "PIN", "Enter PIN", "Card PIN", "SSN",
+              "Social Security number", "Recovery phrase", "Seed phrase", "Private key", "Authentication code", "Verification code", "6-digit code", "Card number",
+              "CVV", "CVC", "Security code", "MM / YY", "Numéro de carte", "Kartennummer", "Número de tarjeta", "API key", "Enter your password", "ＰＡＳＳＷＯＲＤ"] {
+        check("\"\(l)\" is a credential field", credentialLabel(l))
+    }
+    for l in ["Email", "Username", "Pin title", "Pin to top", "PIN code (postal)", "Secret Santa name", "Search secrets", "Token name", "Spinner", "Search",
+              "Promo code", "Gift card number", "Cardholder name", "Name", "Expiry", "Account number", ""] {
+        check("\"\(l)\" is an ordinary field", !credentialLabel(l))
+    }
+    check("a secure field is refused whatever its label", credentialRefused(role: "AXSecureTextField", subrole: nil, words: ["Enter it"]) && credentialRefused(role: "AXTextField", subrole: "AXSecureTextField", words: []))
+    check("a text field labelled Email is not", !credentialRefused(role: "AXTextField", subrole: nil, words: ["Email", "you@example.com"]))
+    check("a placeholder asking for the password is refused", credentialRefused(role: "AXTextField", subrole: nil, words: ["", "Enter your password"]))
+    check("a PIN, token or secret field is refused (release review)", ["Enter your PIN", "Please enter your PIN", "API token", "Refresh token", "Shared secret", "API secret", "Security question answer"].allSatisfy { credentialRefused(role: "AXTextField", subrole: nil, words: [$0]) })
+    check("a Pin title or Token name field is not", !credentialRefused(role: "AXTextField", subrole: nil, words: ["Pin title"]) && !credentialRefused(role: "AXTextField", subrole: nil, words: ["Token name"]))
+    check("the refusal is the sidecar's fixed message", "Blocked for safety: step 3 \(CRED_REFUSAL)" == "Blocked for safety: step 3 types into a field that takes a password, a code, a key or a card number. I never type passwords, credentials or card numbers, Approve all or not. Ask the user to type it in themselves.")
+    for k in ["h", "shift+h", "2", "space", "cmd+v", "v+cmd", "cmd+shift+v"] { check("\(k) types into the focused field", keyTypes(k)) }
+    for k in ["tab", "return", "escape", "left", "cmd+a", "ctrl+e", "shift+tab", "delete", "home", "end", "pagedown"] { check("\(k) types nothing", !keyTypes(k)) }
+    // A3 B2 (owner's hard limit 2): money words stop a click by spot or id; in a money surface a plain Confirm,
+    // Continue or OK stops too, so the sidecar asks with its label.
+    for l in ["Sell", "Trade", "Swap", "Subscribe", "Deposit", "Donate", "Bid", "Wire", "Top up", "Add funds", "Order now", "Submit order", "Start free trial",
+              "Book now", "Cash out", "Stake", "Pay", "Buy", "Transfer", "Withdraw", "转账", "下单", "卖出", "송금", "주문", "注文を確定する"] { check("\"\(l)\" needs a yes", risky(l)) }
+    for l in ["Continue", "Next", "OK", "Done", "Get", "Review order", "Confirm →", "Approve"] { check("\"\(l)\" stops in a money surface", stopsAt(l, money: true)) }
+    for l in ["Continue", "Next", "OK", "Done", "Get", "Approve"] { check("\"\(l)\" is a normal click elsewhere", !stopsAt(l, money: false)) }
+    for l in ["Statements", "Settings", "Help", "Account details"] { check("\"\(l)\" is a normal click in a money surface", !stopsAt(l, money: true)) }
+    // A3 round 2, B2: money words and price buttons stop a click by a spot or an id anywhere, so the sidecar judges the
+    // label with the window it is in by then (round 1: click_at on "$4.99", "Short", "Open position" ran unasked).
+    for l in ["$4.99", "Rent $3.99", "$49.00", "Long", "Short", "Open position", "Close position", "Exercise", "Roll", "Upgrade", "Reserve", "Renew",
+              "Repay", "PayPal", "Venmo", "Zelle", "Überweisen", "Transferir", "Оплатить", "提交订单", "Kopen", "Afrekenen", "Zur Kasse", "Passer la commande",
+              "Kup teraz", "Zapłać", "Satın al", "Köp", "去结算", "購入する", "결제하기", "Complete booking", "Request to book", "Get tickets", "Pay $50"] {
+        check("\"\(l)\" stops for the sidecar", stopsAt(l, money: false))
+    }
+    for l in ["Bestätigen", "Weiter", "Confirmar", "确认", "Fortsätt", "계속", "Continuar", "Suivant", "次へ", "Далее", "Slide to send", "Hold to confirm"] {
+        check("\"\(l)\" stops in a money surface", stopsAt(l, money: true))
+    }
+    for l in ["Payments", "Payroll", "Purchase history", "Order history", "Buying guide", "Settled", "Trading 101", "Transfer photos", "Pay attention", "Checkout branch", "Settings"] {
+        check("\"\(l)\" is not a money stop", !moneyWord(l))
+    }
+    // A3 round 2, B1: the credential-field words in more languages, sign-in codes, and label shapes that are not one.
+    for l in ["Kata sandi", "Mật khẩu", "Salasana", "Hasło", "Parola", "Κωδικός πρόσβασης", "סיסמה", "كلمة المرور", "รหัสผ่าน", "Clave", "Geheimzahl", "NIP", "Numer karty",
+              "Wallet seed", "12-word phrase", "Sign-in code", "Login code", "Backup code", "Código de verificación", "Code de vérification", "Bestätigungscode",
+              "验证码", "認証コード", "인증번호", "Recovery code", "Passkey", "रहस्यशब्द", "Security answer", "Mother's maiden name"] {
+        check("\"\(l)\" is a credential field", credentialLabel(l))
+    }
+    for l in ["API key name", "Card title", "Card #", "Access key name", "ZIP code", "Date of birth", "Phone", "Promo code", "Code"] { check("\"\(l)\" is an ordinary field", !credentialLabel(l)) }
+    // choose types its option into a type-to-search box: into a password field (a text field whose subrole is secure)
+    // or a credential-labelled one it is refused like type (round 1: choose "hunter2" into the password field ran).
+    check("choose into a password text field is refused", credentialRefused(role: "AXTextField", subrole: "AXSecureTextField", words: ["Password"]))
+    check("choose into a verification-code box is refused", credentialRefused(role: "AXComboBox", subrole: nil, words: ["Verification code"]))
+    check("choose into a country picker is not", !credentialRefused(role: "AXPopUpButton", subrole: nil, words: ["Country"]))
+    // Typing where focus can't be seen (an app that hides its fields, focus on the window after a click at a spot).
+    check("blind typing on a page with a password field is refused", blindRefused(editable: false, pageHasCredential: true, text: "fixtureuser"))
+    check("blind typing of a password-like word is refused", blindRefused(editable: false, pageHasCredential: false, text: "hunter2"))
+    check("blind key-by-key or paste on a page with a password field is refused", blindRefused(editable: false, pageHasCredential: true, text: nil))
+    check("blind typing of a number (CapCut's Scale box) still goes", !blindRefused(editable: false, pageHasCredential: false, text: "120"))
+    check("blind typing of words still goes", !blindRefused(editable: false, pageHasCredential: false, text: "hello world"))
+    check("typing into a field focus can see is not blind", !blindRefused(editable: true, pageHasCredential: true, text: "hunter2"))
+    for t in ["hunter2", "plum-Rocket-618", "eason2024"] { check("\"\(t)\" looks like a password", passwordLike(t)) }
+    for t in ["hello", "120", "me@example.com", "https://x.com", "~/notes.txt", "see you at 6"] { check("\"\(t)\" does not", !passwordLike(t)) }
+    // A3 round 4 (the round-3 review): a pay verb with its object stops anywhere; a spot's "words | words" is judged part
+    // by part; a Copy password control is refused; a terminal's password prompt is refused; a vault window by its title.
+    for l in ["Buy AAPL", "Sell all shares", "Pay bill", "Send with Zelle", "Make transfer", "Buy now with 1-Click", "Subscribe & Save", "Buy / Long",
+              "Submit buy order", "Place $10 Bet", "Bet now", "Open Trade", "Rent $3.99", "Join for $4.99", "Pay now | Pay now", "$4.99 | $4.99", "Short | Short", "Broadcast"] {
+        check("\"\(l)\" stops for the sidecar", moneyWord(l))
+    }
+    for l in ["Pay attention", "Purchase history", "Trade-offs", "Transfer photos", "Order #1234", "Subscribe to newsletter", "Withdraw application", "Sell-by date", "Payments | Payments"] {
+        check("\"\(l)\" is still not a money stop", !moneyWord(l))
+    }
+    check("\"Next | Next\" is a confirm word part by part", ambiguous("Next | Next"))
+    for l in ["Copy Password", "Show password", "Copy verification code", "Copy password | Copy password", "Reveal recovery phrase"] { check("\"\(l)\" is refused", revealRefused(l)) }
+    for l in ["Copy code", "View code", "Copy link", "Show more"] { check("\"\(l)\" is not", !revealRefused(l)) }
+    for t in ["Password:", "last login\n[sudo] password for fixtureuser:", "Enter passphrase for key '/Users/e/.ssh/id_ed25519':"] { check("Terminal at \"\(t)\" refuses typing", promptRefused(app: "Terminal", text: t)) }
+    check("a shell prompt types", !promptRefused(app: "Terminal", text: "fixtureuser@mac ~ % "))
+    check("a note that ends in Password: is a note", !promptRefused(app: "Notes", text: "Wi-Fi Password:"))
+    for t in ["Passwords", "Google Password Manager - Google Chrome", "Bitwarden Web Vault", "1Password — Everything"] { check("\"\(t)\" is a vault window", vaultTitle(t)) }
+    for t in ["Reset your password · GitHub", "Obsidian vault - notes", "Enable 2FA", "Settings"] { check("\"\(t)\" is not", !vaultTitle(t)) }
+    // Round 6: vault windows by their localized titles, in any part of the title.
+    for t in ["Passwörter", "Mots de passe", "Contraseñas", "パスワード", "密码", "Google Passwortmanager - Google Chrome", "Gestionnaire de mots de passe Google – Google Chrome"] { check("\"\(t)\" is a vault window (localized)", vaultTitle(t)) }
+    for t in ["Passwort vergessen? · GitHub", "Paramètres", "Notes"] { check("\"\(t)\" is not (localized)", !vaultTitle(t)) }
+    // Round 6: a card number in what is typed, whole or in pieces, with any separators; not other numbers.
+    for t in ["4242 4242 4242 4242", "4242-4242-4242-4242", "4242.4242.4242.4242", "4242/4242/4242/4242", "4242_4242_4242_4242", "4242\t4242\t4242\t4242", "4242  4242  4242  4242", "4242–4242–4242–4242", "4242424242424242", "3782 822463 10005", "٤٢٤٢ ٤٢٤٢ ٤٢٤٢ ٤٢٤٢"] { check("\"\(t)\" holds a card", cardIn(t)) }
+    for t in ["call 555 1234", "Order 1234567890123", "4242 4242 4242 4241", "1234 5678 9012 3456", "2026-11-27 10:30", "IMEI 402020202020204", ""] { check("\"\(t)\" holds no card", !cardIn(t)) }
+    typedJoin = ""
+    check("four boxes typed one by one are one card", !typedCard("4242", newPiece: true) && !typedCard("4242", newPiece: true) && !typedCard("4242", newPiece: true) && typedCard("4242", newPiece: true))
+    typedJoin = ""
+    check("a card typed key by key is one card", !"424242424242424".map { typedCard(String($0), newPiece: false) }.contains(true) && typedCard("2", newPiece: false))
+    typedJoin = ""
+    // Round 6: credential fields in more languages, and money words the helper stops at.
+    for l in ["Two-factor code", "Card code", "CID", "PIN-Code", "Code PIN", "رمز التحقق", "Kode sandi", "Şifrə", "Κωδικός", "Prüfziffer", "Bevestigingscode", "קוד אימות"] { check("\"\(l)\" is a credential field", credentialLabel(l)) }
+    for l in ["Pin title", "Pin to top", "Coupon code", "Country code", "Zip code", "Parola chiave"] { check("\"\(l)\" is not a credential field", !credentialLabel(l)) }
+    for l in ["Zahlung bestätigen", "Оплатить заказ", "Kupuję i płacę", "Confirmer le paiement", "Đặt hàng", "สั่งซื้อ", "立即转账", "Create payout", "Request UberX", "Pledge $25", "Submit bid", "Approve USDC"] { check("the helper stops at \"\(l)\"", moneyWord(l) || risky(l)) }
+    for l in ["Passwort kopieren", "Copier le mot de passe", "Copy one-time password", "复制密码", "비밀번호 복사"] { check("\"\(l)\" is a reveal", revealRefused(l)) }
+    for t in ["Enter MFA code for arn:aws:iam::123456789012:mfa/fixtureuser:", "Enter your 2FA code:", "Token:", "Enter your API key:"] { check("\"\(t)\" is a credential prompt", passwordPrompt(t)) }
+    // Round 7: a token's name, label or limit is typed; stems, inflections and an amount after a pay verb stop.
+    for t in ["? Token name:", "Name for this API key:", "Token limit (4096):", "API key label:"] { check("\"\(t)\" is no credential prompt", !passwordPrompt(t)) }
+    for t in ["[sudo] password for fixtureuser:", "? Paste your token:"] { check("\"\(t)\" is a credential prompt (round 7)", passwordPrompt(t)) }
+    for l in ["Перевести 500 ₽", "Przelej", "Overmaken", "Virer", "Havale yap", "شراء", "ซื้อ", "注文を確定", "Request Uber Comfort", "Bid"] { check("the helper stops at \"\(l)\" (round 7)", moneyWord(l)) }
+    for l in ["Перевести страницу", "Page", "Place", "Request review"] { check("the helper does not stop at \"\(l)\" (round 7)", !moneyWord(l)) }
+    // Round 8: an ID or a password's expiry is refused; a token's name or alias is typed; a bare Request and katakana
+    // past U+30B3 stop in a money plan only; Japanese pay verbs stop anywhere.
+    for t in ["AWS Access Key ID [None]:", "Token ID:", "Password expiry (days):", "Name your API key, then paste the token:"] { check("\"\(t)\" is a credential prompt (round 8)", passwordPrompt(t)) }
+    for t in ["? Name your token:", "Token alias:", "Give your token a name:", "Token expiration (days):"] { check("\"\(t)\" is no credential prompt (round 8)", !passwordPrompt(t)) }
+    for l in ["Request", "リクエスト", "レビュー"] { check("the helper stops at \"\(l)\" in a money plan (round 8)", !moneyWord(l) && ambiguous(l)) }
+    for l in ["チャージする", "チップを送る", "ペイで払う"] { check("the helper stops at \"\(l)\" (round 8)", moneyWord(l)) }
+    for l in ["Network key", "Enter the code we sent", "SMS code", "Memorable word", "Код из SMS", "WPA2 key"] { check("\"\(l)\" is a credential field", credentialLabel(l)) }
+    for l in ["License key", "Promo code", "Answer"] { check("\"\(l)\" is an ordinary field", !credentialLabel(l)) }
+    // A3 round 5 (the round-4 review): money-family words stop anywhere (a click by a spot or an id on "Pay in 4", "Run
+    // payroll", "Confirmar compra"); clear non-money labels don't; more credential-field languages; opt chords type; a
+    // password-like word typed blind is refused only on a sign-in window.
+    for l in ["Pay in 4", "Proceed to Pay", "Agree and pay", "Valider et payer", "Pagar agora", "Confirmar pagamento", "Confirmar compra", "今すぐ買う", "去支付",
+              "确认下单", "송금하기", "Confirmer l'achat", "Conferma l'ordine", "Renew now", "Charge $50", "Refund $20", "Authorize payment", "Complete checkout",
+              "Submit payroll", "Run payroll", "Issue refund", "Charge customer", "Upgrade plan", "Rent HD $3.99", "Buy/Long", "Long BTC", "Sign", "Convert", "Capture",
+              "Confirm transaction", "Market Buy", "Limit Sell"] {
+        check("\"\(l)\" stops for the sidecar", moneyWord(l))
+    }
+    for l in ["Transfer photos", "Check out this article", "Pay attention", "Trade-offs", "Checkout branch", "Purchase history", "Withdraw application", "Payments",
+              "Payroll", "Refunds", "Swap instance", "注文履歴", "결제 내역"] {
+        check("\"\(l)\" is not a money stop", !moneyWord(l))
+    }
+    for l in ["Código de verificação", "Código de segurança", "Cryptogramme visuel", "Kartenprüfnummer", "Engangskode", "Bekræftelseskode", "Verifieringskod",
+              "Vahvistuskoodi", "Ověřovací kód", "Passord", "Contrasenya", "Parole", "Slaptažodis", "Kata laluan", "Lykilorð", "Парола", "Лозинка", "رمز عبور",
+              "پاس ورڈ", "পাসওয়ার্ড", "Codice di sicurezza", "Beveiligingscode", "Einmalcode", "Mã bảo mật", "セキュリティコード", "安全码", "보안 코드", "Validade (MM/AA)", "••••••••"] {
+        check("\"\(l)\" is a credential field", credentialLabel(l))
+    }
+    for l in ["Paroles", "Code", "Course code", "Name on card"] { check("\"\(l)\" is an ordinary field", !credentialLabel(l)) }
+    for k in ["alt+h", "opt+u", "option+2", "alt+shift+k"] { check("\(k) types into the focused field", keyTypes(k)) }
+    for k in ["ctrl+alt+h", "cmd+alt+i", "alt+tab", "alt+left"] { check("\(k) types nothing", !keyTypes(k)) }
+    check("blind typing of a password-like word on a sign-in window is refused", blindRefused(editable: false, pageHasCredential: false, text: "hunter2", signin: signinTitle("Sign in to GitHub")))
+    check("blind typing of a layer name in a canvas app still goes", !blindRefused(editable: false, pageHasCredential: false, text: "Scene2", signin: signinTitle("Project 1 - CapCut")))
+    for t in ["Sign in", "Two-step verification", "Enter the code we sent", "Anmelden", "ログイン"] { check("\"\(t)\" is a sign-in window", signinTitle(t)) }
+    for t in ["Project 1", "Untitled - Figma", "Budget 2026"] { check("\"\(t)\" is not", !signinTitle(t)) }
     exit(bad == 0 ? 0 : 1)
 
 case "trusted":
@@ -2229,6 +2533,7 @@ case "act":
           let plan = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           let steps = plan["steps"] as? [[String: Any]] else { fail("bad plan") }
     let target = (plan["window"] as? Int).map { "window:\($0)" } ?? (plan["app"] as? String).map { "app:\($0)" } ?? "front"
+    moneyPlan = (plan["money"] as? Bool) == true
     guard var w = resolve(target) else { fail("No matching window is open.") }
     var switched = false
     if let name = handsOff(w.pid) {
@@ -2255,6 +2560,8 @@ case "act":
         Thread.sleep(forTimeInterval: 0.15)
     }
     var controls = walk(app, w)
+    /// The window shows a password or credential field (B1, typing where focus can't be seen).
+    func pageHasCredential() -> Bool { controls.contains { credentialEl($0.0, label: ($0.1["label"] as? String) ?? "") } }
     var done: [String] = []
     // Files the user said yes to acting in (the sidecar checked each against its write rules first).
     let docOk = Set((plan["docOk"] as? [String]) ?? [])
@@ -2321,6 +2628,8 @@ case "act":
             let moved = cur.id != w.id
             w = cur; bgWin = cur
             if moved { switched = true; controls = walk(app, w) }
+            // The window became a password manager's vault (a click on Passwords in Settings): nothing more is done there.
+            if vaultTitle(w.title) { out(["ok": false, "error": "Blocked for safety: the window now shows a password manager (\(w.title)), so I stopped before step \(i + 1). I never read passwords or credentials, Approve all or not.", "refused": "credential", "done": done]) }
         }
         if earlyWaits.contains(i + 1) { sigBefore = pageSig() }
         // A click at a spot only vouches for the typing that follows it (keys like cmd+a and waits in between are fine);
@@ -2354,9 +2663,14 @@ case "act":
         switch what {
         case "focus", "click", "set", "press_button":
             guard let (e, info) = el(s) else { out(["ok": false, "error": "Step \(i + 1): no control with id \(s["id"] ?? "?"). Call read_window again.", "done": done]) }
+            if what == "set", credentialEl(e, label: (info["label"] as? String) ?? "") {
+                out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CRED_REFUSAL)", "refused": "credential", "done": done])
+            }
+            if what == "set", typedCard(s["text"] as? String ?? "", newPiece: true) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CARD_REFUSAL)", "refused": "credential", "done": done]) }
             emitStep(i, what, e, label: (info["label"] as? String) ?? "", text: what == "set" ? s["text"] as? String : nil)
-            if (what == "click" || what == "press_button"), case let l = (info["label"] as? String) ?? "", risky(l), !sameYes(s, l) {
-                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
+            if (what == "click" || what == "press_button"), case let l = (info["label"] as? String) ?? "", revealRefused(l) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) clicks \"\(l)\", which copies or shows a password, code or key. I never type or read passwords, credentials or card numbers, Approve all or not. Ask the user to do it themselves.", "refused": "credential", "done": done]) }
+            if (what == "click" || what == "press_button"), case let l = (info["label"] as? String) ?? "", stopsAt(l), !sameYes(s, l) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, send, quit or sign out.", "done": done])
             }
             if what == "set", let text = s["text"] as? String, hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: e), !needs.isEmpty,
                case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
@@ -2413,8 +2727,9 @@ case "act":
             guard !q.isEmpty, let (e, info) = hit else {
                 out(["ok": false, "error": "Step \(i + 1): no visible text \"\(s["text"] ?? "")\" in \(w.app). Check the exact words with a screenshot or read_window.", "done": done])
             }
-            if case let l = (info["text"] as? String) ?? q, risky(l), !sameYes(s, l) {
-                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
+            if case let l = (info["text"] as? String) ?? q, revealRefused(l) || revealRefused(q) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) clicks \"\(l)\", which copies or shows a password, code or key. I never type or read passwords, credentials or card numbers, Approve all or not. Ask the user to do it themselves.", "refused": "credential", "done": done]) }
+            if case let l = (info["text"] as? String) ?? q, stopsAt(l), !sameYes(s, l) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": l, "why": "Click \"\(l)\" in \(w.app)? It could delete, send, quit or sign out.", "done": done])
             }
             emitStep(i, "click_text", e, label: (info["text"] as? String) ?? q)
             if !pressText(e) {
@@ -2437,6 +2752,9 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): the cursor isn't in a text field, so typing would go nowhere. \(tip)", "done": done])
             }
             let text = s["text"] as? String ?? "", into = focusedEl(app), before = into.flatMap { str($0, kAXValueAttribute) }
+            if promptRefused(app: w.app, text: before) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) types at a password prompt in \(w.app). I never type passwords, credentials or card numbers, Approve all or not. Ask the user to type it in themselves.", "refused": "credential", "done": done]) }
+            if credentialEl(into) || blindRefused(editable: !hidden, pageHasCredential: pageHasCredential(), text: text, signin: signinTitle(w.title)) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CRED_REFUSAL)", "refused": "credential", "done": done]) }
+            if typedCard(text, newPiece: false) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CARD_REFUSAL)", "refused": "credential", "done": done]) }
             // A typed line break acts as Return: in a chat, mail or web form field that can send.
             if hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: into), !needs.isEmpty,
                case let both = needs.map(\.label).joined(separator: " + "), !sameYes(s, both) {
@@ -2475,6 +2793,8 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): no text field called \"\(name)\" here. Check its label with read_window.", "done": done])
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
+            if credentialEl(e, label: label) || credentialLabel(name) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CRED_REFUSAL)", "refused": "credential", "done": done]) }
+            if typedCard(text, newPiece: true) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CARD_REFUSAL)", "refused": "credential", "done": done]) }
             // A line break in the text acts as Return in the field it goes into (checked on that field, not on what had
             // focus before): its form's default button, a send box, a dialog's risky default.
             if hasLineBreak(text), case let needs = sendChecks(app, appName: w.app, returnKey: true, target: e), !needs.isEmpty,
@@ -2527,9 +2847,13 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): no dropdown called \"\(name)\" here, or no option given. Check with read_window.", "done": done])
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
+            // choose types its option into a type-to-search box (and, with no option shown, presses Return): into a
+            // password or credential field it is typing one (B1), refused like type and fill.
+            if credentialEl(e, label: label) || credentialLabel(name) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CRED_REFUSAL)", "refused": "credential", "done": done]) }
             emitStep(i, "choose", e, label: label, text: option)
-            if risky(option), !sameYes(s, option) {
-                out(["ok": false, "needsConfirm": true, "step": i, "label": option, "why": "Choose \"\(option)\" in \(w.app)? It could delete, pay, send, quit or sign out.", "done": done])
+            if revealRefused(option) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) clicks \"\(option)\", which copies or shows a password, code or key. I never type or read passwords, credentials or card numbers, Approve all or not. Ask the user to do it themselves.", "refused": "credential", "done": done]) }
+            if stopsAt(option), !sameYes(s, option) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": option, "why": "Choose \"\(option)\" in \(w.app)? It could delete, send, quit or sign out.", "done": done])
             }
             activate(e)
             Thread.sleep(forTimeInterval: 0.35)
@@ -2545,7 +2869,8 @@ case "act":
             } else if typeable {
                 _ = pressKey("return")
             } else {
-                // Typing only goes where focus is a field or the dropdown itself.
+                // Typing only goes where focus is a field or the dropdown itself, never a credential field (B1).
+                if credentialEl(focusedEl(app)) { _ = pressKey("escape"); out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CRED_REFUSAL)", "refused": "credential", "done": done]) }
                 if isEditable(focusedEl(app)) || (focusedEl(app).map { CFEqual($0, e) } ?? false) || axRole(e) == "AXPopUpButton" {
                     typeText(option); Thread.sleep(forTimeInterval: 0.35); _ = pressKey("return")
                 } else {
@@ -2615,6 +2940,12 @@ case "act":
             // One parser for every key route: a chord parseKey can't read (meta+q, two keys) is refused here, before the
             // menu route or the keyboard could press anything.
             guard let pk = parseKey(combo) else { out(["ok": false, "error": "Step \(i + 1): unknown key \(s["key"] ?? "") (use cmd, ctrl, opt, shift and one key)", "done": done]) }
+            // Typing key by key, or pasting, into a password or credential field: refused (B1).
+            if keyTypes(combo), promptRefused(app: w.app, text: focusedEl(app).flatMap { str($0, kAXValueAttribute) }) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) types at a password prompt in \(w.app). I never type passwords, credentials or card numbers, Approve all or not. Ask the user to type it in themselves.", "refused": "credential", "done": done]) }
+            if keyTypes(combo), credentialEl(focusedEl(app)) || blindRefused(editable: isEditable(focusedEl(app)), pageHasCredential: pageHasCredential(), text: nil) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CRED_REFUSAL)", "refused": "credential", "done": done]) }
+            // A key that types one character (a digit, a space) adds it to what this plan typed (a card key by key).
+            if keyTypes(combo), case let ch = combo.split(separator: "+").last.map(String.init) ?? "", ch.count == 1 || ch == "space",
+               typedCard(ch == "space" ? " " : ch, newPiece: false) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) \(CARD_REFUSAL)", "refused": "credential", "done": done]) }
             var needs: [(label: String, why: String)] = []
             if let does = riskyKey(combo) { needs.append((s["key"] as? String ?? "", "Pressing \(s["key"] ?? "") \(does).")) }
             // Return is also ctrl+j, ctrl+m and ctrl+o in terminals and many editors.
@@ -2662,8 +2993,9 @@ case "act":
             // Clicking by position skips the label check, so look at what is under the spot.
             let under = wordsAt(spot)
             // A yes covers the words that were under the spot when it was asked; if they changed, ask again.
-            if risky(under), !sameYes(s, under) {
-                out(["ok": false, "needsConfirm": true, "step": i, "label": under, "why": "That spot is \"\(under.split(separator: "|").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? under)\" in \(w.app): it could delete, pay, send, quit or sign out.", "done": done])
+            if revealRefused(under) { out(["ok": false, "error": "Blocked for safety: step \(i + 1) clicks \"\(under)\", which copies or shows a password, code or key. I never type or read passwords, credentials or card numbers, Approve all or not. Ask the user to do it themselves.", "refused": "credential", "done": done]) }
+            if stopsAt(under), !sameYes(s, under) {
+                out(["ok": false, "needsConfirm": true, "step": i, "label": under, "why": "That spot is \"\(under.split(separator: "|").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? under)\" in \(w.app): it could delete, send, quit or sign out.", "done": done])
             }
             emitStep(i, "click_at", nil, at: global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y))
             click(global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)); done.append("clicked at \(Int(x)),\(Int(y))")

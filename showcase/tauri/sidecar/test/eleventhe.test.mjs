@@ -77,7 +77,8 @@ console.log(JSON.stringify(o));
   assert.ok(appMatches({ app: 'Schlüsselbundverwaltung' }, 'Schlüsselbundverwaltung'));
   reset({ wins: [{ ...preview, app: 'TextEdit' }, { id: 8, app: 'Schlüsselbundverwaltung', title: 'Anmeldung', bounds: [0, 0, 800, 600] }], text: { 3: 'Hello', 8: 'sk-live-zzz' } });
   const e3 = await ring('TextEdit Schlüsselbundverwaltung', 'sk-live');
-  assert.ok(asks.some((q) => q.includes('Schlüsselbundverwaltung')), JSON.stringify(asks));
+  // Round 4: Keychain Access by its German name is a password manager, so its window is refused, never asked about.
+  assert.ok(asks.some((q) => q.includes('Schlüsselbundverwaltung')) || /Schlüsselbundverwaltung/.test(e3), JSON.stringify([asks, e3]));
   assert.ok(!calls().some((c) => c[0] === 'find-text'), 'nothing is searched before a yes');
   assert.ok(!e3.includes('sk-live-zzz'), e3);
 

@@ -7,7 +7,7 @@ import { checkUrl } from './safety.mjs';
 import { COUNTRIES } from './countries.mjs';
 
 export const LIMITS = { beats: 12, marks: 40, points: 200, parts3d: 40, atoms: 120, photoBytes: 800_000, iconBytes: 64_000,
-  nodes: 16, links: 24, columns: 6, rows: 12, bars: 12, labels: 8, pins: 12, shade: 40, routes: 8, steps: 10, tex: 300, vertices: 16, questions: 6, cardsShown: 8 };
+  nodes: 16, links: 24, columns: 6, rows: 12, bars: 12, labels: 8, pins: 12, shade: 40, routes: 8, steps: 10, tex: 300, vertices: 16, questions: 6 };
 export const TONES = ['accent', 'teal', 'amber', 'coral', 'lilac', 'sky', 'lime', 'red', 'white'];
 // Marks on the real screen (they need a place on it), actions in apps, and cards drawn on calm space.
 export const SCREEN = ['point', 'target', 'hover', 'ring', 'frame', 'underline', 'strike', 'check', 'cross', 'connect', 'trace', 'num', 'label', 'write', 'scroll', 'spotlight', 'highlight', 'line', 'curve', 'arrow', 'circle', 'rect'];
@@ -406,10 +406,14 @@ export async function resolveTargets(beats, look) {
 
 // ---------------------------------------------------------------- parts drawn so far
 const quote = (s) => `“${String(s).replace(/\s+/g, ' ').slice(0, 40)}”`;
+/** The words a mark is known by (its label, title, the thing marked …), or ''. */
+export function partWords(m) {
+  return m.label ?? m.title ?? m.heading ?? m.at?.name ?? m.text ?? m.query ?? m.smiles ?? m.region ?? m.nodes?.[0]?.text ?? m.columns?.join(', ')
+    ?? m.bars?.[0]?.label ?? m.steps?.[0]?.tex ?? m.questions?.[0]?.text ?? m.shade?.[0]?.name ?? m.pins?.[0]?.name ?? m.vertices?.map((v) => v.id).join('') ?? '';
+}
 /** What a mark is, in a few words, for the tool result: ring “Export”, card “Compound interest”. */
 export function partDesc(m) {
-  const words = m.label ?? m.title ?? m.heading ?? m.at?.name ?? m.text ?? m.query ?? m.smiles ?? m.region ?? m.nodes?.[0]?.text ?? m.columns?.join(', ')
-    ?? m.bars?.[0]?.label ?? m.steps?.[0]?.tex ?? m.questions?.[0]?.text ?? m.shade?.[0]?.name ?? m.pins?.[0]?.name ?? m.vertices?.map((v) => v.id).join('') ?? '';
+  const words = partWords(m);
   return `${m.kind}${words ? ` ${quote(words)}` : ''}`;
 }
 /** How a quiz answered on screen went, for the model: the score and what was missed. m: the quiz mark as it was
@@ -466,7 +470,8 @@ export function createLists() {
   };
 }
 const SILENT = new Set(['emote', 'sfx', 'copy', 'open', 'handoff']);
-/** The parts on screen: ids never reused in a conversation, screen marks cleared on their own, cards until closed. */
+/** The parts on screen: ids never reused in a conversation; each stays until it is closed or cleared. */
+const DESCRIBE_MAX = 30; // ponytail: fixed count; summarise by kind if 30 parts is still too long a line
 export function createParts() {
   const all = new Map();
   let n = 0;
@@ -477,7 +482,7 @@ export function createParts() {
       for (const b of beats) for (const m of b.marks) {
         if (SILENT.has(m.kind)) continue;
         m.part = `p${++n}`;
-        all.set(m.part, { kind: m.kind, desc: partDesc(m), screen: SCREEN.includes(m.kind) || m.kind === 'type' || (m.kind === 'button' && !!m.at) });
+        all.set(m.part, { kind: m.kind, desc: partDesc(m) });
         ids.push(m.part);
       }
       return ids;
@@ -487,17 +492,12 @@ export function createParts() {
     remove(id) { all.delete(id); },
     /** keep(id): parts that stay (a card the user pinned). */
     clear(keep = () => false) { for (const id of [...all.keys()]) if (!keep(id)) all.delete(id); },
-    clearScreen() { for (const [id, p] of all) if (p.screen) all.delete(id); },
-    /** Only `max` cards stay up at once (the overlay closes the oldest as each new one is drawn): forgets the older
-     *  ones and returns their ids. skip(id): cards that don't count (a drawing that goes by itself). */
-    trimCards(max, skip = () => false) {
-      const cards = [...all].filter(([id, p]) => CARDS.includes(p.kind) && !skip(id)).map(([id]) => id), gone = cards.slice(0, Math.max(0, cards.length - max));
-      for (const id of gone) all.delete(id);
-      return gone;
-    },
-    get screenCount() { return [...all.values()].filter((p) => p.screen).length; },
     get ids() { return [...all.keys()]; },
-    describe: (ids = [...all.keys()]) => describeParts(ids.map((id) => [id, all.get(id)]).filter(([, p]) => p)),
+    // Drawings stay until closed, so this can grow all day and goes in every prompt: the newest DESCRIBE_MAX, then a count.
+    describe: (ids = [...all.keys()]) => {
+      const e = ids.map((id) => [id, all.get(id)]).filter(([, p]) => p);
+      return e.length > DESCRIBE_MAX ? `${describeParts(e.slice(-DESCRIBE_MAX))} and ${e.length - DESCRIBE_MAX} older` : describeParts(e);
+    },
   };
 }
 /** "p1 ring “Export”, p2 card “Interest”" — the ids the model edits with. */

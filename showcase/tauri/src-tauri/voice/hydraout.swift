@@ -2,8 +2,9 @@
 // - It plays here, through the same voice-processing audio engine as the barge-in mic (barge.swift), so echo
 //   cancellation has Hydra's voice as its reference and takes it out of what the mic hears. When that mic isn't
 //   running (barge-in off, no permission, asleep), an output-only engine plays it.
-// - Voice processing turns other audio down by default; that is switched off (Ducking), and mute-while-listening
-//   never mutes Hydra's own voice (OutputMute.shouldMute).
+// - Voice processing always turns other apps' audio down on macOS: there is no off, and .min (Ducking) is the least
+//   (audit 2026-11-26, 02 A4). So it runs only with "Interrupt by talking" on, which is off by default and says so
+//   (Voice.bargeDefault). Hydra never mutes the system output (nomute.swift).
 // - The orb's spectrum: 24 bands of 0...1 (Spectrum), Hydra's voice while it speaks and the mic while a take listens,
 //   sent at most 30 times a second (BandPacer).
 import Accelerate
@@ -64,7 +65,8 @@ struct BandPacer {
     mutating func ready(_ now: Double) -> Bool { if now - last >= Self.gap - 1e-6 { last = now; return true }; return false }
 }
 
-/// Other audio is never turned down by voice processing: Hydra's own voice is in that engine (W5 contract 6).
+/// Voice processing ducks other audio the least the SDK allows (it can't be off on macOS); Hydra's own voice is in that
+/// engine (W5 contract 6). Only with interrupting on (off by default).
 enum Ducking {
     @available(macOS 14, *)
     static var configuration: AVAudioVoiceProcessingOtherAudioDuckingConfiguration { .init(enableAdvancedDucking: false, duckingLevel: .min) }
@@ -178,8 +180,6 @@ final class HydraOut {
         guard !f.isEmpty, let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(f.count)) else { return }
         buf.frameLength = AVAudioFrameCount(f.count)
         f.withUnsafeBufferPointer { src in buf.floatChannelData![0].update(from: src.baseAddress!, count: f.count) }
-        // Hydra's own voice is never muted by mute-while-listening.
-        OutputMute.end()
         pending += 1; marks.schedule()
         let gen = generation
         // Called once the buffer has really been played out (not just handed to the output), so a mark after it is
@@ -297,9 +297,13 @@ enum OutTest {
             check("voice processing doesn't use advanced ducking", c.enableAdvancedDucking.boolValue == false, &bad)
             check("voice processing ducks other audio the least it can", c.duckingLevel == .min, &bad)
         } else { print("ok ducking: before macOS 14 voice processing isn't used") }
-        check("mute while listening: other sound is muted", OutputMute.shouldMute(enabled: true, hydraPlaying: false), &bad)
-        check("mute while listening never mutes Hydra's own voice", !OutputMute.shouldMute(enabled: true, hydraPlaying: true), &bad)
-        check("mute while listening off: nothing is muted", !OutputMute.shouldMute(enabled: false, hydraPlaying: false), &bad)
+        // It ducks all the same, so it never starts unless interrupting is on, and that is off by default (02 A4).
+        check("interrupting by talking is off by default", Voice.bargeDefault == false, &bad)
+        check("interrupting off: a reply never opens the mic with voice processing",
+              Voice.echoAtPlay(macOS14: true, busy: false, bargeWanted: false, bargeBroken: false, asleep: false, phase: "idle", test: false,
+                               echoNow: false, micAllowed: true, echoFails: 0, echoAllowed: true) != nil, &bad)
+        check("interrupting off: the mic never wants voice processing while Hydra speaks",
+              !Voice.echoWanted(barge: false, speaking: true, spokeAgo: 0, take: false, echoNow: false, ownEngineBusy: false), &bad)
         return bad == 0 ? 0 : 1
     }
 }

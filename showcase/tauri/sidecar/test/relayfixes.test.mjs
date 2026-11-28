@@ -91,7 +91,7 @@ function relayServer(queue) {
       if (r) return json(res, r.status, { error: 'x' }, r.headers);
       s.events.push(...p.data.events);
       if (['done', 'error'].includes(p.data.events.at(-1)?.type)) s.closed = true;
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, status: s.closed ? p.data.events.at(-1).type : 'claimed', inputs: [] });
     }
     if (u.pathname === '/api/agent/relay/approval' && raw) {
       assert.ok(relayApprovalSchema.safeParse(raw).success);

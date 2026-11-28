@@ -1,6 +1,6 @@
 // Double-clap for Hydra (macOS): asleep it wakes Hydra, awake (clap-to-talk) it starts a take, while Hydra speaks it
 // interrupts. It runs on the one mic tap (mic.swift) whenever it's on, asleep included, and looks only at the sound's
-// energy, 100 frames a second. No words, no recording, no network.
+// energy, 100 frames a second. The temporal pair then needs on-device SoundAnalysis confirmation. No words, files or network.
 //
 // Per 10 ms frame: the energy in dB, a noise floor that follows the room (down fast, up over a few seconds), and how
 // high the sound is (the first difference's share of the energy, as a frequency). A clap is a transient:
@@ -36,9 +36,11 @@ final class ClapDetector {
     /// Hydra is speaking (C7): each clap must stand overVoiceDb over the loudest sound of the second before it.
     var speaking = false
     let rate: Double
+    private let classifiesPairs: Bool
     private let hop: Int
     private var frame: [Float] = []
     private(set) var now = 0.0 // seconds of sound seen
+    private(set) var lastPair: (first: Double, second: Double)?
     private(set) var floorDb = -70.0
     private var recent: [Double] = [-120, -120, -120] // the last three frames' dB, newest last
     private var holdFloorUntil = 0.0 // the floor doesn't learn from a clap or its ring-out
@@ -58,15 +60,20 @@ final class ClapDetector {
     private struct Pending {
         var t: Double; var peak: Double; var rise: Double; var base: Double; var bed: Double; var hz: Double; var frames: Int; var tail: Double
         var inner = false, bump = false, last: Double
+        var brightPeak: Double
+        var brightTail = -120.0
         // Its first 30 ms as one block (energy and first-difference energy): its brightness, not one frame's (a frame
         // that catches only the first millisecond of a tap reads as bright as a clap).
         var e: Double, d: Double
         // Its bright energy (the first difference's) in 1 ms blocks, from the frame before it to its third frame, and the
         // room's share of each block: how long the sound lasts (width).
         var w: [Double], noise: Double
-        init(t: Double, db: Double, base: Double, bed: Double, hz: Double, e: Double, d: Double, w: [Double], noise: Double) {
+        init(t: Double, db: Double, base: Double, bed: Double, hz: Double, e: Double, d: Double, w: [Double], noise: Double,
+             brightDb: Double, brightJump: Double) {
             self.t = t; peak = db; rise = db - base; self.base = base; self.bed = bed; self.hz = hz; frames = 0; tail = -120; last = db; self.e = e; self.d = d
             self.w = w; self.noise = noise
+            brightPeak = brightDb
+            rise = max(rise, brightJump)
         }
     }
     private var pending: Pending?
@@ -108,16 +115,19 @@ final class ClapDetector {
     /// 6 dB down. The rise is what a noisy room can't give, so it isn't what tells a key from a clap: the width is.
     struct Need: Equatable { let jump: Double, hz: Double, decay: Double }
     static let clapHz = 2000.0
-    static func need(peak: Double, hz: Double = 0) -> Need {
+    static func need(peak: Double, hz: Double = 0, baselineHz: Double = clapHz) -> Need {
         let q = min(1, max(0, (-22 - peak) / 14)), quiet = min(1, max(0, (-36 - peak) / 10))
         let bright = 2 * min(1, max(0, (hz - 3500) / 1500))
-        return Need(jump: jumpDb + 7 * q + 6 * quiet - bright, hz: clapHz + 1000 * q, decay: decayDb + 7 * q)
+        return Need(jump: jumpDb + 7 * q + 6 * quiet - bright, hz: baselineHz + 1000 * q, decay: decayDb + 7 * q)
     }
     /// Build 4 C8, second pass: how long a sound's bright energy lasts (ms), whatever the room's level: (sum)^2 / sum of
     /// squares of its 1 ms blocks, the room's share taken out. A key, a mouse button, a pen or a knuckle on the laptop is a
     /// click of 1 to 3 ms (2 to 4 ms here); a clap is the air squeezed out between two palms and the hands ringing, 5 to
     /// 15 ms (7 ms and up here), more in a room. The hard floor, the same at every sensitivity and calibration.
     static let minWidthMs = 6.0
+    // When both peaks are sent to SoundAnalysis, allow shorter and less bright proposals while Hydra is quiet.
+    private static let proposalMinWidthMs = 3.0
+    private static let proposalBrightnessHz = 1500.0
     /// A palm clap on this mic (live log 2026-11-24): the thud pulls the centroid down to about 1 to 1.7 kHz, and the
     /// hiss still lasts this long. A key that clears the width floor is shorter. Only a sound this wide may be that dull.
     static let palmMs = 8.0
@@ -138,10 +148,11 @@ final class ClapDetector {
     /// nil when a sound has a clap's shape; otherwise why not (the hard floor, the same at every sensitivity). width: the
     /// sound's width in ms (nil: not measured); calRise: the owner's own claps' rise ("Clap twice"), which may lower the
     /// rise asked of a sound as bright and as wide as a clap, never under minRiseDb.
-    static func shapeMiss(peak: Double, jump: Double, hz: Double, decay: Double, smooth: Bool, width: Double? = nil, calRise: Double? = nil) -> String? {
-        let riseNeed = Self.riseNeed(peak: peak, hz: hz, calRise: calRise), n = need(peak: peak, hz: hz)
+    static func shapeMiss(peak: Double, jump: Double, hz: Double, decay: Double, smooth: Bool, width: Double? = nil, calRise: Double? = nil,
+                          minWidth: Double = minWidthMs, baselineHz: Double = clapHz) -> String? {
+        let riseNeed = Self.riseNeed(peak: peak, hz: hz, calRise: calRise), n = need(peak: peak, hz: hz, baselineHz: baselineHz)
         if peak < floorDb { return String(format: "under the %.0f dB floor", floorDb) }
-        if let w = width, w < minWidthMs { return String(format: "a click, %.1f ms (a clap lasts %.1f ms or more: a key, a mouse, a pen)", w, minWidthMs) }
+        if let w = width, w < minWidth { return String(format: "a click, %.1f ms wide (needs %.1f)", w, minWidth) }
         if jump < riseNeed { return String(format: "rise needs %.1f dB at this level (a key, a tap, a fan)", riseNeed) }
         // A palm on this mic is wide, and the thud pulls the centroid under 2 kHz. The live clap that should
         // count was 1639 Hz. At a desk it is about -36 dB and rises about 20 dB, not 40: the 40 dB bar was a close
@@ -166,8 +177,9 @@ final class ClapDetector {
         return c.peakDb < minCalPeakDb ? .soft : .set(c)
     }
 
-    init(rate: Double, sensitivity: Double = 0.5, calibration: Calibration? = nil) {
+    init(rate: Double, sensitivity: Double = 0.5, calibration: Calibration? = nil, classifiesPairs: Bool = false) {
         self.rate = rate
+        self.classifiesPairs = classifiesPairs
         self.sensitivity = min(1, max(0, sensitivity))
         self.calibration = calibration
         hop = max(64, Int(rate / 100))
@@ -228,6 +240,7 @@ final class ClapDetector {
         for k in max(1, p.frames - 2) ... p.frames { lastSecond[(lastAt - k + lastSecond.count) % lastSecond.count] = -120 }
     }
     private var calLevel: Double { max(Self.floorDb, floorDb + 12) }
+    private var spectralProposals: Bool { classifiesPairs && !calibrating && !speaking }
 
     private func step() -> Bool {
         now += Double(hop) / rate
@@ -255,9 +268,10 @@ final class ClapDetector {
         let bed = bedDb
         // The room's bright energy per 1 ms block: the quietest of the last three frames (one may hold a clap's start).
         let noise = (recentD.min() ?? 0) / Double(Self.blocks)
+        let brightEnergy = sub.reduce(0, +)
         defer {
             recent.removeFirst(); recent.append(db)
-            recentD.removeFirst(); recentD.append(sub.reduce(0, +))
+            recentD.removeFirst(); recentD.append(brightEnergy)
             lastSecond[lastAt] = now < bedMuteUntil ? -120 : db; lastAt = (lastAt + 1) % lastSecond.count
         }
         if now <= Double(hop) / rate * 1.5 { floorDb = db } // the first frame sets the room's level
@@ -265,7 +279,13 @@ final class ClapDetector {
 
         // Over the room by `rise`, and a sharp jump over the moment before (9 dB: over someone talking that's all a
         // clap can have; the word around it fails the decay instead).
-        let rise = db - floorDb, jump = db - before
+        let rise = db - floorDb
+        // A broadband speech floor can hide a clap's sharp high-frequency onset.
+        let brightDb = spectralProposals ? 10 * log10(brightEnergy / Double(hop) + 1e-12) : -120
+        let brightJump = brightDb >= Self.floorDb
+            ? brightDb - 10 * log10(recentD.reduce(0, +) / Double(hop * recentD.count) + 1e-12)
+            : 0
+        let jump = max(db - before, brightJump)
         let level = calibrating ? calLevel : levelDb
         let onset = rise >= (calibrating ? 10 : riseDb) && jump >= Self.jumpDb && db >= level
         if var p = pending {
@@ -273,7 +293,8 @@ final class ClapDetector {
             // A much louder onset while a softer one is still being judged (a clap on top of a word): judge the new one.
             if p.frames > 2, onset, db > p.peak + 6 {
                 say(String(format: "clap candidate %.1f dB: kept sounding (louder sound right after it)", p.peak))
-                pending = Pending(t: now, db: db, base: roomBefore, bed: bed, hz: hz, e: Double(e), d: Double(d), w: prevSub + sub, noise: noise)
+                pending = Pending(t: now, db: db, base: roomBefore, bed: bed, hz: hz, e: Double(e), d: Double(d),
+                                  w: prevSub + sub, noise: noise, brightDb: brightDb, brightJump: brightJump)
                 holdFloorUntil = now + 0.3
                 return settle()
             }
@@ -283,7 +304,9 @@ final class ClapDetector {
                 p.e += Double(e); p.d += Double(d); p.w += sub
                 p.hz = rate / Double.pi * asin(min(1, sqrt(p.d / max(p.e, 1e-12)) / 2))
             }
-            if p.frames == 1 { p.rise = max(p.rise, db - p.base) }
+            if p.frames == 1 { p.rise = max(p.rise, db - p.base, brightJump) }
+            if p.frames <= 2 { p.brightPeak = max(p.brightPeak, brightDb) }
+            if p.frames >= 6 && p.frames <= 10 { p.brightTail = max(p.brightTail, brightDb) }
             if p.frames >= 3, db > p.last + 3, db > floorDb + 6 { p.bump = true }
             p.last = db
             if p.frames >= 6 && p.frames <= 10 { p.tail = max(p.tail, db) }
@@ -296,7 +319,8 @@ final class ClapDetector {
         }
 
         if onset, now >= coolUntil || calibrating {
-            pending = Pending(t: now, db: db, base: roomBefore, bed: bed, hz: hz, e: Double(e), d: Double(d), w: prevSub + sub, noise: noise)
+            pending = Pending(t: now, db: db, base: roomBefore, bed: bed, hz: hz, e: Double(e), d: Double(d),
+                                  w: prevSub + sub, noise: noise, brightDb: brightDb, brightJump: brightJump)
             holdFloorUntil = now + 0.3
         } else if rise >= riseDb - 6, jump >= Self.jumpDb - 3, db >= level - 6, now > holdFloorUntil {
             say(String(format: "clap candidate %.1f dB (needs %.1f), %.1f dB over the room (needs %.1f), jump %.1f dB: %@", db, level, rise, riseDb, jump, db < level ? "too quiet" : rise < riseDb ? "too close to the room's level" : "no sharp rise"))
@@ -308,7 +332,11 @@ final class ClapDetector {
 
     /// An onset has had its 100 ms: was it a clap, and does it make a double clap?
     private func judge(_ p: Pending) -> Bool {
-        let decay = p.peak - p.tail, jump = p.rise, n = Self.need(peak: p.peak, hz: p.hz)
+        let brightDecay = spectralProposals && p.brightPeak >= Self.floorDb ? p.brightPeak - p.brightTail : 0
+        let decay = max(p.peak - p.tail, brightDecay), jump = p.rise
+        let minWidth = spectralProposals ? Self.proposalMinWidthMs : Self.minWidthMs
+        let baselineHz = spectralProposals ? Self.proposalBrightnessHz : Self.clapHz
+        let n = Self.need(peak: p.peak, hz: p.hz, baselineHz: baselineHz)
         let width = Self.width(p.w, noise: p.noise, blockMs: Double(hop) / rate * 1000 / Double(Self.blocks))
         let calRise = calibrating ? Self.minRiseDb : calibration?.riseDb
         let riseNeed = Self.riseNeed(peak: p.peak, hz: p.hz, calRise: calRise)
@@ -316,10 +344,11 @@ final class ClapDetector {
         // floor is for a key in a quiet room. It is not applied to a sound already as bright as a clap and clear of the voice.
         let hiss = speaking && !calibrating && p.hz >= Self.speakHz && p.peak >= p.bed + Self.overVoiceDb
         var line = String(format: "clap candidate %.1f dB (needs %.1f), rise %.1f dB (needs %.1f), %.0f Hz (needs %.0f), %.1f ms wide (needs %.1f), down %.1f dB in 100 ms (needs %.1f)",
-                          p.peak, calibrating ? calLevel : levelDb, jump, riseNeed, p.hz, n.hz, width, Self.minWidthMs, decay, p.bump ? n.decay : Self.decayDb)
+                          p.peak, calibrating ? calLevel : levelDb, jump, riseNeed, p.hz, n.hz, width, minWidth, decay, p.bump ? n.decay : Self.decayDb)
         if speaking && !calibrating { line += String(format: ", %.1f dB over Hydra's voice (needs %.0f)", p.peak - p.bed, Self.overVoiceDb) }
         // The hard floor (C8), the same at every sensitivity and while calibrating.
-        if let miss = Self.shapeMiss(peak: p.peak, jump: jump, hz: p.hz, decay: decay, smooth: !p.bump, width: hiss ? nil : width, calRise: calRise) {
+        if let miss = Self.shapeMiss(peak: p.peak, jump: jump, hz: p.hz, decay: decay, smooth: !p.bump, width: hiss ? nil : width, calRise: calRise,
+                                     minWidth: minWidth, baselineHz: baselineHz) {
             // Still a sharp, bright sound (a key, a mouse click): not a clap, and nothing just around it is alone either
             // (typing breaks the quiet a double clap needs). Sharp: it dies away, comes in a run (typing), or stands over
             // the sound under it (Hydra's voice, a fan) and falls back to it, as a key over Hydra's voice does though its
@@ -405,7 +434,8 @@ final class ClapDetector {
             guard pending == nil, now - t2 >= Self.quietAfter(gap: t2 - t1) else { return false }
             state = .idle
             coolUntil = now + 1
-            say("double clap: \(firstLine), nothing sharp for \(String(format: "%.2f", now - t2)) s after\(speaking ? ", both clear of Hydra's voice" : "")", always: true)
+            lastPair = (t1, t2)
+            say("\(classifiesPairs ? "clap pair pending confirmation" : "double clap"): \(firstLine), nothing sharp for \(String(format: "%.2f", now - t2)) s after\(speaking ? ", both clear of Hydra's voice" : "")", always: true)
             return true
         }
     }
@@ -414,27 +444,67 @@ final class ClapDetector {
 /// The clap detector as a consumer of the one mic tap (mic.swift): made at the mic's rate, set from the main thread.
 final class ClapTap {
     private let lock = NSLock()
-    private var det: ClapDetector?
+    private let analysis = DispatchQueue(label: "hydra.clap-confirmation", qos: .userInitiated)
+    private let classify: ([Float], Double, DispatchTime) throws -> Double
+    private let prepare: () -> Void
+    private let now: () -> Double
+    private var det: ClapDetector?, audio: ClapCandidateAudio?
     private var sensitivity = 0.5, calibration: ClapDetector.Calibration?, calibrating = false
-    /// A double clap (main queue).
-    var onClap: () -> Void = {}
+    private var enabled = false, guarded = false, speaking = false
+    private var inFlight = false, prepared = false, generation = 0
+    /// A confirmed double clap (main queue).
+    var onClap: (Bool) -> Void = { _ in }
     /// A transient while calibrating: its peak and rise (main queue).
     var onTransient: (Double, Double) -> Void = { _, _ in }
     /// Candidate lines go to the local log (voice log); off unless CLAP_LOG or calibrating.
     static var lines = ProcessInfo.processInfo.environment["CLAP_LOG"] != "0"
 
+    convenience init() {
+        let classifier = AppleClapClassifier()
+        self.init(classify: classifier.score, prepare: classifier.prepare)
+    }
+
+    init(classify: @escaping ([Float], Double, DispatchTime) throws -> Double, prepare: @escaping () -> Void = {}, now: @escaping () -> Double = uptime) {
+        self.classify = classify
+        self.prepare = prepare
+        self.now = now
+    }
+
     func configure(sensitivity: Double, calibration: ClapDetector.Calibration?) {
-        lock.lock(); self.sensitivity = sensitivity; self.calibration = calibration; det?.sensitivity = sensitivity; det?.calibration = calibration; lock.unlock()
+        lock.lock(); defer { lock.unlock() }
+        self.sensitivity = sensitivity
+        self.calibration = calibration
+        resetLocked()
     }
-    func setCalibrating(_ on: Bool) { lock.lock(); calibrating = on; det?.calibrating = on; lock.unlock() }
-    private var guarded = false, speaking = false
-    /// Hydra's voice plays with no echo reference (main queue, each mic tick); a change is logged once.
-    func setGuarded(_ on: Bool) {
-        lock.lock(); let changed = guarded != on; guarded = on; det?.guarded = on; lock.unlock()
-        if changed && Self.lines { log(on ? "clap level held at Medium or calibrated: Hydra speaks with no echo reference" : "clap level back to the setting") }
+
+    func setCalibrating(_ on: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard calibrating != on else { return }
+        calibrating = on
+        resetLocked()
     }
-    /// Hydra is speaking (main queue, each mic tick): a clap must stand clear of its voice (C7).
-    func setSpeaking(_ on: Bool) { lock.lock(); speaking = on; det?.speaking = on; lock.unlock() }
+
+    /// Metering and calibration can use the tap with confirmation disabled.
+    func setListening(_ on: Bool, guarded: Bool, speaking: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        let guardChanged = self.guarded != guarded
+        guard enabled != on || guardChanged || self.speaking != speaking else { return }
+        enabled = on
+        self.guarded = guarded
+        self.speaking = speaking
+        resetLocked()
+        if on && !prepared {
+            prepared = true
+            let prepare = self.prepare
+            analysis.async { prepare() }
+        }
+        if guardChanged && Self.lines { log(guarded ? "clap level held at Medium or calibrated: Hydra speaks with no echo reference" : "clap level back to the setting") }
+    }
+
+    /// Route changes, stop and manual takes invalidate any pending result and any old audio.
+    func reset() { lock.lock(); resetLocked(); lock.unlock() }
+    private func resetLocked() { generation += 1; det = nil; audio = nil }
+
     /// The live clap level for the panel: the loudest frame since the last read, the room's floor, what a clap needs.
     func meter() -> (db: Double, floor: Double, needs: Double)? {
         lock.lock(); defer { lock.unlock() }
@@ -444,11 +514,13 @@ final class ClapTap {
 
     /// One buffer from the mic (audio thread).
     func feed(_ buffer: AVAudioPCMBuffer) {
-        guard let ch = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
-        lock.lock()
         let rate = buffer.format.sampleRate
-        if det == nil || det!.rate != rate {
-            let d = ClapDetector(rate: rate, sensitivity: sensitivity, calibration: calibration)
+        guard rate.isFinite, rate >= 8000, buffer.stride == 1,
+              let ch = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        if det?.rate != rate { resetLocked() }
+        if det == nil {
+            let d = ClapDetector(rate: rate, sensitivity: sensitivity, calibration: calibration, classifiesPairs: enabled)
             d.calibrating = calibrating
             d.guarded = guarded
             d.speaking = speaking
@@ -456,10 +528,56 @@ final class ClapTap {
             let tell = onTransient
             d.onTransient = { p, r in DispatchQueue.main.async { tell(p, r) } }
             det = d
+            if enabled && !calibrating { audio = ClapCandidateAudio(rate: rate) }
         }
-        let fired = det!.feed(ch, count: Int(buffer.frameLength))
+        let length = Int(buffer.frameLength)
+        let chunk = Int(rate / 10)
+        // Bound each feed so a long tap buffer cannot overwrite the current pair's audio.
+        for start in stride(from: 0, to: length, by: chunk) {
+            let count = min(length - start, chunk)
+            audio?.append(ch + start, count: count)
+            if det!.feed(ch + start, count: count), enabled, !inFlight, let pair = det!.lastPair,
+               let first = audio?.window(center: pair.first), let second = audio?.window(center: pair.second) {
+                confirm(first, second, rate: rate)
+            }
+        }
+    }
+
+    private func confirm(_ first: [Float], _ second: [Float], rate: Double) {
+        inFlight = true
+        let generation = self.generation, speaking = self.speaking
+        let expiry = now() + AppleClapClassifier.timeout
+        let deadline = DispatchTime.now() + AppleClapClassifier.timeout
+        analysis.async { [weak self] in
+            guard let self else { return }
+            let result: Result<Double, Error> = Result {
+                let firstScore = try self.classify(first, rate, deadline)
+                guard (AppleClapClassifier.minimumConfidence ... 1).contains(firstScore) else { return 0 }
+                let secondScore = try self.classify(second, rate, deadline)
+                guard (0 ... 1).contains(secondScore) else { return 0 }
+                return min(firstScore, secondScore)
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.finish(result, generation: generation, speaking: speaking, expiry: expiry)
+            }
+        }
+    }
+
+    private func finish(_ result: Result<Double, Error>, generation: Int, speaking: Bool, expiry: Double) {
+        lock.lock()
+        inFlight = false
+        let current = generation == self.generation && enabled && !calibrating
         lock.unlock()
-        if fired { let f = onClap; DispatchQueue.main.async { f() } }
+        guard current else { return }
+        if now() > expiry {
+            log("clap confirmation timed out")
+        } else {
+            switch result {
+            case .success(let score) where score >= AppleClapClassifier.minimumConfidence: onClap(speaking)
+            case .success(let score): if Self.lines { log(String(format: "clap confirmation rejected (%.3f)", score)) }
+            case .failure(let error): log("clap confirmation unavailable: \(error.localizedDescription)")
+            }
+        }
     }
 }
 
@@ -780,6 +898,34 @@ enum ClapTest {
         let desk = deskPair(rate: 48000)
         check("the mic's feed wakes on a -36 dB desk clap under a calibration stricter than Medium", micFires(desk, rate: 48000, calibration: stuck), 1)
         check("that desk clap interrupts while Hydra speaks", micFires(desk, rate: 48000, calibration: stuck, speaking: true), 1)
+        check("a temporal pair with a rejected clapping score never reaches wake", micFires(desk, rate: 48000, calibration: stuck, classify: { _, _, _ in 0 }), 0)
+        var classified = 0
+        check("both peaks must pass SoundAnalysis", micFires(desk, rate: 48000, calibration: stuck, classify: { _, _, _ in
+            classified += 1
+            return classified == 1 ? 1 : 0
+        }), 0)
+        classified = 0
+        check("an invalid clapping score never reaches wake", micFires(desk, rate: 48000, calibration: stuck, classify: { _, _, _ in
+            classified += 1
+            return classified == 1 ? 1 : .nan
+        }), 0)
+        let single = Array(desk.prefix(48000)) + Array(desk.suffix(48000))
+        check("one sharp clap never reaches wake", micFires(single, rate: 48000, calibration: stuck), 0)
+        check("an unavailable sound classifier never reaches wake", micFires(desk, rate: 48000, calibration: stuck, classify: { _, _, _ in throw AppleClapClassifier.Failure.unavailable }), 0)
+        check("a failed sound request never reaches wake", micFires(desk, rate: 48000, calibration: stuck, classify: { _, _, _ in throw AppleClapClassifier.Failure.noResult }), 0)
+        var clock = 100.0
+        check("a late clapping score cannot wake", micFires(desk, rate: 48000, calibration: stuck, now: { clock }, afterFeed: { _ in clock += 1 }), 0)
+        check("a score arriving after disable and re-enable is stale", micFires(desk, rate: 48000, calibration: stuck, afterFeed: {
+            $0.setListening(false, guarded: false, speaking: false)
+            $0.setListening(true, guarded: false, speaking: false)
+        }), 0)
+        check("a result from before a route reset or cancel is stale", micFires(desk, rate: 48000, calibration: stuck, afterFeed: { $0.reset() }), 0)
+        check("a result from before calibration started is stale", micFires(desk, rate: 48000, calibration: stuck, afterFeed: { $0.setCalibrating(true) }), 0)
+        var window = ClapCandidateAudio(rate: 10)
+        let ramp = (0 ..< 28).map(Float.init)
+        ramp.withUnsafeBufferPointer { window.append($0.baseAddress!, count: $0.count) }
+        check("a wrapped window contains the exact samples around a peak", window.window(center: 2.2) == Array(ramp[20 ..< 25]) ? 1 : 0, 1)
+        check("an overwritten window cannot be classified", window.window(center: 0.5) == nil ? 1 : 0, 1)
         return bad == 0 ? 0 : 1
     }
 
@@ -838,14 +984,15 @@ enum ClapTest {
     }
 
     /// What the mic tap calls: ClapTap.feed on 1024-frame float buffers. Counts double claps that reach onClap.
-    static func micFires(_ samples: [Float], rate: Double, calibration: ClapDetector.Calibration?, speaking: Bool = false) -> Int {
-        let tap = ClapTap()
+    static func micFires(_ samples: [Float], rate: Double, calibration: ClapDetector.Calibration?, speaking: Bool = false,
+                         classify: @escaping ([Float], Double, DispatchTime) throws -> Double = { _, _, _ in 1 },
+                         now: @escaping () -> Double = uptime, afterFeed: (ClapTap) -> Void = { _ in }) -> Int {
+        let tap = ClapTap(classify: classify, now: now)
         tap.configure(sensitivity: 0.5, calibration: calibration)
-        tap.setSpeaking(speaking)
-        tap.setGuarded(speaking)
+        tap.setListening(true, guarded: speaking, speaking: speaking)
         final class Count { var n = 0 }
         let count = Count()
-        tap.onClap = { count.n += 1 }
+        tap.onClap = { _ in count.n += 1 }
         let fmt = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
         var i = 0
         while i < samples.count {
@@ -856,6 +1003,7 @@ enum ClapTest {
             tap.feed(buf)
             i += n
         }
+        afterFeed(tap)
         let until = Date(timeIntervalSinceNow: 0.3)
         while count.n == 0 && Date() < until { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
         return count.n

@@ -7,6 +7,7 @@ import { environmentSecrets, redactValue, resolveToolSchema } from '@kenkaiiii/g
 import { recordClaudeCodeRateLimit } from '@kenkaiiii/gg-core';
 import { ZodError, prettifyError } from 'zod';
 import crypto from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 export const MCP_SERVER = 'gg';
 const TOOL_PREFIX = `mcp__${MCP_SERVER}__`;
@@ -113,6 +114,10 @@ class SdkMessageMapper {
   turn = 0; totalUsage = { inputTokens: 0, outputTokens: 0 }; lastAssistant; syntheticError;
   #current; #startedAt; #stopReason = 'end_turn'; #usage = { inputTokens: 0, outputTokens: 0 };
   #adds = []; #handled = 0;
+  // SDK results for one assistant message can arrive in separate user messages.
+  // A null entry means this call already has its outcome events.
+  #transcriptCalls = new Map();
+  #invocationScope = crypto.randomUUID();
   constructor(o) { this.o = o; }
   /** Words the owner added mid-run: they go into the history as a user message just before the next assistant message
    *  that Claude Code sent after them (where it reads them in), so the saved history, a fold's transcript and a re-seed
@@ -197,6 +202,9 @@ class SdkMessageMapper {
     for (const b of blocks) {
       const part = fromSdkBlock(b);
       this.#current.message.content.push(part);
+      if (part.type === 'tool_call' && this.#transcriptCalls.get(part.id) !== null) {
+        this.#transcriptCalls.set(part.id, { ...part, localBridge: String(b.name).startsWith(TOOL_PREFIX) });
+      }
       if (part.type === 'server_tool_call') events.push({ type: 'server_tool_call', id: part.id, name: part.name, input: part.input });
       else if (part.type === 'server_tool_result') events.push({ type: 'server_tool_result', toolUseId: part.toolUseId, resultType: part.resultType, data: part.data });
     }
@@ -206,16 +214,23 @@ class SdkMessageMapper {
     if (!Array.isArray(raw)) return [];
     const blocks = raw.filter((b) => b.type === 'tool_result');
     if (!blocks.length) return [];
-    const calls = new Map(this.unpairedToolCalls().map((c) => [c.id, c]));
     const events = [];
     const results = blocks.map((b) => {
       const id = String(b.tool_use_id);
+      const call = this.#transcriptCalls.get(id);
       const bridged = this.o.takeResult(id);
-      if (bridged) return bridged;
-      const result = fromSdkToolResult(b), call = calls.get(id);
+      if (bridged) {
+        this.#transcriptCalls.set(id, null);
+        return bridged;
+      }
+      const result = fromSdkToolResult(b);
+      if (call === null) return result;
+      this.#transcriptCalls.set(id, null);
+      if (call?.localBridge && this.o.takeFallbackEcho(call, result)) return result;
+      const toolInvocationId = `${this.#invocationScope}:sdk:${id}`;
       events.push(
-        { type: 'tool_call_start', toolCallId: id, name: call?.name ?? 'tool', args: call?.args ?? {} },
-        { type: 'tool_call_end', toolCallId: id, result: resultText(result.content), isError: !!result.isError, durationMs: 0 },
+        { type: 'tool_call_start', toolCallId: id, toolInvocationId, name: call?.name ?? 'tool', args: call?.args ?? {} },
+        { type: 'tool_call_end', toolCallId: id, toolInvocationId, result: resultText(result.content), isError: !!result.isError, durationMs: 0 },
       );
       return result;
     });
@@ -247,10 +262,11 @@ const toMcpContent = (c) => (typeof c === 'string' ? (c ? [{ type: 'text', text:
 
 // onReply(toolCallId): just before a result is handed back to Claude Code (on the same stdin as the owner's additions).
 export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, onReply }) {
-  const results = new Map(), invalidCounts = new Map();
-  async function callTool(name, args, toolCallId, cancel) {
+  const results = new Map(), fallbackResults = new Map(), invalidCounts = new Map();
+  const bridgeId = crypto.randomUUID();
+  async function callTool(name, args, toolCallId, toolInvocationId, cancel) {
     const t0 = Date.now();
-    onEvent({ type: 'tool_call_start', toolCallId, name, args });
+    onEvent({ type: 'tool_call_start', toolCallId, toolInvocationId, name, args });
     let content, details, isError = false, invalidArgAttempt;
     const tool = tools.find((t) => t.name === name);
     if (!tool) { content = unknownToolMessage(name, tools.map((t) => t.name)); isError = true; }
@@ -263,7 +279,7 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, o
         }
         const sig = typeof signal === 'function' ? signal() : signal;
         const signals = [cancel, AbortSignal.timeout(tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS), ...(sig ? [sig] : [])];
-        const raw = await tool.execute(parsed, { signal: AbortSignal.any(signals), toolCallId, onUpdate: (update) => onEvent({ type: 'tool_call_update', toolCallId, update }) });
+        const raw = await tool.execute(parsed, { signal: AbortSignal.any(signals), toolCallId, toolInvocationId, onUpdate: (update) => onEvent({ type: 'tool_call_update', toolCallId, update }) });
         const out = typeof raw === 'string' ? { content: raw } : raw;
         content = out.content; details = out.details;
         for (const k of invalidCounts.keys()) if (k.startsWith(`${name}:`)) invalidCounts.delete(k);
@@ -279,7 +295,7 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, o
       }
     }
     content = redactValue(content, redactOpts()); details = redactValue(details, redactOpts());
-    onEvent({ type: 'tool_call_end', toolCallId, result: preview(content), details, isError, durationMs: Date.now() - t0, ...(invalidArgAttempt === undefined ? {} : { invalidArgAttempt }) });
+    onEvent({ type: 'tool_call_end', toolCallId, toolInvocationId, result: preview(content), details, isError, durationMs: Date.now() - t0, ...(invalidArgAttempt === undefined ? {} : { invalidArgAttempt }) });
     const result = { type: 'tool_result', toolCallId, content, isError };
     capToolResults([result], maxToolResultChars);
     return result;
@@ -288,6 +304,7 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, o
   let callCount = 0;
   const instance = {
     async connect(transport) {
+      const connectionId = crypto.randomUUID();
       const inFlight = new Map();
       const reply = (id, body) => void transport.send({ jsonrpc: '2.0', id, ...body }).catch(() => {});
       transport.onclose = () => { for (const c of inFlight.values()) c.abort(); inFlight.clear(); };
@@ -310,9 +327,22 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, o
           const controller = new AbortController();
           inFlight.set(id, controller);
           const metaId = params._meta?.['claudecode/toolUseId'];
-          const toolCallId = typeof metaId === 'string' ? metaId : `gg_call_${++callCount}`;
-          void callTool(String(params.name), params.arguments ?? {}, toolCallId, controller.signal)
-            .then((result) => { results.set(toolCallId, result); onReply?.(toolCallId); reply(id, { result: { content: toMcpContent(result.content), ...(result.isError ? { isError: true } : {}) } }); })
+          const hasProviderId = typeof metaId === 'string';
+          const toolCallId = hasProviderId ? metaId : `gg_call_${++callCount}`;
+          // The next prompt can start a bridge that reuses both provider IDs and fallback counters.
+          // Within this bridge a retry of the same invocation keeps its audit identity.
+          const toolInvocationId = hasProviderId
+            ? `${bridgeId}:provider:${metaId}`
+            : `${connectionId}:request:${typeof id}:${id}`;
+          const name = String(params.name), args = params.arguments ?? {};
+          void callTool(name, args, toolCallId, toolInvocationId, controller.signal)
+            .then((result) => {
+              const content = toMcpContent(result.content);
+              if (hasProviderId) results.set(toolCallId, result);
+              else if (!fallbackResults.has(toolInvocationId)) fallbackResults.set(toolInvocationId, { name, args, content, isError: result.isError });
+              onReply?.(toolCallId);
+              reply(id, { result: { content, ...(result.isError ? { isError: true } : {}) } });
+            })
             .finally(() => inFlight.delete(id));
           return;
         }
@@ -326,6 +356,18 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent, o
     config: { type: 'sdk', name: MCP_SERVER, instance, timeout: longest + SERVER_TIMEOUT_MARGIN_MS },
     allowedTools: () => tools.map((t) => TOOL_PREFIX + t.name),
     takeResult(id) { const r = results.get(id); results.delete(id); return r; },
+    takeFallbackEcho(call, result) {
+      // The SDK transcript may echo a bridge result using a provider ID the request never sent.
+      // Consume one matching reply; the original events keep their separate invocation IDs.
+      const content = toMcpContent(result.content);
+      for (const [id, pending] of fallbackResults) {
+        if (!pending || pending.name !== call.name || pending.isError !== Boolean(result.isError) ||
+            !isDeepStrictEqual(pending.args, call.args) || !isDeepStrictEqual(pending.content, content)) continue;
+        fallbackResults.set(id, null);
+        return true;
+      }
+      return false;
+    },
   };
 }
 
@@ -497,7 +539,13 @@ async function* claudeCodeLoop(messages, o) {
       channel.push({ kind: 'error', error });
     }
   };
-  const mapper = new SdkMessageMapper({ messages, takeResult: (id) => run.bridge.takeResult(id), onSessionId: o.onSessionId, onRateLimit: o.onRateLimit });
+  const mapper = new SdkMessageMapper({
+    messages,
+    takeResult: (id) => run.bridge.takeResult(id),
+    takeFallbackEcho: (call, result) => run.bridge.takeFallbackEcho(call, result),
+    onSessionId: o.onSessionId,
+    onRateLimit: o.onRateLimit,
+  });
   // Words the owner adds while this runs (W5 contract 2): one more user message on the same streaming input. Claude Code
   // takes it into the turn under way, or answers it right after; a result that comes before any assistant message
   // after the last addition is not the end yet (the addition is still to be answered).

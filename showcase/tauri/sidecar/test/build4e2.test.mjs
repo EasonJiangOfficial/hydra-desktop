@@ -46,14 +46,12 @@ const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await i
 // ---- The one rule (sidekick ask, the agents' asks): Approve all says yes for every yes/no, including a deletion. Off, every ask asks.
 {
   const src = fs.readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
-  const askFn = src.slice(src.indexOf('function ask(opts, signal) {'), src.indexOf('askQueued ??= oneYesNoAtATime(showAsk);'));
-  // After the relay branch (a relay turn's asks stay server approvals), before anything is shown.
-  assert.ok(askFn.indexOf('if (relayed?.live) return relayed.ask(opts, signal);') >= 0 && askFn.indexOf('if (autoYes(opts))') > askFn.indexOf('relayed?.live'), 'ask() says yes for Approve all after the relay branch');
+  // build4efix.test.mjs exercises the actual local, guide, and relay approval paths.
   assert.match(src, /const autoYes = \(opts\) => approveAllSays\(approveAll\(\), opts\);/);
   assert.match(src, /const approveAll = \(\) => agentSettings\.current\.approveAll === true;/);
   assert.match(src, /approveAll: \(\) => approveAll\(\),/, 'the background agents get it');
   assert.match(src, /confirm: async \(question, signal\) => isYes\(await ask\(\{ placeholder: question, choices: \['Allow', "Don't allow"\], always: true, deletion: false \}, signal\)\),/, 'starting or copying from an agent is not a deletion');
-  assert.match(src, /askSummary\(app, c\.tool, input\), choices: \['Allow', "Don't allow"\], always: true, deletion: deletesCall\(\{ name: c\.tool \}\) \}/, 'a connector call carries its tag');
+  assert.match(src, /askSummary\(app, c\.tool, input\), choices: \['Allow', "Don't allow"\], always: true, deletion: deletesCall\(\{ name: c\.tool \}\), pay: moneyCall\(\{ server: c\.server, name: c\.tool, args: input \}\) \}/, 'a connector call carries its tags');
   // Typed prompts never: the FORGET ask, keys, codes.
   assert.equal(approveAllSays(true, { placeholder: 'Type FORGET to erase everything I remember' }), false);
   assert.equal(approveAllSays(true, { prompt: 'Paste your API key', mask: true, deletion: false }), false);
@@ -120,7 +118,7 @@ const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await i
   for (let i = 0; i < 200 && !events.some((e) => e.type === 'done'); i++) await wait(10);
   await relay.stop();
   assert.deepEqual(posts.map((b) => [b.deletion, b.approveAllDeletionTags]), [[false, 1], [true, 1], [true, 1]], JSON.stringify(posts));
-  assert.deepEqual(APPROVE_CAPS, { approveAllDeletionTags: 1 });
+  assert.deepEqual(APPROVE_CAPS, { approveAllDeletionTags: 1, hardTags: 1 });
   // The shared schema (byte-identical with the web's) still takes the body: the new fields are extra, not wrong.
   for (const b of posts) assert.ok(relayApprovalSchema.safeParse(b).success);
 }
@@ -132,8 +130,9 @@ const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await i
   await api.req('/api/agent/relay/next?wait=1&slot=live');
   await api.req('/api/agent/relay/approval', { method: 'POST', body: {} });
   // The web contract (relay-schema.ts CAPABILITIES_HEADER): this exact header and these exact bytes.
-  assert.deepEqual(seen.map((h) => h['x-hydra-capabilities']), ['{"approveAllDeletionTags":1}', '{"approveAllDeletionTags":1}']);
-  assert.deepEqual(seen.map((h) => capabilitiesSchema.parse(h[CAPABILITIES_HEADER])), [{ approveAllDeletionTags: 1 }, { approveAllDeletionTags: 1 }], 'the server reads it as declared');
+  // A3 (web ceecb0e): hardTags too, every approval carries the Mac's hard verdict.
+  assert.deepEqual(seen.map((h) => h['x-hydra-capabilities']), ['{"approveAllDeletionTags":1,"hardTags":1}', '{"approveAllDeletionTags":1,"hardTags":1}']);
+  assert.deepEqual(seen.map((h) => capabilitiesSchema.parse(h[CAPABILITIES_HEADER])), [{ approveAllDeletionTags: 1, hardTags: 1 }, { approveAllDeletionTags: 1, hardTags: 1 }], 'the server reads it as declared');
 }
 
 // ---- The server brain's connector gate tags its approvals the same way: claude.ai's connectors send no hints, so a

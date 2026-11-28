@@ -1,13 +1,32 @@
 // The voice side of a turn (W5 voice contract 2 and 3), out of sidekick.mjs so it is tested by behavior
 // (test/voiceturn.test.mjs): what the owner really heard of a reply when he talked over it, the filler when no answer
 // has started, and words added while Hydra thinks.
-import { INPUT_PREFIX } from './relay.mjs';
+import { ADDED_PREFIX as INPUT_PREFIX } from './relayschema.mjs';
 import { spokenText } from './sysvoice.mjs';
 import { PROGRESS, pickFiller } from './speaker.mjs';
 
 export const FILLER_MS = 1100;
 // A progress line after this long with nothing new (no model text, no audio still playing): every 5 to 6 s (E4).
 export const PROGRESS_MS = 5500;
+
+/** One model run: internal retries are logged too, but only announced delays count toward the cap. */
+export function retryGate({ capMs = 30_000 } = {}) {
+  let total = 0, announced = false, reasonWords = '';
+  return {
+    on({ reason, delayMs, silent }) {
+      if (silent === true) return 'log';
+      reasonWords = reason === 'rate_limit' ? 'rate limit' : reason === 'overloaded' ? 'overloaded' : 'provider error';
+      if (Number.isFinite(delayMs) && delayMs > 0) total += delayMs;
+      if (total >= capMs) return 'give_up';
+      if (announced) return 'log';
+      announced = true;
+      return 'announce';
+    },
+    get reasonWords() { return reasonWords; },
+    message(provider) { return `${provider} isn't answering right now (${reasonWords}). Try again in a minute, or pick another model.`; },
+  };
+}
+
 // ponytail: a fixed speaking rate (characters a second) turns played time into heard text; per-sentence play reports
 // from the voice helper would be exact.
 export const CHARS_PER_SEC = 14;
@@ -113,6 +132,15 @@ export function startProgress({ voice, live, muted = () => false, waiting = () =
 export function wakeActions(why) {
   const own = why === 'phrase' || why === 'talk';
   return { cue: !own, listen: !own, woke: why === 'clap' || why === 'phrase' };
+}
+
+/** The startup sound (owner, 2026-11-26: "there should be an audio when hydra starts up along with the loading
+ *  animation"): asked for once, at the sidecar's start, with sound on and volume above zero. The app (main.rs) plays
+ *  the bundled file itself, so it never waits for the voice helper, and keeps the once-per-launch latch. The message
+ *  to send, or null. */
+export function startupCue({ mac, sound, volume }) {
+  if (!mac || !sound || !(volume > 0)) return null;
+  return { type: 'cue', name: 'startup', v: Math.min(1, volume / 100) };
 }
 
 /** The soft pending sound (the voice helper's loop) and the orb's pending look (E4): a spoken turn at work, from its
@@ -308,13 +336,13 @@ export function noteToolFailure({ isError = false, result = '', progress = null,
 /**
  * Why a turn ended without an answer, in one short line (owner: every turn that ends without an answer says why), or ''
  * when it answered. spoken: say it too (a voice turn; never after Stop or the sleep word, which mean silence).
- * how: 'stop' (Stop, Esc), 'sleep' (the sleep word, idle sleep), 'stall', 'error' (with message), 'max_turns', or 'end'.
+ * how: 'stop' (Stop, Esc), 'sleep' (the sleep word, idle sleep), 'stall', 'retry', 'error' (with message), 'max_turns', or 'end'.
  * answered: it said something, drew, launched an agent or a tool did what was asked.
  */
 export function endNote({ how, answered = false, message = '', voice = false }) {
   const line = how === 'stop' ? 'Okay, stopping.'
     : how === 'sleep' ? "I stopped that because I'm going to sleep."
-      : how === 'stall' || how === 'error' ? message
+      : how === 'stall' || how === 'retry' || how === 'error' ? message
         : answered ? ''
           : how === 'max_turns' ? "I ran out of steps before I finished. Say keep going and I'll carry on."
             : "I didn't get an answer back that time. Ask me again?";

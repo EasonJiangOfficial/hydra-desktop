@@ -179,7 +179,7 @@ await checkCommandLine({ createBrainTurn, BUILTIN_TOOLS });
       relayBatchSchema.parse(raw);
       if (raw.claimId !== claims.get(raw.turnId)) return json(res, 409, { error: 'stale_claim' });
       posted.push(...raw.events.map((e) => ({ turn: raw.turnId, ...e })));
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, status: raw.events.at(-1)?.type === 'done' ? 'done' : 'claimed' });
     }
     if (u.pathname === '/api/agent/relay/approval' && req.method === 'POST') {
       relayApprovalSchema.parse(raw);

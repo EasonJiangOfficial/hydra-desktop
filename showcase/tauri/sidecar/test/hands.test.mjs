@@ -29,6 +29,12 @@ if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1
 console.log(JSON.stringify(o));
 `);
 process.env.ROAMIES_HANDS = fake;
+// macOS's open, as it answers: an app that isn't installed exits 1 with "Unable to find application"; anything else
+// opens nothing here (the test never reaches the real Mac, and runs the same under a stub PATH).
+if (process.platform === 'darwin') {
+  fs.writeFileSync(path.join(dir, 'open'), '#!/bin/sh\nfor a in "$@"; do case "$a" in *NoSuchAppRoamiesTest*) echo "Unable to find application named \'$a\'" >&2; exit 1;; esac; done\nexit 0\n', { mode: 0o755 });
+  process.env.PATH = `${dir}:${process.env.PATH}`;
+}
 const { createTools } = await import('../tools.mjs');
 const noop = async () => {};
 // The owner says yes to every plan here (owner's rule: each one asks); what the questions say is tested elsewhere.
@@ -143,27 +149,19 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   // Edits name what's there; unknown parts are refused with the list.
   await assert.rejects(draw.execute({ edit: [{ do: 'recolor', part: 'p9', tone: 'red' }] }, { toolCallId: 'd2' }), /no p9 on screen now \(there is: p1 target “Format”, p2 target “High”, p3 ring “A”/);
   assert.match(await draw.execute({ edit: [{ do: 'recolor', part: 'p1', tone: 'red' }] }, { toolCallId: 'd3' }), /Edited the drawing/);
-  // A drawing in a later request replaces the old one, cards and all; an edit in a later request keeps it.
+  // Owner, 2026-11-26: "and not go away automatically". A drawing in a later request adds to what's there; an edit
+  // keeps it too. Nothing is cleared.
   made.nextTurn();
   await draw.execute({ edit: [{ do: 'recolor', part: 'p1', tone: 'amber' }] }, { toolCallId: 'd6' });
-  assert.ok(!other.some((e) => e.type === 'ink_clear'), 'editing keeps the drawing');
   made.nextTurn();
   await draw.execute({ beats: [{ say: 'A card.', marks: [{ kind: 'note', text: 'hi' }] }] }, { toolCallId: 'd7' });
-  assert.deepEqual(other.at(-1), { type: 'ink_clear' }, 'everything cleared, not just the screen marks');
-  assert.match(await draw.execute({ beats: [{ say: 'Another.', marks: [{ kind: 'note', text: 'two' }] }] }, { toolCallId: 'd8' }), /On screen now: p\d+ note “hi”, p\d+ note “two”\./, 'same request: cards add up');
-  // Another window comes to the front: the whole drawing goes (cards too), and the model is told nothing is there.
+  assert.ok(!other.some((e) => e.type === 'ink_clear'), 'nothing cleared by the next request');
+  assert.match(await draw.execute({ beats: [{ say: 'Another.', marks: [{ kind: 'note', text: 'two' }] }] }, { toolCallId: 'd8' }), /On screen now: p1 target “Format”, .*p\d+ note “hi”, p\d+ note “two”\./, 'cards add up, the old marks stay');
+  // Another window comes to the front: the drawing stays (no ink_stale), and the model still knows it's there.
   fs.writeFileSync(path.join(dir, 'front.json'), JSON.stringify({ id: 9, app: 'Safari', title: 'x', bounds: [0, 0, 900, 700] }));
   await new Promise((r) => setTimeout(r, 1800));
-  assert.equal(other.at(-1).type, 'ink_stale');
-  await assert.rejects(draw.execute({ edit: [{ do: 'erase', part: 'p1' }] }, { toolCallId: 'd9' }), /nothing is drawn/);
-  fs.rmSync(path.join(dir, 'front.json'));
-  // A drawing that goes by itself (the tour, the setup showcase) is about no window: switching windows keeps it.
-  other.length = 0;
-  await made.ink.show([{ say: 'Graphs too.', marks: [{ kind: 'note', text: 'a showcase card' }] }], 'showcase-1', { fade: 5 });
-  fs.writeFileSync(path.join(dir, 'front.json'), JSON.stringify({ id: 11, app: 'Notes', title: 'y', bounds: [0, 0, 900, 700] }));
-  await new Promise((r) => setTimeout(r, 1800));
-  assert.ok(!other.some((e) => e.type === 'ink_stale'), 'the showcase stays when another window comes to the front');
-  assert.match(made.ink.describe(), /note “a showcase card”/);
+  assert.ok(!other.some((e) => e.type === 'ink_stale' || e.type === 'ink_clear'), 'a window change takes nothing away');
+  assert.match(await draw.execute({ edit: [{ do: 'erase', part: 'p1' }] }, { toolCallId: 'd9' }), /Edited the drawing/);
   fs.rmSync(path.join(dir, 'front.json'));
   // Typing goes through the helper's fill (the same path as act_in_app), and asks first with the app and the text
   // (owner's rule); the helper gets the yes for that plan in that app.
@@ -181,25 +179,25 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   await new Promise((r) => setTimeout(r, 20));
   talk.abort();
   assert.equal(await cut, 'Stopped.');
-  assert.deepEqual(other.at(-1), { type: 'ink_clear' }, 'the overlay stops too, and what it drew goes');
+  assert.deepEqual(other.at(-1), { type: 'ink_stop' }, 'the overlay stops playing; what it drew stays');
   hold = false;
   // Cut off before it got to waiting: it stops at once instead of waiting out the timeout.
   const early = new AbortController(); early.abort();
   const t0 = Date.now();
   assert.equal(await draw.execute({ beats: [step('Click Scale.', 'Scale')] }, { toolCallId: 'd10', signal: early.signal }), 'Stopped.');
   assert.ok(Date.now() - t0 < 5000, 'no wait for the timeout');
-  // Regression: Stop while it was drawing diagrams (cards only, no screen marks) left them playing and on screen.
+  // Stop while it was drawing diagrams: the overlay stops playing them (ink_stop); what was drawn stays up.
   made.nextTurn();
   await draw.execute({ beats: [{ say: 'A diagram.', marks: [{ kind: 'note', text: 'diagram' }] }] }, { toolCallId: 'd11' });
   other.length = 0;
   made.ink.stop(true);
-  assert.deepEqual(other, [{ type: 'ink_clear' }], 'cancelling the request clears its cards and stops the overlay');
-  assert.equal(made.ink.describe(), '', 'nothing of it is left');
-  // Stopping only the voice after the answer is done keeps the cards, but still stops the overlay playing.
+  assert.deepEqual(other, [{ type: 'ink_stop' }], 'only playing stops');
+  assert.match(made.ink.describe(), /note “diagram”/, 'the diagram stays');
+  made.ink.cleared();
   await draw.execute({ beats: [{ say: 'Another.', marks: [{ kind: 'note', text: 'kept' }] }] }, { toolCallId: 'd12' });
   other.length = 0;
   made.ink.stop();
-  assert.deepEqual(other, [{ type: 'ink_clear', screen: true, stop: true }]);
+  assert.deepEqual(other, [{ type: 'ink_stop' }]);
   assert.match(made.ink.describe(), /note “kept”/);
   // Regression: a pinned card stays on screen through Esc, a window change and the next drawing, but the sidecar forgot
   // it, so the model didn't know it was there. It's remembered until its × (or an explicit clear edit).
@@ -210,43 +208,30 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
     assert.match(made.ink.describe(), /note “kept”/, 'Esc keeps a pinned card');
     made.nextTurn();
     await draw.execute({ beats: [{ say: 'New.', marks: [{ kind: 'note', text: 'new' }] }] }, { toolCallId: 'd12b' });
-    assert.match(made.ink.describe(), /note “kept”.*note “new”/, 'a new drawing replaces the rest, not the pinned card');
+    assert.match(made.ink.describe(), /note “kept”.*note “new”/, 'a new drawing adds to it');
+    made.ink.cleared();
+    assert.match(made.ink.describe(), /^p\d+ note “kept”$/, 'Esc takes the rest, not the pinned card');
     made.ink.pinned(kept, false);
     made.ink.cleared();
     assert.equal(made.ink.describe(), '', 'unpinned, it goes with the rest');
   }
-  // Regression: "make everything" drew eight cards at once, which covered the screen. Only a few stay up; the model is
-  // told which closed, and what it lists as on screen is what's left.
+  // Ten cards at once: all ten stay (no cap closes the oldest; owner, 2026-11-26).
   made.nextTurn();
   const many = await draw.execute({ beats: 'abcdefghij'.split('').map((text) => ({ say: `Card ${text}.`, marks: [{ kind: 'note', text }] })) }, { toolCallId: 'd13' });
   assert.match(many, /Drew p\d+ note “a”, .*p\d+ note “j”\./, 'all ten are named as drawn');
-  assert.match(many, /Only 8 cards stay up at once, so the oldest closed as newer ones were drawn \(p\d+, p\d+\)\./);
-  assert.match(many, /On screen now: p\d+ note “c”, (p\d+ note “[d-i]”, ){6}p\d+ note “j”\./);
-  // A drawing that goes by itself (the setup showcase) keeps all of its cards.
-  made.nextTurn();
-  await made.ink.show('abcdefghij'.split('').map((text) => ({ say: `Card ${text}.`, marks: [{ kind: 'note', text }] })), 'showcase-2', { fade: 5 });
-  assert.match(made.ink.describe(), /note “a”.*note “j”/, 'the showcase keeps all ten cards');
-  // Regression (#113): asked to keep the 3D model up, the next drawing still took it away, and talking over that drawing
-  // took both. keep: true leaves the cards up; cancelling takes only what that request drew.
-  made.ink.clear(); made.nextTurn();
-  await draw.execute({ beats: [{ say: 'An atom.', marks: [{ kind: 'note', text: 'atom' }] }] }, { toolCallId: 'k1' });
-  made.nextTurn(); other.length = 0;
-  await draw.execute({ keep: true, beats: [{ say: 'A timeline.', marks: [{ kind: 'note', text: 'timeline' }] }] }, { toolCallId: 'k2' });
-  assert.ok(!other.some((e) => e.type === 'ink_clear' && !e.screen), 'keep clears only the screen marks');
-  assert.match(made.ink.describe(), /note “atom”.*note “timeline”/);
+  assert.doesNotMatch(many, /closed/);
+  assert.match(many, /On screen now: p\d+ note “a”, (p\d+ note “[b-i]”, ){8}p\d+ note “j”\./);
+  // Talking over a drawing that waits for a click: it stops playing (ink_stop); the cards from before stay.
   made.nextTurn(); hold = true; other.length = 0;
   const over = new AbortController();
-  const half = draw.execute({ keep: true, beats: [step('Click Scale.', 'Scale')] }, { toolCallId: 'k3', signal: over.signal });
+  const half = draw.execute({ beats: [step('Click Scale.', 'Scale')] }, { toolCallId: 'k3', signal: over.signal });
   while (!sent.some((e) => e.id === 'k3')) await new Promise((r) => setTimeout(r, 5));
   await new Promise((r) => setTimeout(r, 20));
   over.abort();
   assert.equal(await half, 'Stopped.');
   hold = false;
-  const cleared = other.at(-1);
-  assert.equal(cleared.type, 'ink_clear'); assert.equal(cleared.stop, true); assert.equal(cleared.screen, true);
-  assert.equal(cleared.parts.length, 1, 'only the cancelled drawing goes');
-  assert.match(made.ink.describe(), /note “atom”.*note “timeline”/, 'the kept cards stay');
-  assert.doesNotMatch(made.ink.describe(), /Scale/);
+  assert.deepEqual(other, [{ type: 'ink_stop' }]);
+  assert.match(made.ink.describe(), /note “a”.*note “j”/, 'the cards stay');
   console.log('draw tool tests: passed');
 }
 
@@ -263,89 +248,6 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   assert.equal(seen.at(-1)?.on, false, 'click-through released after a failed act');
 }
 
-// A drawing goes with the screen it was about: a click in its window that changes what it shows (the user's, reported by
-// the voice helper, or the agent's own), or one of its app's menu items. Cards too. Clicks elsewhere don't count.
-{
-  fs.writeFileSync(log, ''); if (fs.existsSync(path.join(dir, 'front.json'))) fs.rmSync(path.join(dir, 'front.json'));
-  const events = [], watching = [];
-  let hold = false;
-  const made = createTools({
-    allowActions: () => true, ask: async () => 'Allow', openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', speak: () => true,
-    watchClicks: (on) => watching.push(on),
-    ui: (m) => {
-      if (m.e?.type?.startsWith('ink_')) events.push(m.e.type);
-      if (m.e?.type !== 'draw') return;
-      setImmediate(() => { made.ink.started(m.e.id, m.e.seg); const last = m.e.beats.at(-1); if (last?.wait && !hold) setTimeout(() => made.ink.waitDone(m.e.id, last.n, 'clicked'), 5); });
-    },
-  });
-  const tool = (n) => made.tools.find((t) => t.name === n);
-  const graph = async () => { made.nextTurn(); events.length = 0; await tool('draw').execute({ beats: [{ say: 'Sales.', marks: [{ kind: 'graph', title: 'Sales', plots: [{ label: 's', points: [[1, 1], [2, 3]] }] }, { kind: 'ring', at: { text: 'Buy' } }] }] }, { toolCallId: `g${Math.random()}` }); };
-  await graph();
-  assert.equal(watching.at(-1), true, 'clicks are watched while a drawing is on a window');
-  made.ink.userClick({ x: 900, y: 300, role: 'AXLink', app: 'Safari', acts: true });
-  assert.match(made.ink.describe(), /graph “Sales”/, 'a click outside its window leaves it');
-  made.ink.userClick({ x: 300, y: 200, role: 'AXLink', app: 'TextEdit', acts: true });
-  assert.equal(made.ink.describe(), '', 'a link clicked in its window: all of it goes, the graph card too');
-  assert.deepEqual([events.at(-1), watching.at(-1)], ['ink_stale', false]);
-  await graph();
-  made.ink.userClick({ x: 40, y: 10, role: 'AXMenuItem', app: 'TextEdit', acts: true });
-  assert.equal(made.ink.describe(), '', "one of its app's menu items counts too");
-  await graph();
-  await tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'type', text: 'hi' }] }, { toolCallId: 'a1' });
-  assert.match(made.ink.describe(), /graph/, 'typing alone leaves it');
-  await tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'click_text', text: 'Next page' }] }, { toolCallId: 'a2' });
-  assert.equal(made.ink.describe(), '', "the agent's own click changes the screen too");
-  await graph();
-  // An app that doesn't exist, so the test never opens a real browser tab (it did, on every run): the drawing goes
-  // as soon as the open is attempted.
-  await tool('open').execute({ target: 'https://example.invalid-tld-roamies.test', app: 'NoSuchAppRoamiesTest' }).catch(() => {});
-  assert.equal(made.ink.describe(), '', 'so does opening a page');
-  // A walkthrough waiting for a click: that click is the step, not the screen going away.
-  made.nextTurn(); hold = true;
-  const walk = tool('draw').execute({ beats: [{ say: 'Click Format.', marks: [{ kind: 'target', at: { text: 'Format' } }], wait: 'click' }] }, { toolCallId: 'w1' });
-  for (let i = 0; i < 100 && !made.ink.describe(); i++) await new Promise((r) => setTimeout(r, 20));
-  made.ink.userClick({ x: 140, y: 112, role: 'AXButton', app: 'TextEdit', acts: true });
-  assert.match(made.ink.describe(), /target “Format”/, 'kept while it waits for the click');
-  made.ink.waitDone('w1', 1, 'clicked'); await walk;
-  // The page itself changing counts, however it happened: a click on something script-driven (no link or button) that
-  // then loads another page, keys or a swipe. Read as the browser's address, or the title in other apps.
-  const front = (w) => fs.writeFileSync(path.join(dir, 'front.json'), JSON.stringify({ id: 7, app: 'Brave Browser', bounds: [0, 0, 800, 600], ...w }));
-  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
-  // Gone within a few seconds (the helper is a separate process, slow on CI runners).
-  const gone = async () => { for (let i = 0; i < 50 && made.ink.describe(); i++) await settle(100); return made.ink.describe(); };
-  front({ title: 'Repo', url: 'https://github.com/a/b' });
-  await graph();
-  made.ink.userClick({ x: 300, y: 200, role: 'AXGroup', app: 'Brave Browser', acts: false });
-  await settle(2000);
-  assert.match(made.ink.describe(), /graph/, 'a click that changed nothing leaves it');
-  made.ink.userClick({ x: 300, y: 200, role: 'AXGroup', app: 'Brave Browser', acts: false });
-  front({ title: 'Repo', url: 'https://github.com/a/b/issues' });
-  assert.equal(await gone(), '', 'a script-driven click that loaded another page');
-  front({ title: 'Repo', url: 'https://github.com/a/b' });
-  await graph();
-  front({ title: 'Repo', url: 'https://github.com/a/b#readme' });
-  await settle(2500);
-  assert.match(made.ink.describe(), /graph/, 'a jump within the page is the same page');
-  front({ title: 'Other', url: 'https://example.com/' });
-  assert.equal(await gone(), '', 'another page with no click at all (keys, a swipe back)');
-  front({ app: 'Mail', title: '(3) Inbox' });
-  await graph();
-  front({ app: 'Mail', title: '(4) Inbox' });
-  await settle(2500);
-  assert.match(made.ink.describe(), /graph/, 'an unread count in the title is the same view');
-  front({ app: 'Mail', title: 'Sent' });
-  assert.equal(await gone(), '', 'another mailbox (a new title) is a new view');
-  // The page couldn't be read when it was drawn (a slow helper): the next look takes it as the start, so a later
-  // change still clears it instead of never counting.
-  front({ app: 'Mail', title: 'Inbox', slowFront: true }); // reading the page times out while it draws
-  await graph();
-  front({ app: 'Mail', title: 'Inbox' });
-  await settle(2500);
-  assert.match(made.ink.describe(), /graph/, 'still there');
-  front({ app: 'Mail', title: 'Drafts' });
-  assert.equal(await gone(), '', 'a change after a missed first read still clears it');
-  fs.rmSync(path.join(dir, 'front.json'));
-}
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('hands tests: passed');
 

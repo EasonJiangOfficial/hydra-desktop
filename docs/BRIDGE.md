@@ -5,6 +5,11 @@ app adds one object, so the web sidebar orb (Hydra PLAN U13) can mirror and driv
 screen can pair the Mac, sign in with Claude and ask for macOS permissions (version 3, W3 bridge v3). The page gets no other
 access to the app: every Tauri command is refused from this window.
 
+A Mac pairing change retires the running voice helper and drops any queued output from it. The shell acknowledges the
+reset even during onboarding. If voice was enabled, the shell starts a fresh helper with empty recognition and audio
+buffers. Older bundled helpers without take IDs can publish a transcript only after their replacement reports a new
+listening state. An unchanged pairing keeps the existing helper.
+
 ```ts
 type Perm = 'granted' | 'denied' | 'not_determined';
 type UiAction = { kind: 'navigate'; href: string } | { kind: 'openPanel'; param: string; value: string }
@@ -100,8 +105,8 @@ digits and dashes (6 to 20); the device key it is traded for goes to the Keychai
   (about 8 s) listens without the phrase. The pill beside the cursor shows only for a take from the talk keys.
 - Build 4: every wake listens at once, with no spoken greeting: a double clap, an orb tap, `wake()`, the panel or the
   menu bar plays the wake chime and opens a take within about 300 ms (it hears nothing for 8 s: Hydra stays awake and
-  idle, no error). The phrase's own take opens with the listen chime. Chimes play in the Mac's voice helper, so
-  mute-while-listening never silences them: the listen chime only for a take the owner started (clap, phrase, talk
+  idle, no error). The phrase's own take opens with the listen chime. Chimes play in the Mac's voice helper: the
+  listen chime only for a take the owner started (clap, phrase, talk
   keys, an orb tap), never for an auto-listen follow-up, an area snap or barge-in. Nothing else makes a sound unless
   the owner caused it (heard, the sleep word, the end of his own tool turn, the sound switch, the pen snap).
 - Build 4: while a spoken turn works (thinking or running tools) a soft pending sound loops (2.4 s, quiet), fading in
@@ -121,8 +126,8 @@ digits and dashes (6 to 20); the device key it is traded for goes to the Keychai
   answers it. After 60 s with no answer Hydra says "I didn't hear a yes, so I skipped opening it." and the tool gets a
   no. A turn that ends without an answer says why in one short line, on screen always and aloud in a spoken turn.
 - Hydra's voice on the Mac is Fish through `/api/voice/tts` (device key), played by the voice helper in the same
-  voice-processing engine as the mic (the echo canceller's reference), with other audio never ducked and never muted
-  by mute-while-listening.
+  voice-processing engine as the mic (the echo canceller's reference), and Hydra never mutes the Mac. With Interrupt by
+  talking on, that engine's echo cancellation turns other apps down while Hydra talks and while the owner answers.
 - `reply.text` is only the final answer (words before a tool are left out), without emote tags like `[wave]`.
 
 `wake` is additive: `state` keeps its four values, so a page that reads only `state` works as before. A page that

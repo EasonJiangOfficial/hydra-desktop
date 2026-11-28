@@ -32,12 +32,32 @@
 // Offline or refused between turns: it backs off (1 s up to a minute), never a busy loop.
 import { DANGER, delay, waitApproval } from './hydramcp.mjs';
 import { agentEvents } from './agentstream.mjs';
+import { retryGate } from './voiceturn.mjs';
 // The server's shapes and limits (src/lib/agent/relay-schema.ts, copied verbatim).
 import { z } from 'zod';
 import fs from 'node:fs';
-import { ADDED_PREFIX, LIMITS, localTurnSchema, relayEventSchema, scopeSchema } from './relayschema.mjs';
-/** E2: this build sends a structured deletion tag on every relay approval (POST /api/agent/relay/approval). */
-export const APPROVE_CAPS = Object.freeze({ approveAllDeletionTags: 1 });
+import { randomUUID } from 'node:crypto';
+import { ADDED_PREFIX, LIMITS, localTurnSchema, relayEventSchema, routineCallSchema, scopeSchema } from './relayschema.mjs';
+/** A3: a /relay/next turn the server tagged hard "money", at the top level (hard: "money") or in its input
+ *  ({text, hard: "money"}): the Mac treats every action in it as a money action (relay-schema relaySubturnSchema hard). */
+export const moneyTurn = (turn) => turn?.hard === 'money' || turn?.input?.hard === 'money';
+/** E2: this build sends a structured deletion tag on every relay approval (POST /api/agent/relay/approval); A3
+ *  (relay-schema ceecb0e): and its hard verdict on every one ("money", "credential" or "none"): hardTags. */
+export const APPROVE_CAPS = Object.freeze({ approveAllDeletionTags: 1, hardTags: 1 });
+/** A relay ask's words as the server judges them (round 6): a label the Mac clicks, chooses or stops at is quoted as a
+ *  name ("\"Payments\": clicked", which the server's stripLabels drops), unless the Mac's own money words flag it
+ *  (moneyStop: then it stays "click \"Pay now\"", for the server's word layer). The app's name is quoted too (an app
+ *  called "Pay" or "Bank"). The Mac's own boilerplate carries no money or credential word (test/hardlimits6). */
+export const relayWords = (summary) => {
+  const keep = (l) => { try { return moneyStop(JSON.parse(l)); } catch { return true; } };
+  const Q = String.raw`("(?:[^"\\]|\\.)*")`;
+  return String(summary ?? '')
+    .replace(/^In (.+?), every step I'd take:/, (_m, app) => `In ${JSON.stringify(app)}, every step I'd take:`)
+    .replace(new RegExp(String.raw`^(\d+)\. (click|choose) ${Q}(?=( near | in |$))`, 'gm'), (m, n, verb, l) => (keep(l) ? m : `${n}. ${l}: ${verb === 'click' ? 'clicked' : 'chosen'}`))
+    .replace(new RegExp(String.raw`^(\d+)\. (click|focus) control (\d+) \(${Q}\)$`, 'gm'), (m, n, verb, id, l) => (keep(l) ? m : `${n}. control ${id} (${l}): ${verb === 'click' ? 'clicked' : 'focused'}`))
+    .replace(new RegExp(String.raw`^(Click|Choose) ${Q} in (.+?)\? `, 'gm'), (m, verb, l, app) => (keep(l) ? m : `${l} in ${JSON.stringify(app)}: ${verb === 'Click' ? 'click' : 'choice'} it? `))
+    .replace(new RegExp(String.raw`^That spot is ${Q} in (.+?): `, 'gm'), (m, l, app) => (keep(l) ? m : `That spot shows ${l} in ${JSON.stringify(app)}: `));
+};
 /**
  * A relay turn's ask (W3 contract-fixes 6): a yes/no becomes a server approval the owner answers on any surface
  * (approve, below); 'yes' only when he approved. A typed question has nobody to answer it on this Mac: no answer.
@@ -47,10 +67,38 @@ export const APPROVE_CAPS = Object.freeze({ approveAllDeletionTags: 1 });
 export const askAsApproval = (approve, log = () => {}) => async (opts) => {
   if (!opts?.choices) { log('relay_ask', { typed: true }); return null; }
   const summary = String(opts.placeholder ?? opts.prompt ?? '').trim();
-  const deletion = opts.deletion !== false;
-  return (await approve({ summary, danger: deletion || DANGER.test(summary), deletion })) === 'approved' ? 'yes' : null;
+  // A hard ask (M8) carries its own tag, hard: "money" (always waits for the owner) or "credential" (the server refuses
+  // it at once). It also goes as a deletion, so a server older than the tag still never lets Approve all skip it.
+  // Every ask carries the Mac's verdict (hardTags): "none" when it is neither money nor a credential.
+  const hard = hardTag(opts) ?? 'none';
+  const deletion = opts.deletion !== false || hard !== 'none';
+  // The summary goes as the Mac wrote it, but for the labels it clicked that its own money words call no money (round 6):
+  // those are quoted as clicked, which the server's word layer reads as a name, not a click ("Payments", "Payroll",
+  // "Orders" in a nav bar). A label the Mac's money words do flag ("Pay now", "Transfer") keeps its click word, so the
+  // server still sees a money label the Mac's verdict missed. danger: the ask's tag, or a danger word outside the
+  // quoted labels and names.
+  const sent = hard === 'none' ? relayWords(summary) : summary; // a hard ask waits or is refused whatever its words
+  const answer = await approve({ summary: sent, danger: deletion || DANGER.test(sent.replace(/"(?:[^"\\]|\\.)*"/g, '""')), deletion, hard });
+  // The server refused it (a credential: typing a password, key, code or card, a vault or a secret file): not done,
+  // and said so, never retried as a plain no.
+  if (answer === 'refused') throw new Error(`Blocked for safety: ${NO_CREDENTIALS}`);
+  return answer === 'approved' ? 'yes' : null;
 };
-import { SAFE, checkMcpCall } from './safety.mjs';
+import { NO_CREDENTIALS, SAFE, checkMcpCall, hardTag, redactArgs } from './safety.mjs';
+import { moneyStop } from './hardlimits-core.mjs';
+/** A money turn's Mac tools (A3, moneyTurn): every one that acts asks first, as a money ask the owner answers, even one
+ *  that would run unasked in any other turn (open a link, write a new file, hide an app). reads: the tools that only
+ *  look. Tools that ask for every plan themselves (act_in_app, its asks are money in this turn) are left as they are. */
+export function moneyTools(tools, { money, ask, reads = new Set(), asksItself = new Set(['act_in_app']), no = (n) => `The owner said no, so ${n} didn't run.` }) {
+  if (!money) return tools;
+  return tools.map((t) => (reads.has(t.name) || asksItself.has(t.name) ? t : { ...t, execute: async (a, ctx) => {
+    let shown = '';
+    try { shown = JSON.stringify(redactArgs(t.name, a ?? {})); } catch { shown = ''; }
+    const q = `This request pays or moves money. ${t.name.replace(/_/g, ' ')}${shown && shown !== '{}' ? ` ${shown}` : ''}`.slice(0, LIMITS.confirmSummary);
+    if ((await ask({ placeholder: q, choices: ['Allow', "Don't allow"], always: true, deletion: true, pay: true }, ctx?.signal)) !== 'yes') throw new Error(no(t.name));
+    return t.execute(a, ctx);
+  } }));
+}
 
 const BACKOFF = [1000, 2000, 5000, 10_000, 30_000, 60_000];
 const RETRY = [500, 1000, 2000, 4000, 8000, 16_000];
@@ -101,6 +149,21 @@ export function snakeUsage(u) {
   for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
   return Object.keys(out).length ? out : undefined;
 }
+/** One opaque audit ID for the runtime's start, execution, confirmation and finish of a call. */
+export function routineCallIdentity(turn) {
+  if (turn.routineCallEvidence !== true || turn.surface !== 'routine') return undefined;
+  const calls = new Map();
+  return (invocationId) => {
+    if (typeof invocationId !== 'string' || !invocationId) return undefined;
+    if (!calls.has(invocationId)) {
+      const origin = routineCallSchema.safeParse({ turnId: turn.id, claimId: turn.claimId, callId: randomUUID() });
+      if (!origin.success) return undefined;
+      calls.set(invocationId, origin.data);
+    }
+    return calls.get(invocationId);
+  };
+}
+
 /** One event as the server takes it: a list (text is split), or [] when it can't be sent. */
 export function cleanEvent(ev) {
   let e;
@@ -116,11 +179,13 @@ export function cleanEvent(ev) {
     }
     case 'tool': e = { type: 'tool', name: str(ev.name, LIMITS.toolName) || 'tool', status: ev.status, summary: str(ev.summary, LIMITS.toolSummary) }; break;
     case 'ui': e = { type: 'ui', action: ev.action }; break;
+    case 'model': e = { ...ev }; break;
     case 'confirm': e = { type: 'confirm', id: ev.id, summary: str(ev.summary, LIMITS.confirmSummary).trim() || 'Needs your yes.', danger: ev.danger === true }; break;
     case 'done': { const usage = snakeUsage(ev.usage); e = usage ? { type: 'done', usage } : { type: 'done' }; break; }
     case 'error': e = { type: 'error', message: str(ev.message, LIMITS.errorMessage) || 'The Mac could not finish.', ...(ev.code ? { code: str(ev.code, LIMITS.errorCode) } : {}) }; break;
     default: return [];
   }
+  if ((e.type === 'tool' || e.type === 'confirm') && ev.callId !== undefined) e.callId = ev.callId;
   return relayEventSchema.safeParse(e).success ? [e] : [];
 }
 
@@ -198,13 +263,14 @@ export function askSummary(app, action, input, max = LIMITS.confirmSummary) {
 }
 
 /**
- * One relay turn's Claude Code session to its real end (W5 contract 2, the 0191 done hold), shared by the Mac and the
- * server brain. prompt(text); each agent event to onEvent; the owner's additions (h.onInput) into the running session,
- * prefixed INPUT_PREFIX; onRound() once its stream ends (flush the reply), then h.done({usage}). A done Hydra held hands
+ * One relay turn's model session to its real end (W5 contract 2, the 0191 done hold), shared by the Mac and the
+ * server brain. prompt(text); each agent event to onEvent; additions (h.onInput) use INPUT_PREFIX and join the running
+ * session when supported. onRound() once its stream ends (flush the reply), then h.done({usage}). A done Hydra held hands
  * back his words: they go into the same session as the next prompt, each prefixed, and the turn ends with done again.
- * Without h.done (a runner called directly) it ends with a plain done event.
+ * Without h.done (a runner called directly) it ends with a plain done event. modelRetries opts the Mac into tracking
+ * and capping retries, with a signal scoped to each prompt so giving up does not Stop the relay turn itself.
  */
-export async function relaySession({ agent, text, h, onEvent = () => {}, onRound = () => {} }) {
+export async function relaySession({ agent, text, h, modelRetries, onEvent = () => {}, onRound = () => {} }) {
   const { emit, signal, onInput = () => {}, done } = h;
   const usage = {};
   let prompt = text, again = 0;
@@ -218,21 +284,53 @@ export async function relaySession({ agent, text, h, onEvent = () => {}, onRound
   // R11-2: words the session took (so Hydra counts them seen) but ended before answering (max turns, an error).
   const left = () => (typeof agent.unanswered === 'function' ? agent.unanswered() : []);
   for (;;) {
-    const stream = agent.prompt(prompt);
-    onInput((t) => agent.addInput(`${INPUT_PREFIX}${t}`));
-    let cut = false;
+    if (signal?.aborted) throw new Error('Stopped.');
+    const retries = modelRetries && retryGate();
+    const runCtrl = retries && new AbortController();
+    if (runCtrl) agent.setSignal(signal ? AbortSignal.any([runCtrl.signal, signal]) : runCtrl.signal);
+    let cut = false, retryEnd = null, modelBusy = false;
+    const closeModelTool = () => {
+      if (!modelBusy) return;
+      modelBusy = false;
+      emit({ type: 'tool', name: 'model', status: 'done', summary: 'Model retry ended' });
+    };
     // Whether this run's own prompt got its answer: Claude Code says (answered()); another agent knows only max turns.
     const answered = () => (typeof agent.answered === 'function' ? agent.answered() : !cut);
     try {
+      const stream = agent.prompt(prompt);
+      onInput((t) => typeof agent.addInput === 'function' ? agent.addInput(`${INPUT_PREFIX}${t}`) : false);
       for await (const e of agentEvents(stream)) {
+        if (retries && e.type === 'retry') {
+          const { id, provider, log } = modelRetries;
+          log('relay_retry', { id, reason: e.reason, attempt: e.attempt, delayMs: e.delayMs });
+          if (runCtrl.signal.aborted || signal?.aborted) continue;
+          const action = retries.on(e);
+          if (action === 'announce') {
+            modelBusy = true;
+            emit({ type: 'tool', name: 'model', status: 'start', summary: `Model busy (${retries.reasonWords}), retrying` });
+          } else if (action === 'give_up') {
+            retryEnd = new Error(retries.message(provider));
+            runCtrl.abort();
+          }
+          continue;
+        }
+        if (retryEnd) continue;
+        if (e.type === 'error') throw e.error ?? new Error('The model could not finish.');
+        if (e.type === 'text_delta' && e.text) closeModelTool();
         if (e.type === 'agent_done') for (const [k, v] of Object.entries(e.totalUsage ?? {})) if (Number.isFinite(v)) usage[k] = (usage[k] ?? 0) + v;
         if (e.type === 'max_turns') cut = true;
         onEvent(e);
       }
+      if (retryEnd) throw retryEnd;
     } catch (e) {
       cut = true;
-      if (signal?.aborted || ((!carried || answered()) && !left().length)) throw e;
-      throw Object.assign(new Error(`${String(e?.message ?? e).slice(0, 400)} What you added while I worked was not answered. Say it again.`), e?.code ? { code: e.code } : {});
+      if (retries && signal?.aborted) throw new Error('Stopped.');
+      const failure = retryEnd ?? e;
+      if (signal?.aborted || ((!carried || answered()) && !left().length)) throw failure;
+      throw Object.assign(new Error(`${String(failure?.message ?? failure).slice(0, 400)} What you added while I worked was not answered. Say it again.`), failure?.code ? { code: failure.code } : {});
+    } finally {
+      if (runCtrl) agent.setSignal(signal);
+      closeModelTool();
     }
     if (signal?.aborted) throw new Error('Stopped.');
     onRound();
@@ -288,6 +386,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       const t0 = Date.now();
       try {
         const r = await api.req(`/api/agent/relay/next?wait=${waitSecs}&slot=${slot}`, { signal, timeout: (waitSecs + 15) * 1000 });
+        if (signal.aborted) break;
         if (r.status === 204) {
           fails = 0; onAuth(true);
           // A server that answers at once instead of holding the poll: wait a little anyway.
@@ -300,6 +399,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
           throw Object.assign(new Error(`relay ${r.status}`), { wait: r.status === 429 ? retryAfterMs(r, null) : null });
         }
         const j = await r.json().catch(() => null);
+        if (signal.aborted) break;
         fails = 0; onAuth(true);
         if (j?.turn?.id) await serve(j.turn, signal, slot);
       } catch (e) {
@@ -339,9 +439,9 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
     let closed = false, posting = Promise.resolve(), timer = null, lost = null, sent = 0;
     // Additions while the turn runs: seen is the highest seq handed to the runner (acknowledged in the next post);
     // waiting holds the ones that came before the runner asked for them.
-    // A runner whose session has ended answers false (ClaudeCodeAgent.addInput): the words wait for done().
+    // When a runner can't add words to its active session, it answers false and the words wait for done().
     let seen = 0, onInput = null;
-    const waiting = [];
+    const waiting = [], additions = [];
     const deliver = (i) => {
       let took = false;
       try { took = onInput(i.text) !== false; } catch (e) { log('relay_input', { id: turn.id, error: String(e?.message ?? e).slice(0, 120) }); }
@@ -351,7 +451,12 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       return true;
     };
     const takeInputs = (answer) => {
-      for (const i of newInputs(answer, Math.max(seen, waiting.at(-1)?.seq ?? 0))) {
+      if (sub) return;
+      const batch = newInputs(answer, Math.max(seen, waiting.at(-1)?.seq ?? 0));
+      // Record the whole authenticated batch before handing any additions to the running model. It may call a tool
+      // from an addition immediately, or leave the addition waiting for the next round.
+      for (const { text } of batch) additions.push(text);
+      for (const i of batch) {
         if (waiting.length || !onInput || closed || !deliver(i)) waiting.push(i);
       }
     };
@@ -413,8 +518,11 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
     // 'expired'. Anything that goes wrong is not a yes. deletion (E2): the ask's structured tag, sent so the server's
     // Approve all never skips a deletion; an ask that doesn't say is a deletion. approveAllDeletionTags: 1 declares
     // that this build tags every ask (APPROVE_CAPS).
-    const approve = async ({ summary, danger = true, deletion = true } = {}) => {
+    const approve = async ({ summary, danger = true, deletion = true, hard } = {}) => {
       if (lost || closed || turnCtrl.signal.aborted) return 'expired';
+      // A3 (relay-schema ceecb0e): a turn tagged hard "money" (top level or in its input) is a money turn: every ask in
+      // it is a money ask, which always waits for the owner (a credential ask stays a credential).
+      if (moneyTurn(turn) && hard !== 'credential') { hard = 'money'; danger = true; deletion = true; }
       // Never cut (tenth review R10-1): a yes must cover only what was shown. A question longer than the server takes
       // isn't asked there at all; the owner is told to ask on the Mac, where it shows whole.
       const s = String(summary ?? '').trim() || 'Needs your yes.';
@@ -427,14 +535,19 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       // 429: not made yet, so asked again after its Retry-After. A 5xx may have made it: never asked twice.
       for (let i = 0; ; i++) {
         try {
-          r = await api.req('/api/agent/relay/approval', { method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), summary: s, danger: !!danger, deletion: deletion !== false, ...APPROVE_CAPS }, signal: turnCtrl.signal, timeout: 20_000 });
+          r = await api.req('/api/agent/relay/approval', { method: 'POST', body: { turnId: turn.id, ...(claimId ? { claimId } : {}), summary: s, danger: !!danger, deletion: deletion !== false, hard: hard === 'money' || hard === 'credential' ? hard : 'none', ...APPROVE_CAPS }, signal: turnCtrl.signal, timeout: 20_000 });
         } catch { return 'expired'; }
         if (r.status !== 429 || i >= retry.length) break;
         await sleep(retryAfterMs(r, retry[i]), turnCtrl.signal).catch(() => {});
         if (lost || closed || turnCtrl.signal.aborted) return 'expired';
       }
       if (r.status === 409) { stop('stale_claim', 409); return 'expired'; }
-      const id = r.ok ? (await r.json().catch(() => null))?.id : null;
+      const body = r.ok || r.status === 403 ? await r.json().catch(() => null) : null;
+      // A3 hard limits: a credential ask is refused by the server, 403 {error: "refused"}: not done, and said so.
+      if (r.status === 403 && body?.error === 'refused') { log('relay_approval', { id: turn.id, refused: 'credential' }); return 'refused'; }
+      // An answer already given (an older server's 201 declined): a no, without waiting.
+      if (r.ok && body?.status === 'declined') { log('relay_approval', { id: turn.id, answer: 'declined' }); return 'declined'; }
+      const id = r.ok ? body?.id : null;
       if (typeof id !== 'string') { log('relay_approval', { id: turn.id, status: r.status }); return 'expired'; }
       emit({ type: 'confirm', id, summary: s, danger: !!danger });
       const answer = await waitFor(id, turnCtrl.signal);
@@ -461,7 +574,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
       await flush();
       const p = posting.then(() => post([]));
       posting = p;
-      return !!(await p) && !lost;
+      return (await p)?.status === 'claimed' && !lost && !closed;
     };
     // The runner's end (0191 done hold). [] once Hydra took the done (or the turn is over); else the owner's words
     // that came while it worked, which the runner answers in the same session before it calls done() again.
@@ -500,7 +613,7 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
     const inputs = (fn) => { onInput = fn; while (waiting.length && !closed && deliver(waiting[0])) waiting.shift(); };
     try {
       // deadline: when Hydra ends a live turn (its 280 s cap), so a tool that waits (ask_mac) can answer before it.
-      await runTurn(turn, { emit, signal: turnCtrl.signal, approve, alive, onInput: inputs, done, deadline: isLive ? t0 + liveCapMs : null });
+      await runTurn(turn, { emit, signal: turnCtrl.signal, approve, alive, onInput: inputs, ownerAdditions: () => additions.join('\n'), done, deadline: isLive ? t0 + liveCapMs : null, money: moneyTurn(turn) });
       if (!closed && !lost) {
         // A runner that ended without done(): its words, if Hydra held the end, have nobody to answer them. Say so.
         if ((await done()).length) emit(ADDITIONS_UNANSWERED);
@@ -548,19 +661,22 @@ export function createRelay({ api, runTurn, log = () => {}, sleep = delay, waitS
 export const LOCAL_QUIET_MS = 30 * 60_000;
 const USER_MAX = localTurnSchema.shape?.user?.maxLength ?? 8000;
 const REPLY_MAX = localTurnSchema.shape?.assistant?.maxLength ?? 32_000;
-export function createLocalSync({ api, log = () => {}, sleep = delay, retry = RETRY, quietMs = LOCAL_QUIET_MS, now = Date.now }) {
-  let thread = null, lastAt = 0, chain = Promise.resolve();
-  const current = () => (thread && now() - lastAt < quietMs ? thread : null);
+export function createLocalSync({ api, pairing = () => undefined, log = () => {}, sleep = delay, retry = RETRY, quietMs = LOCAL_QUIET_MS, now = Date.now }) {
+  let thread = null, threadPair, lastAt = 0, chain = Promise.resolve();
+  const current = () => (threadPair === pairing() && thread && now() - lastAt < quietMs ? thread : null);
   async function send(t) {
     const tid = current();
     let body = { user: t.user, assistant: t.assistant, ...(tid ? { threadId: tid } : {}), at: t.at };
     if (!localTurnSchema.safeParse(body).success) { log('relay_local', { dropped: 'invalid' }); return; }
     for (let i = 0; ; i++) {
+      if (t.pairBinding === null || t.pairBinding !== pairing()) return;
       let r = null;
-      try { r = await api.req('/api/agent/relay/local', { method: 'POST', body, timeout: 20_000 }); } catch (e) { if (e?.code === 'unpaired') return; }
+      try { r = await api.req('/api/agent/relay/local', { method: 'POST', body, timeout: 20_000, pairBinding: t.pairBinding }); }
+      catch (e) { if (e?.code === 'unpaired' || e?.code === 'pair_changed') return; }
       if (r?.ok) {
         const id = (await r.json().catch(() => null))?.threadId;
-        if (z.uuid().safeParse(id).success) thread = id;
+        if (t.pairBinding !== pairing()) return;
+        if (z.uuid().safeParse(id).success) { thread = id; threadPair = t.pairBinding; }
         lastAt = now();
         log('relay_local', { ok: true });
         return;
@@ -581,11 +697,11 @@ export function createLocalSync({ api, log = () => {}, sleep = delay, retry = RE
   return {
     /** The thread this Mac's turns go to now, or null (none yet, or 30 quiet minutes passed). */
     get threadId() { return current(); },
-    /** One finished turn: { user, assistant }. Returns a promise for tests; callers never wait on it. */
-    record({ user, assistant = '' } = {}) {
+    /** One finished turn and its pairing. Returns a promise for tests; callers never wait on it. */
+    record({ user, assistant = '', pairBinding = pairing() } = {}) {
       const u = String(user ?? '').trim().slice(0, USER_MAX);
       if (!u) return Promise.resolve();
-      const t = { user: u, assistant: String(assistant ?? '').trim().slice(0, REPLY_MAX), at: new Date(now()).toISOString() };
+      const t = { user: u, assistant: String(assistant ?? '').trim().slice(0, REPLY_MAX), at: new Date(now()).toISOString(), pairBinding };
       const p = chain.then(() => send(t)).catch((e) => log('relay_local', { error: String(e?.message ?? e).slice(0, 120) }));
       chain = p;
       return p;

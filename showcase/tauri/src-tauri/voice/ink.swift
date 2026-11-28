@@ -163,8 +163,6 @@ enum SnapCue {
     static func play() {
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         guard soundOn, let s = sound else { return }
-        // Output is muted while listening (a setting): lift it just for the chime.
-        OutputMute.lift(for: 0.2)
         s.stop(); s.play()
     }
 }

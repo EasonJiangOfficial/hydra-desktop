@@ -13,6 +13,7 @@ tauri-build = { version = "=2.7.5", features = [] }
 tauri = { version = "=2.12.6", features = ["tray-icon", "macos-private-api"] }
 serde_json = "=1.0.154"
 global-hotkey = "=0.10.0"
+percent-encoding = "=2.3.2"
 tauri-plugin-single-instance = "=2.5.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -20,6 +21,7 @@ block2 = "=0.6.2"
 objc2 = "=0.6.5"
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "WKFrameInfo", "WKNavigationAction", "WKNavigationDelegate", "WKWebView"] }
 objc2-service-management = { version = "=0.3.2", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+tempfile = "=3.27.0"
 
 # Linux: the overlay's input shape, clipboard and screenshots (GTK, the version Tauri uses), the pointer on X11,
 # and the desktop portal on Wayland. All three are already in Cargo.lock through Tauri and its plugins.

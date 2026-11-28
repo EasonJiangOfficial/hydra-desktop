@@ -5,12 +5,14 @@
 // in:  {type:'menu', id} {type:'answer', id, text} {type:'ui_ready'}
 // out: {type:'menu', items} {type:'ui', msg} {type:'overlays', ids}
 import { CONFIG_PATH, DATA_DIR, OLDER_DATA, ROAMIES_DIR } from './datadir.mjs';
+import { noSystemMute, MUTE_NOTICE } from './nosystemmute.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare, connectorTool } from './claudecode.mjs';
-import { HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, setCapabilities, showTool } from './hydramcp.mjs';
-import { askAsApproval, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from './relay.mjs';
+import { HYDRA_ORIGIN, createHydraTools, hydraApi, pairDevice, pairingBinding, setCapabilities, showTool } from './hydramcp.mjs';
+import { askAsApproval, askSummary, authStale, connectorGroup, connectorLevel, createLocalSync, createRelay, isSubturn, moneyTools, moneyTurn, relaySession, routineCallIdentity, toolFilter, turnPrompt } from './relay.mjs';
 import { avatarStyle, brainFor, CLAP_LEVELS, cleanWakePhrase, createSettingsWatch, gptRoute, hydraModelPick, wakePhraseFor } from './agentsettings.mjs';
-import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, approveAllSays, deletesCall, isYes, redactArgs } from './safety.mjs';
+import { BLOCK, SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, approveAllSays, credentialArgs, deletesCall, isYes, moneyCall, redactArgs } from './safety.mjs';
+import { credentialTurn } from './hardlimits-core.mjs';
 import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
 import { CATALOG_PROVIDERS, createCatalogs } from './catalogs.mjs';
@@ -21,7 +23,7 @@ import {
 } from '@kenkaiiii/gg-core';
 import { execFile, execFileSync, fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -48,8 +50,8 @@ import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, w
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { postDrawnNotes } from './notesync.mjs';
-import { ASK_DEADLINE_MS, addOnTo, afterHeld, askForTake, createSpokenTrack, endNote, noteToolFailure, overReply, ownTurn, pcmSecs, pendingWanted, phaseOf, retryText, runStart, startProgress, tagRun, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
+import { createNoteSync } from './notesync.mjs';
+import { ASK_DEADLINE_MS, addOnTo, afterHeld, askForTake, createSpokenTrack, endNote, noteToolFailure, overReply, ownTurn, pcmSecs, pendingWanted, phaseOf, retryGate, retryText, runStart, startProgress, startupCue, tagRun, trackAsk, unansweredNote, wakeActions, whileBusy } from './voiceturn.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, LISTEN_SECS, keepListening, listenWait } from './speech.mjs';
 import { FILLERS, createSpeaker, voiceProblemText, voiceWhy } from './speaker.mjs';
 import { LITE_BUDGET, LITE_TOOLS, LITE_TURNS, liteSystem } from './lite.mjs';
@@ -72,23 +74,34 @@ import { detailsText, explain } from './errors.mjs';
 import { aboutHydra } from './about.mjs';
 import { whatsNewOnStart } from './whatsnew.mjs';
 import { createMcp, createMcpTools } from './mcp.mjs';
+// RV: the phone's view of this Mac (remoteview.mjs) and the agent's gate for it (viewgate.mjs). Lazy: config, the
+// device key and the log are read when used.
+import { createViewGate } from './viewgate.mjs';
+import { createRemoteView } from './remoteview.mjs';
+import { setHandsStep } from './tools.mjs';
+const viewGate = createViewGate({ onStop: () => onMenu('stop') });
+const remoteView = createRemoteView({ api: { req: (...a) => hydraHttp.req(...a) }, pairing: () => notePairing(), gate: viewGate, home: os.homedir(), macName: os.hostname().replace(/\.local$/, ''),
+  enabled: () => process.platform === 'darwin' && !!process.env.ROAMIES_REMOTE && !!config.phoneView, onStop: () => viewGate.stop(), agentBusy: () => busy,
+  log: (k, d) => { logLine(k, d); if (d.event === 'live' || d.event === 'end' || d.event === 'peer') menu(); } });
+setHandsStep((ev) => viewGate.step(ev));
+let rvTurn = null; // RV: the local turn, busy for the phone view until it ends (relay turns: relayTurn)
 import { skillExists, deleteSkill, listSkills, readSkill, saveSkill, skillIndex } from './skills.mjs';
 import { getJob, jobBrief, jobsText, listJobs, markRun, nextJobDue, removeJob, takeDueJobs, updateJob } from './jobs.mjs';
 import { lookLine, lookSeen } from './looknote.mjs';
 import { leanTools } from './lean.mjs';
 import { z } from 'zod';
+// Declared before any use: the raw file runs in a debug build without dist/ (sidecar.rs), where a later const threw.
+const MAC = process.platform === 'darwin';
 
 console.log = console.info = (...a) => console.error(...a);
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 // While the setup guide is open, Sidekick talks through it instead of the desktop overlay.
 let onboarding = false;
+let guideWindow = new AbortController();
 let focusBlock = null, focusTimer = null; // focus mode (below)
 let firedReminders = []; // [{ id, at }]: what went off lately, so "snooze" alone knows which (snooze.mjs)
 let syncInfo = { at: null, error: null }, syncing = null, syncSoonTimer = null, syncKey = null, syncAllowOnce = false; // memory sync (below)
 let intro = null; // the get-to-know-you chat, while it's on
-// The get-to-know-you chat runs in the guide window: its replies and voice go there, not to the desktop.
-// A reply's voice keeps going where it started, even after the chat ends mid-sentence; "stop" goes to both.
-const guideVoices = new Set();
 // 0 to 100: my voice and sounds (#136). A missing or broken value is full volume, never silence.
 const volumeNow = () => (Number.isFinite(Number(config.volume)) ? Math.max(0, Math.min(100, Math.round(Number(config.volume)))) : 100);
 let pendingVoice = null, answerSaid = false, pendingSent = false, phaseSent = '', approvalOpen = 0, emptyTake = false; // pendingNow() below
@@ -96,6 +109,8 @@ let pendingVoice = null, answerSaid = false, pendingSent = false, phaseSent = ''
 // foldWaitOwn: it's the owner's own (ownTurn), the only kind that gets the pending sound meanwhile.
 let foldWait = null, foldWaitOwn = false;
 const ui = (msg) => {
+  const request = msg.kind === 'agent' ? localRequestPair.getStore() : null;
+  if (request?.guide && (request.guide !== intro || request.pairingSignal.aborted)) return;
   // Muted from the Hydra window (bridge setMuted): the voice plays silently until unmuted, whatever the volume says.
   if (msg.kind === 'volume' && voiceMuted) msg = { ...msg, v: 0 };
   trackReply(msg);
@@ -103,15 +118,18 @@ const ui = (msg) => {
   if (msg.kind === 'volume') nativeSpeech({ volume: msg.v });
   if (msg.kind === 'speech') {
     if (msg.stop) { send({ type: 'onboard', msg }); nativeSpeech(msg); return send({ type: 'ui', msg }); }
-    if (guideVoices.has(msg.id)) { if (msg.end) guideVoices.delete(msg.id); return send({ type: 'onboard', msg }); }
+    if (msg.guideEpoch) {
+      if (msg.guideEpoch === guideEpoch) send({ type: 'onboard', msg });
+      return;
+    }
     // How much of the reply has played (voiceturn.mjs): where a barge-in cut it off.
     if (msg.pcm) { heardTrack.audio(msg); if (msg.id === turnVoice?.id) turnProgress?.touch(pcmSecs(msg)); }
     nativeSpeech(msg);
   }
-  if (intro && msg.kind === 'agent') return send({ type: 'onboard', msg: { kind: 'chat', e: msg.e } });
+  if (intro && msg.kind === 'agent') return ob({ kind: 'chat', e: msg.e });
   send({ type: 'ui', msg });
 };
-const ob = (msg) => send({ type: 'onboard', msg });
+const ob = (msg) => send({ type: 'onboard', msg: msg.kind?.startsWith('chat') ? { ...msg, guideEpoch } : msg });
 // ---------- the Hydra window's bridge (hydra.rs, docs/BRIDGE.md v3) ----------
 // The reply being written and spoken goes to the web app's orb card as it streams (reply), as do muted and paused.
 const pushWeb = (msg) => send({ type: 'hydra_push', msg });
@@ -226,12 +244,13 @@ const DEFAULTS = {
   fallbacks: ['', ''], // backup models, in order, for when the default hits its usage limit (limits.mjs)
   efforts: {}, // how hard each model slot thinks: default, each heavy job, backup1, backup2 ('' = automatic, 'off', or a level)
   notch: 'off', // where I appear: 'off' (beside the cursor, default), 'drop' (the capsule) or 'spread' (a Mac's notch; see notchMode)
-  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, volume: 100, autoListen: true, listenEvery: false, listenSecs: 8, lite: false, wakeWord: true, setupVersion: 0, size: 'default', look: 'hydra', introDone: false,
+  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: false, volume: 100, autoListen: true, listenEvery: false, listenSecs: 8, lite: false, wakeWord: true, setupVersion: 0, size: 'default', look: 'hydra', introDone: false,
   replies: 'voice', // 'voice': spoken (Fish Audio, or the Mac's own voice until a Fish Audio key is added) as well as shown
   sleepWord: '', // Hydra's sleep word ('' is "Hydra, sleep"; power.mjs)
   clapSensitivity: 0.5, // the double-clap wake, 0 (only loud claps) to 1 (soft ones from across the room)
   hydraUrl: '', // the Hydra agent API (U13); '' until it exists (hydralink.mjs)
   speechLang: 'auto', // the language talking is recognised in (macOS): 'auto' follows the Mac's language list, or a locale like 'ar-SA'
+  phoneView: false, // RV: the phone may see and control this Mac (switched on once at the Mac, in the menu)
   tts: 'fish', // which one speaks: 'fish' (Fish Audio), 'gemini' or 'voicestudio' (the VoiceStudio app on this computer)
   studioSpeak: 'full', // how much the local (Mac) voice says out loud: 'short', 'medium' or 'full'
   studioVoices: {}, // look → its VoiceStudio voice (a saved profile id; none: the selected engine's default voice)
@@ -284,10 +303,14 @@ let shellInfo = null; // resolves the shell's reply to it: screens, tray, panel,
     delete config[one];
   }
 }
+// The startup sound: asked the moment the settings are read, before anything that can wait (the Keychain, sign-in
+// checks, a local model server, the catalogs), so a slow one never pushes it past the app's 6 s window (startup.rs).
+{ const cue = startupCue({ mac: MAC, sound: !!config.sound, volume: volumeNow() }); if (cue) send(cue); }
 // Hybrid models (route.mjs): while a heavy job runs on its own model, config.provider and config.model hold that model
 // and `defaultPick` holds the user's default. Only the default is ever saved.
 let routed = null, defaultPick = null;
 let turnWords = ''; // what they said this turn, verbatim: attached to every handoff (route, agents)
+let turnIntent = ''; // raw request for the connector guard, before display/system-line filtering
 const saveConfig = () => writeJson(CONFIG_PATH, routed && defaultPick ? { ...config, provider: defaultPick.provider, model: defaultPick.model } : config, { backup: true });
 
 // ---------- sleep and wake (power.mjs) ----------
@@ -297,7 +320,8 @@ const phraseOn = () => WAKE_OK && config.wakeWord !== false;
 const clapTalkOn = () => MAC && config.clapTalk !== false;
 let bargeUnavailable = false; // the voice helper found no echo cancellation: barge-in is off this session
 let clapCalibrating = false; // the panel's "Clap twice" is listening
-const bargeOn = () => MAC && config.barge !== false && !bargeUnavailable;
+// Off unless turned on: the Mac's echo cancellation it needs turns other apps' sound down while Hydra talks (nosystemmute.mjs).
+const bargeOn = () => MAC && config.barge === true && !bargeUnavailable;
 // Where the orb lives (owner: "the voice agent is completely separate from the app, which shouldn't be the case unless I
 // detatch it"). Attached, the default: in the Hydra window (the web app draws it from the bridge) and the menu bar icon
 // shows the state while that window is hidden. Detached: the docked desktop orb. The web app (bridge), the tray menu,
@@ -432,7 +456,14 @@ hydraLink.load().catch(() => {});
 // Hydra answered 401 (the key was revoked) or 403 (a key without the relay scope, from a Mac paired before it) to the
 // relay, so the pairing is stale: setup() says unpaired and the web pairs this Mac again.
 let hydraKey = null, hydraKeyRead = false, hydraRevoked = false;
-const hydraHttp = hydraApi({ base: HYDRA_ORIGIN, getKey: async () => hydraKey });
+let pairingLife = new AbortController(), pairingChanges = Promise.resolve(), changingPairing = false;
+let guideEpoch = randomUUID();
+const notePairing = () => hydraRevoked ? null : pairingBinding(hydraKey);
+const localRequestPair = new AsyncLocalStorage();
+const hydraHttp = hydraApi({ base: HYDRA_ORIGIN, getKey: async () => {
+  const request = localRequestPair.getStore();
+  return request && (request.pairingSignal.aborted || !request.pairBinding || request.pairBinding !== notePairing()) ? null : hydraKey;
+} });
 const hydraTools = createHydraTools({ api: hydraHttp, log: (k, d) => logLine(k, d) });
 // Hydra's shared agent settings (W5 contract 1): wake phrase, sleep word, model and effort, read at start, on a change
 // push from the Hydra window (refreshSettings) and every 60 s.
@@ -440,13 +471,13 @@ const agentSettings = createSettingsWatch({ api: hydraHttp, log: (k, d) => logLi
 const approveAll = () => agentSettings.current.approveAll === true;
 const autoYes = (opts) => approveAllSays(approveAll(), opts);
 const relay = createRelay({
-  api: hydraHttp, runTurn: (t, h) => relayTurn(t, h), log: (k, d) => logLine(k, d),
+  api: hydraHttp, runTurn: (t, h) => relayTurn(t, { ...h, signal: AbortSignal.any([h.signal, pairingLife.signal]) }), log: (k, d) => logLine(k, d),
   // The turns this Mac stopped, kept across restarts so a stopped turn is never run twice.
   stateFile: path.join(DATA_DIR, 'relay-stopped.json'),
-  onAuth: (ok, status) => { const was = hydraRevoked; hydraRevoked = !ok && authStale(status); if (was !== hydraRevoked) { logLine('hydra_auth', { stale: hydraRevoked, status }); if (panelOpen) panel(); } },
+  onAuth: pairingAuth,
 });
 // The owner's own turns here (voice or typed) in his shared Hydra thread, so the web and phone see them too.
-const localSync = createLocalSync({ api: hydraHttp, log: (k, d) => logLine(k, d) });
+const localSync = createLocalSync({ api: hydraHttp, pairing: notePairing, log: (k, d) => logLine(k, d) });
 // A relay turn's asks (relayTurn below): set while its Mac tools and connector calls run, so ask() turns a yes/no into
 // a server approval the owner answers on any surface, and never shows the local Allow bubble.
 const relayAsk = new AsyncLocalStorage();
@@ -474,6 +505,11 @@ const speech = createSpeaker({
     say(voiceProblemText(what, tts().name), 'concerned');
   },
 });
+function startSpeech(inGuide = false) {
+  const request = localRequestPair.getStore();
+  if (request?.pairingSignal.aborted || (request?.guide && request.guide !== intro)) return null;
+  return speech.start(inGuide || request?.guide ? { guideEpoch } : undefined);
+}
 // The Gemini voice speaks with the AI's Gemini key unless it has one of its own: after that key is added, changed or
 // removed on the Model page, the voice follows.
 async function syncGeminiVoiceKey() {
@@ -567,7 +603,6 @@ const sendKeys = () => send({ type: 'keybinds', ...keys(), write: HOTKEYS_OK ? k
 // they bound to `roamies --talk`, which starts listening and sends on a second press or a pause.
 const talkHow = () => (HOTKEYS_OK ? `Hold ${talkWords().replace('+', ' and ')}` : 'Press your talk shortcut');
 const talkHowLong = () => (HOTKEYS_OK ? `${talkHow()} while you talk` : 'Press your talk shortcut, talk, then press it again (or just pause)');
-const MAC = process.platform === 'darwin';
 // The capsule (notch.js in the overlay) on every desktop; its notch style only with a notched screen (macOS, notch_screen).
 // 'off' keeps me beside the cursor.
 let notchScreen = false;
@@ -857,7 +892,15 @@ const userName = (() => {
 // ---------- tools ----------
 // The open request's voice, if replies are spoken: draw's beat lines are said on it, in order with the reply.
 let turnVoice = null;
-const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn } = createTools({
+// Every drawing goes to the owner's Notes page (notesync.mjs): queued in Data/notesync until Hydra has it. The overlay
+// marks its cards saved (ink_saved; note null: it will be once the Mac is online and paired).
+const noteSync = createNoteSync({
+  api: hydraHttp, dir: path.join(DATA_DIR, 'notesync'), pairing: notePairing, log: (d) => logLine('notes_sync', d),
+  onSaved: ({ parts, noteId }) => ui({ kind: 'agent', e: { type: 'ink_saved', parts, note: noteId } }),
+  onPending: ({ parts }) => ui({ kind: 'agent', e: { type: 'ink_saved', parts, note: null } }),
+  onDropped: ({ parts }) => ui({ kind: 'agent', e: { type: 'ink_saved', parts, note: null, failed: true } }),
+});
+const { tools: macTools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn } = createTools({
   focus: HANDS_OK ? { start: (m, t) => startFocus(m, t), stop: () => stopFocus() } : null,
   firedReminders: () => firedReminders,
   allowActions: () => config.allowActions, ui, ask, openUrl, userName,
@@ -870,10 +913,10 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
   showList: () => showList({ seconds: 20 }),
   fmtWhen: (ms) => fmtWhen(ms),
   onPlan: (args) => trail.plan(args),
-  watchClicks: (on) => send({ type: 'watch_clicks', on: !!on }),
-  onInkGone: (why) => { inkGone = true; logLine('ink_gone', { why }); },
   askShell: (msg) => shellCall(msg),
-  onNotes: (marks, id) => { if (hydraKey) postDrawnNotes(hydraHttp, marks, id); },
+  // Filed under the request's own number and titled with its own words: a relay turn's (phone, web, a routine), never
+  // the newest request's (they run side by side and share the tools' counter) or the last thing said at this Mac.
+  onDrawn: (seg) => { const r = relayAsk.getStore(); noteSync.drawn({ ...seg, turn: r ? r.turn ?? seg.turn : requestNo, words: r ? r.words ?? '' : turnWords, pairBinding: r ? r.pairBinding : requestPair }); },
   workdir: WORKDIR,
   pointScale: () => pointScale(config.model ?? ''),
   jobs: { changed: () => { scheduleJobs(); panel(); }, run: (id) => runJob(getJob(id), { now: true }) },
@@ -887,12 +930,14 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
     return c?.accessToken ? { apiKey: c.accessToken, baseUrl: c.baseUrl } : null;
   },
 });
+// RV: while the owner controls from the phone, every Mac tool waits (viewgate.mjs); while a view is live, each sends a caption.
+const tools = macTools.map((t) => viewGate.wrap(t));
 // The app's own manual, read when they ask about Roamies rather than sent with every request.
 tools.push({
   name: 'about_roamies',
   description: 'How Hydra Desktop works: where it lives, its menus, the panel and each settings page, updates, what to do when something is not working, and who made it. Call it before answering a question about the app.',
   parameters: z.object({}),
-  execute: async () => aboutHydra({ name: lookName(), mac: MAC, snap: SNAP_OK, voice: VOICE_OK, hotkeys: HOTKEYS_OK, wake: VOICE_OK && WAKE_OK }),
+  execute: async () => aboutHydra({ name: lookName(), mac: MAC, snap: SNAP_OK, voice: VOICE_OK, hotkeys: HOTKEYS_OK, wake: VOICE_OK && WAKE_OK, barge: bargeOn() }),
 });
 // Background agents (agents.mjs): each runs in its own process on the model picked when it starts.
 let turnImage = null; // the picture sent with the request being answered, for send_agent's "snap"
@@ -920,6 +965,7 @@ tools.push(...createMcpTools({
   keyStore: MAC ? 'Keychain' : LINUX ? 'keyring' : 'Windows key store',
 }));
 let requestNo = 0; // the request being answered (nextTurn), for holdAfterLaunch
+let requestPair = null;
 holdAfterLaunch(tools, () => requestNo);
 leanTools(tools); // short schemas for the model (lean.mjs)
 
@@ -1238,10 +1284,13 @@ let credsBaseUrl;
 // clicked while it works is never a cancel (owner: "speech added while Hydra thinks is added onto the prompt, never
 // cancelled"): words alone join the running turn, the rest is the next request. Only Stop and sleep end a turn.
 let queued = 0;
-function enqueue(text, { interrupt = false, image = null, note = '', byVoice = false, listenAfter = false, news = null } = {}) {
-  if (interrupt && busy && !image && addOn(text)) return running;
+function enqueue(text, { interrupt = false, image = null, note = '', byVoice = false, listenAfter = false, news = null, pairBinding = notePairing(), pairingSignal = pairingLife.signal, retry = null, guide = null } = {}) {
+  if (!pairingSignal.aborted && interrupt && busy && !image && addOn(text, pairBinding)) return running;
   queued++;
-  running = running.then(() => prompt(text, image, note, byVoice, news, listenAfter)).catch((e) => console.error('prompt', e))
+  running = running.then(() => localRequestPair.run({ pairBinding, pairingSignal, guide }, () => {
+    if (retry && !pairingSignal.aborted && pairBinding === notePairing()) retryInfo = retry;
+    return prompt(text, image, note, byVoice, news, listenAfter, pairBinding, pairingSignal);
+  })).catch((e) => console.error('prompt', e))
     .finally(() => { if (--queued === 0) maybeCompact(); });
   return running;
 }
@@ -1262,10 +1311,11 @@ async function playTour() {
 // along (each beat as it starts, done when drawn) and comes back once every card is gone: faded 2.5 s after the end,
 // closed, cleared with Esc, or the screen changed.
 let showcase = null, showcases = 0;
+const isShowcase = (id) => String(id).startsWith('showcase-'); // its drawings only: clearing it never takes the owner's
 async function playShowcase() {
   if (busy) return ob({ kind: 'showcase', phase: 'failed' });
   endShowcase(null);
-  ink.clear(); // a replay starts clean, even while the last one is still fading
+  ink.clear(isShowcase); // a replay starts clean, even while the last one is still fading (the owner's drawings stay)
   const me = showcase = { id: `showcase-${++showcases}`, watch: null, drawn: false };
   const voice = VOICE_ON() ? speech.start() : null;
   turnVoice = voice;
@@ -1285,11 +1335,11 @@ function showcaseDrawn() {
   ob({ kind: 'showcase', phase: 'done' });
   const s = showcase;
   s.drawn = true;
-  s.watch = setInterval(() => { if (!ink.describe()) endShowcase('gone'); }, 400);
+  s.watch = setInterval(() => { if (!ink.up(isShowcase)) endShowcase('gone'); }, 400);
 }
 // Its web card's site icons, fetched when the step opens (they're cached), so the first card isn't held up by them.
 function warmShowcase() { for (const b of showcaseBeats(userName)) for (const m of b.marks) for (const s of m.sources ?? []) if (checkDrawAction({ kind: 'favicon', url: s.url }).level === SAFE) faviconFor(s.url).catch(() => {}); }
-function stopShowcase() { if (!showcase) return; endShowcase('gone'); ink.clear(); }
+function stopShowcase() { if (!showcase) return; endShowcase('gone'); ink.clear(isShowcase); }
 // A next-step button on a drawing: ask sends its words as a new request; open and copy are checked again first.
 function onInkButton(part) {
   const a = ink.button(part);
@@ -1416,24 +1466,30 @@ async function sideRoute() {
   return { provider: config.provider, model: config.model, cc: await claudeCodeRoute(), credsFor: (m) => credsFor(config.provider, m), cwd: WORKDIR, chatThinking: CHAT_THINKING };
 }
 // Owner's rule: a memory change asks (store.mjs learnFactsAsked shows each fact and what it replaces).
-const memoryYes = async (question) => isYes(await ask({ placeholder: question, choices: ['Remember', "Don't remember"], always: true }));
-async function learnFacts(facts) {
-  const added = await learnFactsAsked(facts, memoryYes);
+async function memoryYes(question, signal) {
+  return isYes(await ask({ placeholder: question, choices: ['Remember', "Don't remember"], always: true, ...(signal ? { guideEpoch } : {}) }, signal));
+}
+async function learnFacts(facts, signal) {
+  const added = await learnFactsAsked(facts, (question) => memoryYes(question, signal), signal);
   if (added.length) menu();
   return added;
 }
-async function memoryPass(s, why) {
+async function memoryPass(s, why, signal) {
   const turns = transcript(s.messages.filter((m) => !isSummary(m)), userName, stripNote);
   if (!turns.trim() || !config.model) return [];
   const t0 = Date.now();
   try {
     const facts = liveFacts();
-    const { text, model } = await oneShot({ ...(await sideRoute()), system: memoryPrompt(userName), text: memoryInput({ facts, turns }) });
+    const route = await sideRoute();
+    if (signal?.aborted) return [];
+    const { text, model } = await oneShot({ ...route, system: memoryPrompt(userName), text: memoryInput({ facts, turns }), signal });
+    if (signal?.aborted) return [];
     const out = parseBrain(text, { knownIds: facts.map((f) => f.id) });
-    const learned = await learnFacts(out.facts);
+    const learned = await learnFacts(out.facts, signal);
     logLine('memory', { why, session: s.id, model, ms: Date.now() - t0, facts: learned.length, replaced: out.facts.filter((f) => f.replaces).length });
     return learned;
   } catch (e) {
+    if (signal?.aborted) return [];
     logLine('memory_failed', { why, session: s.id, ms: Date.now() - t0, error: String(e?.message ?? e).slice(0, 300) });
     return [];
   }
@@ -1537,11 +1593,11 @@ async function lessonPass(r, correction) {
 }
 
 /** Starts a clean conversation; the one ending gets a memory pass (`why` names it in the log). */
-function freshSession(why) {
+function freshSession(why, signal) {
   const old = session;
   session = newSession(config.provider, config.model); liveBlocks.clear(); agent = null; pendingFold = null; lastInput = null; quizDone = null; lastRequest = null; pruneSessions(); foldFails = 0;
   foldImages = null; // a fold's kept screenshots belong to the conversation it folded
-  return why && old?.messages.length ? memoryPass(old, why) : Promise.resolve([]);
+  return why && old?.messages.length ? memoryPass(old, why, signal) : Promise.resolve([]);
 }
 
 const toolT = new Map(); // tool call id → start time, for the activity log
@@ -1693,7 +1749,17 @@ const desk = newsDesk({
 const stir = desk.stir;
 // news: the agent ids this system turn passes on.
 const snoozeListenOn = () => VOICE_OK && !!config.voice && !!config.snoozeListen && voiceReady() && !intro;
-async function prompt(text, image = null, note = '', byVoice = false, news = null, listenAfter = false) {
+async function prompt(text, image = null, note = '', byVoice = false, news = null, listenAfter = false, drawPair = notePairing(), pairingSignal = pairingLife.signal) {
+  const guide = localRequestPair.getStore()?.guide;
+  if (guide && guide !== intro) return;
+  const pairingChanged = () => {
+    if (!pairingSignal.aborted && drawPair === notePairing()) return false;
+    ui({ kind: 'agent', e: { type: 'error', message: 'The device pairing changed. Ask again.' } });
+    return true;
+  };
+  if (pairingChanged()) return;
+  requestPair = drawPair;
+  turnIntent = String(text ?? '');
   // What they said, word for word, for the handoffs below (a heavy model, a background agent). System lines aren't theirs.
   turnWords = news || intro || String(text).startsWith('(') ? '' : String(text);
   nextMessageLearn(turnWords);
@@ -1718,25 +1784,26 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       const line = endNote({ how: wait.signal.reason === 'sleep' ? 'sleep' : 'stop' }).line;
       logLine('turn_note', { how: 'fold_wait_stopped' });
       ui({ kind: 'agent', e: { type: 'error', message: line } });
-      toThread(turnWords, line);
+      toThread(turnWords, line, drawPair);
       return;
     }
   }
   const notReady = await readyAgent();
+  if (pairingChanged()) return;
   // Told once its turn starts, however it goes: the corner and the live state still have the result, so no retries.
   desk.started(news);
   if (notReady) {
     // A retry ends here before its run, and the failed run is already out of the saved conversation: its words (the
     // request and what was added) go to the thread with why, as a fold-wait stop's do.
-    if (retrying) toThread(turnWords, notReady);
+    if (retrying) toThread(turnWords, notReady, drawPair);
     return say(notReady, 'concerned');
   }
-  busy = true; quiet = false; autoTurn = null;
+  busy = true; quiet = false; autoTurn = null; rvTurn?.done(); rvTurn = viewGate.turn(); // RV
   saidPending = true; clearTimeout(saidCap); stir();
   holdWake(true);
   if (!intro && !text.startsWith('(')) activity.asked(text);
   menu();
-  controller = new AbortController();
+  controller = new AbortController(); { const c = controller; rvTurn.signal.addEventListener('abort', () => c.abort(), { once: true }); } // RV: any Stop ends it
   agent.setSignal(controller.signal);
   // "Send an agent to…": the agents' corner hatches one instead of the thought cloud while the brief is written.
   const agentish = !intro && !news && wantsAgent(text);
@@ -1745,9 +1812,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   let hatching = agentish;
   const hatchOff = () => { if (hatching) { hatching = false; ui({ kind: 'agents', e: { type: 'hatch_off' } }); } };
   // Voice: the socket opens now, while the model thinks; sentences are spoken as soon as each is ready.
-  const voice = VOICE_ON() && !news ? speech.start() : (speech.stop(), null);
+  const voice = VOICE_ON() && !news ? startSpeech(!!intro) : (speech.stop(), null);
   turnVoice = voice;
-  if (voice && intro) guideVoices.add(voice.id);
   if (voice) heardTrack.start(voice.id);
   const spoken = voice && new SpeechText((t) => { heardTrack.line(t); voice.say(t); if (!answerSaid) { answerSaid = true; pendingNow(); } }, speech.localOpts?.());
   // A filler ("Let me check.") when no answer has started within 1.1 s (W5 contract 3), then a progress line ("Checking
@@ -1763,8 +1829,12 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     } });
   pendingVoice = own ? voice : null; answerSaid = false; pendingNow();
   let stalled = false, watch = null, learnAfter = false, rated = false, learn = null, hitMax = false, endLine = '';
+  let retryEnd = null;
+  let writing = null; // the beat timer while a tool call is being written
+  const doneWriting = () => { clearTimeout(writing); writing = null; };
   let runFrom = -1, runTag = null; // where this request's own messages start in the agent's history; its first one's tag
   let lastSeen = 0; // the newest call's whole prompt (cache log): tools, system prompt and chat
+  let drawTurn = null; // this request's number, so its drawings' note is ended even when it throws (finally)
   try {
     // Voice: a short first line before a tool ("On it, checking Paris.") is a beat: it's spoken, but not
     // shown, so the card or bubble starts with the answer. It shows after all if no tool follows.
@@ -1791,13 +1861,14 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       beatText += ev.text;
       if (beatText.length > 40 || /\n/.test(beatText)) releaseBeat(false); // too long to be a beat
     });
-    const turn = nextTurn();
+    const turn = drawTurn = nextTurn();
     requestNo = turn;
     logLine('request', { turn, model: config.model, chars: text.length, image: !!image, session: session?.id });
     const use = { t: Date.now(), model: config.model, calls: 0, tools: 0, in: 0, cacheRead: 0, cacheWrite: 0, out: 0 };
     learn = { ok: 0, bad: 0, saved: false }; // for the skill pass: tools that worked, ones that failed
     const soon = frontSoon; frontSoon = null;
-    frontNow = await frontWithin(soon && Date.now() - soon.at < 8000 ? soon.p : whereNow());
+    // Take over (RV plan section 7): the agent sees nothing the owner does from the phone, his front window included.
+    frontNow = viewGate.owner() ? '' : await frontWithin(soon && Date.now() - soon.at < 8000 && !soon.owner ? soon.p : whereNow());
     // The first spoken request of the day carries the morning briefing (brief.mjs).
     const brief = intro ? null : briefNote({ on: !!config.morningBrief, lastDay: config.briefDay, byVoice, todoist: !!config.briefTodoist, canRead: HANDS_OK, name: userName });
     if (brief) { config.briefDay = brief.day; saveConfig(); logLine('brief', { todoist: !!config.briefTodoist && HANDS_OK }); }
@@ -1819,9 +1890,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       : kept ? [{ type: 'text', text: sent }, ...keptNote] : sent;
     lastReply = ''; lastFailed = false; lastInput = null;
     let fresh = false; // the reply that matters is the last turn's text (after any tool calls)
-    let writing = null; // the beat timer while a tool call is being written
-    const doneWriting = () => { clearTimeout(writing); writing = null; };
-    // Nothing back from the model for a long while (a hung connection, Claude Code retrying out of sight): give up
+    // Nothing back from the model for a long while (a hung connection): give up
     // and say so, instead of waiting silently forever with every later request queued behind it.
     // An agent request's words wait until it's clear whether an agent launched: then they're dropped (the launch is
     // the reply); otherwise they show as usual. Once any agent launches, the rest of the request's words are dropped.
@@ -1832,13 +1901,36 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       if (h) { reply.push(h); lastReply = h; fresh = false; }
     };
     const ctl = controller;
+    const retries = retryGate();
+    let retryWaiting = false;
+    const providerLabel = PROVIDER_LABELS[config.provider] ?? 'The AI';
     watch = stallWatch(STALL_MS, () => { stalled = true; progress.pause(); logLine('stalled', { turn, ms: Date.now() - use.t }); ctl.abort(); });
     runFrom = agent.getMessages().length;
+    if (pairingChanged()) { voice?.abort(); return; }
     const run = agent.prompt(content);
     runTag = tagRun(agent.getMessages()[runFrom]); // found by its tag after the run (runStart): a hard trim moves it
     for await (const e of agentEvents(run)) {
+      if (e.type === 'retry') {
+        logLine('model_retry', { turn, reason: e.reason, attempt: e.attempt, max: e.maxAttempts, delayMs: e.delayMs });
+        if (ctl.signal.aborted) continue;
+        watch.event(e);
+        const action = retries.on(e);
+        if (e.silent !== true) { retryWaiting = true; progress.pause(); doneWriting(); }
+        if (action === 'announce') {
+          const line = "The model's busy, trying again.";
+          voice?.progress(line, 'retry');
+          ui({ kind: 'agent', e: { type: 'thinking', text: `${line} ` } });
+        } else if (action === 'give_up') {
+          retryEnd = new Error(retries.message(providerLabel));
+          watch.stop();
+          ctl.abort();
+        }
+        continue;
+      }
+      if (retryEnd) continue;
       watch.event(e);
       if (e.type === 'text_delta') {
+        if (retryWaiting) { retryWaiting = false; progress.resume(); }
         progress.touch();
         const t = echo.push(e.text);
         if (launched) continue;
@@ -1904,6 +1996,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
       else if (e.type === 'max_turns') hitMax = true;
       else if (e.type === 'error') throw e.error;
     }
+    if (retryEnd) throw retryEnd;
     doneWriting();
     if (hold != null) { hold += echo.flush(); release(); }
     { const t = echo.flush(); if (!launched) { reply.push(t); lastReply += t; } }
@@ -1915,8 +2008,9 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     const how = stalled ? 'stall' : cutOff ? (quiet ? 'sleep' : 'stop') : hitMax ? 'max_turns' : 'end';
     // Only their own requests: a system turn (news, the guide's chat) may end with nothing to say.
     const answered = !turnWords || (how === 'max_turns' ? !!lastReply.trim() : !!lastReply.trim() || launched || learn.ok > 0);
-    const note = endNote({ how, answered, message: stalled ? stallMessage() : '', voice: !!voice });
-    if (note.line && !cutOff) { const n = lastReply.trim() ? `\n${note.line}` : note.line; reply.push(n); lastReply += n; logLine('turn_note', { turn, how }); }
+    // Not `note`: that is the snap's note (the parameter), read above for an image turn (audit 06 A3).
+    const ending = endNote({ how, answered, message: stalled ? stallMessage() : '', voice: !!voice });
+    if (ending.line && !cutOff) { const n = lastReply.trim() ? `\n${ending.line}` : ending.line; reply.push(n); lastReply += n; logLine('turn_note', { turn, how }); }
     reply.finish();
     const held = cues?.flush(); if (held) showText(held);
     releaseBeat(false);
@@ -1924,7 +2018,6 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     if (controller.signal.aborted && !quiet) lastFailed = true;
     if (controller.signal.aborted) voice?.abort(); else { spoken?.flush(); voice?.end(); }
     trail.end();
-    ink.endRequest();
     // Asked by voice and answered with a question or a statement: the overlay opens the mic once the reply has been typed and said.
     // An interrupt keeps the take too. "After every reply" is not required.
     // A reminder nudge, with "Listen after reminders" on: the same hands-free listen, for "snooze 10 minutes".
@@ -1933,12 +2026,13 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     autoTurn = listen ? turn : null;
     rated = !stalled && !controller.signal.aborted && !!turnWords && learn.ok + learn.bad > 0;
     const rate = rated && learningOn();
-    if (note.line && cutOff) { endLine = note.line; logLine('turn_note', { turn, how }); }
-    ui({ kind: 'agent', e: note.line && cutOff ? { type: 'error', message: note.line, speech: (note.spoken && sayAside(note.line)) || (voice?.id ?? null) } : { type: 'done', speech: voice?.id ?? null, ...(listen ? { listen } : {}), ...(rate ? { rate } : {}) } });
+    if (ending.line && cutOff) { endLine = ending.line; logLine('turn_note', { turn, how }); }
+    ui({ kind: 'agent', e: ending.line && cutOff ? { type: 'error', message: ending.line, speech: (ending.spoken && sayAside(ending.line)) || (voice?.id ?? null) } : { type: 'done', speech: voice?.id ?? null, ...(listen ? { listen } : {}), ...(rate ? { rate } : {}) } });
     logUsage({ ...use, ms: Date.now() - use.t });
     learnAfter = !config.lite && shouldLearn({ on: config.learnSkills !== false, okTools: learn.ok, errors: learn.bad, aborted: stalled || controller.signal.aborted, system: !turnWords, saved: learn.saved });
     logLine('request_done', { turn, ms: Date.now() - use.t, calls: use.calls, tools: use.tools, in: use.in, cacheRead: use.cacheRead, cacheWrite: use.cacheWrite, out: use.out });
   } catch (err) {
+    progress.stop();
     lastFailed = true;
     hatchOff();
     // A live voice ends after the line that says why (below), so that line is said in it.
@@ -1964,18 +2058,22 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // screen always and aloud in a voice turn (never after Stop or the sleep word: those mean silence).
     if (retryNext) { if (!controller.signal.aborted) voice?.end(); ui({ kind: 'agent', e: { type: 'done', stopped: true } }); }
     else {
-      const how = stalled ? 'stall' : controller.signal.aborted ? (quiet ? 'sleep' : 'stop') : 'error';
-      const note = endNote({ how, message: how === 'stall' ? stallMessage() : how === 'error' ? aloud(problem('reply', err, { who: PROVIDER_LABELS[config.provider] })) : '', voice: !!voice });
-      const msg = `${note.line}${unansweredNote(agent?.unanswered?.())}`;
+      const exhausted = retryEnd && !rvTurn.signal.aborted;
+      const how = stalled ? 'stall' : controller.signal.aborted ? (quiet ? 'sleep' : exhausted ? 'retry' : 'stop') : 'error';
+      const message = how === 'retry' ? retryEnd.message : how === 'stall' ? stallMessage() : how === 'error' ? aloud(problem('reply', err, { who: PROVIDER_LABELS[config.provider] })) : '';
+      const ending = endNote({ how, message, voice: !!voice });
+      const msg = `${ending.line}${unansweredNote(agent?.unanswered?.())}`;
       endLine = msg;
       if (how === 'error') console.error('prompt failed', err);
       logLine('turn_note', { turn: requestNo, how });
       let sid = voice?.id ?? null;
-      if (note.spoken && !controller.signal.aborted) voice.say(msg); else if (note.spoken) sid = sayAside(msg) || sid;
+      if (ending.spoken && !controller.signal.aborted) voice.say(msg); else if (ending.spoken) sid = sayAside(msg) || sid;
       if (!controller.signal.aborted) voice?.end();
       ui({ kind: 'agent', e: { type: 'error', message: msg, speech: sid } });
     }
   } finally {
+    if (drawTurn != null) noteSync.turnEnded(drawTurn);
+    doneWriting();
     watch?.stop();
     progress.stop();
     if (turnProgress === progress) turnProgress = null;
@@ -1983,6 +2081,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // spoken yes answers it now, and its expiry says nothing.
     for (const [, w] of yesNoOpen) if (w.voice && w.voice === voice) w.a.unvoice();
     for (const [id, w] of yesNoOpen) if (w.voice && w.voice === voice) { w.took = true; askTakeEnd(id); } // and its take closes
+    rvTurn?.done(); rvTurn = null; // RV
     busy = false; turnVoice = null; turnImage = null; addOnTake = false;
     power.busy(); // the 5 minutes to idle sleep count from the end of the turn (C4)
     pendingVoice = null; pendingNow(); // the pending sound fades out with the turn
@@ -1990,7 +2089,7 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     // A tool cut off by Stop never reports back: end its tag too, or the Sidekick kept showing it ("looking at
     // CapCut") on every later request, with their own tags queued behind it.
     for (const id of activity.stopped()) ui({ kind: 'agent', e: { type: 'tool_end', id, isError: true } });
-    syncSession(retryNext ? runStart(agent?.getMessages?.() ?? [], runTag, runFrom) : undefined);
+    if (!guide || (guide === intro && !pairingSignal.aborted)) syncSession(retryNext ? runStart(agent?.getMessages?.() ?? [], runTag, runFrom) : undefined);
     // Its history is saved without the run the retry repeats: no later sync may write that run back.
     if (retryNext) agent = null;
     // This request's turns, once they're in the session: the skill pass may learn from them (after their next message).
@@ -2006,10 +2105,10 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     lastRequest = rateTarget(lastRequest, { req, rated: !!req, theirs: !!turnWords });
     // Their words and the reply (as shown: no voice cues) to the shared thread, with why it ended when it gave no
     // answer (a stop, sleep, an error); never waited on.
-    if (hydraKey && !hydraRevoked && turnWords && !retryNext) {
+    if (!pairingSignal.aborted && drawPair && drawPair === notePairing() && turnWords && !retryNext) {
       const c = new CueFilter();
       const shown = stripEmotes(`${c.push(lastReply)}${c.flush() ?? ''}`).trim();
-      localSync.record({ user: turnWords, assistant: [shown, endLine].filter(Boolean).join('\n') });
+      localSync.record({ user: turnWords, assistant: [shown, endLine].filter(Boolean).join('\n'), pairBinding: drawPair });
     }
     if (stalled) agent = null; // the next request starts on a fresh connection, from the saved conversation
     // No count from Claude Code (the API route, an older CLI): our estimate of the chat.
@@ -2017,17 +2116,17 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     menu();
   }
   if (retryNext) {
-    const r = retryNext; retryNext = null; retryInfo = r.info;
-    enqueue(r.text, { image: r.image, note: r.note, byVoice: r.byVoice, listenAfter: r.listenAfter, news: r.news });
+    const r = retryNext; retryNext = null;
+    enqueue(r.text, { image: r.image, note: r.note, byVoice: r.byVoice, listenAfter: r.listenAfter, news: r.news, pairBinding: drawPair, pairingSignal, retry: r.info, guide });
   }
 }
 // A request that ended before its turn began (the fold wait): its words and why, to the shared thread as a turn's are.
-function toThread(user, assistant) { if (hydraKey && !hydraRevoked && user) localSync.record({ user, assistant }); }
+function toThread(user, assistant, pairBinding) { if (pairBinding && pairBinding === notePairing() && user) localSync.record({ user, assistant, pairBinding }); }
 const STALL_MS = 120_000;
 // A line said on its own voice, for a turn whose voice was cut (the stall watch): its id, or null with replies off.
 function sayAside(line) {
   if (!VOICE_ON()) return null;
-  const v = speech.start();
+  const v = startSpeech();
   if (!v) return null;
   v.say(line); v.end();
   return v.id;
@@ -2043,10 +2142,11 @@ function ask(opts, signal) {
   const relayed = relayAsk.getStore();
   if (relayed?.live) return relayed.ask(opts, signal);
   // Approve all (agent_settings.approve_all): every yes/no is a yes at once, including a deletion. A typed prompt
-  // still asks. A relay turn's asks stay server approvals (above): the server applies it there, keeping the approval row.
+  // still asks, and so does a hard ask (pay or secret: the owner's hard limits; approveAllSays checks them first).
+  // A relay turn's asks stay server approvals (above): the server applies it there, keeping the approval row.
   // A turn already stopped (Stop, the tool's timeout, Claude Code's cancel): no, before Approve all could say yes.
   if (signal?.aborted) return Promise.resolve(null);
-  if (autoYes(opts)) { logLine('ask_auto', { question: String(opts.placeholder ?? '').slice(0, 120) }); return Promise.resolve('yes'); }
+  if (!opts.guideEpoch && autoYes(opts)) { logLine('ask_auto', { question: String(opts.placeholder ?? '').slice(0, 120) }); return Promise.resolve('yes'); }
   askQueued ??= oneYesNoAtATime(showAsk);
   return askQueued(opts, signal);
 }
@@ -2101,13 +2201,13 @@ function showAsk(opts, signal) {
   const route = onboarding ? 'guide' : to === panelAsk ? 'panel' : 'overlay';
   if (to === panelAsk) send({ type: 'panel_show' });
   // The setup guide has no buttons: its answer box takes a typed y.
-  if (onboarding && opts.choices) opts = { ...opts, placeholder: `${opts.placeholder} Type y to allow.` };
+  if (onboarding && opts.choices && !opts.guideEpoch) opts = { ...opts, placeholder: `${opts.placeholder} Type y to allow.` };
   to({ kind: 'ask', id, ...opts });
   // In a voice turn the question is said in Hydra's voice; a yes/no gives up after a minute (C3: never a silent wait).
   const voice = opts.choices && !onboarding && busy && turnVoice && !voiceMuted ? turnVoice : null;
   return new Promise((resolve) => {
     // The setup guide waits as long as it takes (the owner reads each step there).
-    const a = trackAsk({ id, route, question: opts.prompt || opts.placeholder, choices: !!opts.choices, voice, log: logLine, deadlineMs: onboarding ? 0 : ASK_DEADLINE_MS,
+    const a = trackAsk({ id, route, question: opts.prompt || opts.placeholder, choices: !!opts.choices, voice, log: logLine, deadlineMs: onboarding && !opts.guideEpoch ? 0 : ASK_DEADLINE_MS,
       close: () => to({ kind: 'cancel_ask', id }),
       // Answered any way, ended or cancelled: the take opened for it closes (one that heard the answer has already ended).
       resolve: (v, by) => { if (by === 'voice' && askTake?.id === id) askTake = null; askTakeEnd(id); pending.delete(id); yesNoOpen.delete(id); pendingNow(); power.busy(); resolve(v); } });
@@ -2251,9 +2351,8 @@ function setLook(l) {
   // Spoken only: the picker shows the words. Not over a reply, and a quick run of picks only says the last one.
   if (changed && VOICE_ON() && !busy) {
     speech.stop();
-    const v = speech.start();
-    if (onboarding) guideVoices.add(v.id);
-    v.say(LOOK_GREETINGS[l]); v.end();
+    const v = startSpeech(onboarding);
+    v?.say(LOOK_GREETINGS[l]); v?.end();
   }
 }
 
@@ -2273,8 +2372,7 @@ async function setReplies(mode) {
 // A line from the app itself (not the model), shown and spoken.
 function speakLine(text, mood = 'happy') {
   say(text, mood);
-  const v = config.replies === 'voice' ? speech.start() : null;
-  if (v && onboarding) guideVoices.add(v.id); // heard in the setup guide, where it was switched on
+  const v = config.replies === 'voice' ? startSpeech(onboarding) : null;
   if (v) { v.say(text); v.end(); }
   return v;
 }
@@ -2408,13 +2506,13 @@ function onUpdateStatus() {}
 // A timed block: every CHECK_MS it looks at the window in front (app, title, address; never kept or logged) and, when
 // they stay on something from their distraction list, asks the model for a playful nudge. Ends by itself.
 const distractionList = () => config.distractions ?? DEFAULT_DISTRACTIONS;
-// What's drawn now (#139): a drawing goes when its window or page changes or they close it, and the model, told only
-// at drawing time what was on screen, said it was still there. Set by onInkGone and Esc until the next message says so.
+// What's drawn now (#139): a drawing goes only when they close it, and the model, told only at drawing time what was
+// on screen, said it was still there. Set by Esc and Clear until the next message says so.
 let inkGone = false;
 function inkLine() {
   const now = ink.describe(), gone = inkGone;
   inkGone = false;
-  return now ? `- Your drawing on screen now: ${now}\n` : gone ? '- Your earlier drawing is gone from the screen (its window or page changed, or they closed it): never talk as if it were still there.\n' : '';
+  return now ? `- Your drawing on screen now: ${now}\n` : gone ? '- Your earlier drawing is gone from the screen (they closed it): never talk as if it were still there.\n' : '';
 }
 function focusLine() {
   if (!focusBlock) return '';
@@ -2625,6 +2723,7 @@ function menu() {
     { id: 'ask', label: `Ask ${lookName()}…`, enabled: !busy },
     ...(SNAP_OK ? [{ id: 'snap', label: 'Ask About an Area…', accel: keys().snap }] : []),
     { id: 'stop', label: 'Stop', enabled: busy },
+    ...(MAC && process.env.ROAMIES_REMOTE && remoteView.available() ? [{ id: 'phoneview', label: 'Phone View', checked: !!config.phoneView }, { id: 'phoneview:end', label: 'End Phone View', enabled: remoteView.live() }] : []), // RV
     { id: 'diagnostics', label: 'Save Diagnostics…', enabled: !diagnosing },
     ...(update.available ? [{ sep: true }, { id: 'install_update', label: update.page ? `Get Hydra ${update.available}…` : update.installing ? `Installing ${update.available}…` : `Install Update ${update.available} and Restart`, enabled: !update.installing }] : []),
     { sep: true },
@@ -2706,7 +2805,7 @@ function panelState() {
     geminiModel: config.geminiModel, geminiModels: GEMINI_CHOICES,
     studio: tts().local ? studioState() : null,
     voice: VOICE_OK ? {
-      on: !!config.voice, lang: speechLangId(), langOnline: langInfo && langInfo.id === speechLangId() ? langInfo.online : null, studioSpeak: config.studioSpeak === 'full' || config.studioSpeak === 'medium' ? config.studioSpeak : 'short', keys: HOTKEYS_OK ? talkSymbols() : null, ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false, autoListen: !!config.autoListen, listenEvery: !!config.listenEvery, listenSecs: listenSecs(), listenChoices: LISTEN_SECS, snoozeListen: !!config.snoozeListen, wake: WAKE_OK, wakeWord: phraseOn(), wakeName: wakeName(config), wakePhrase: wakePhraseNow(), clapTalk: clapTalkOn(), barge: bargeOn(), bargeNA: bargeUnavailable, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD,
+      on: !!config.voice, lang: speechLangId(), langOnline: langInfo && langInfo.id === speechLangId() ? langInfo.online : null, studioSpeak: config.studioSpeak === 'full' || config.studioSpeak === 'medium' ? config.studioSpeak : 'short', keys: HOTKEYS_OK ? talkSymbols() : null, ready: voiceReady(), mac: MAC, autoListen: !!config.autoListen, listenEvery: !!config.listenEvery, listenSecs: listenSecs(), listenChoices: LISTEN_SECS, snoozeListen: !!config.snoozeListen, wake: WAKE_OK, wakeWord: phraseOn(), wakeName: wakeName(config), wakePhrase: wakePhraseNow(), clapTalk: clapTalkOn(), barge: bargeOn(), bargeNA: bargeUnavailable, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD,
       // The mic picker: what the voice helper lists, the pick ('' is automatic) and the mic automatic uses now.
       mics: mics.list, mic: config.mic ?? '', micAuto: mics.list.find((x) => x.id === mics.auto)?.name ?? '',
       download: NEEDS_MODEL && config.voice && !voiceReady() ? { status: voiceModel.status, pct: voiceModel.total ? Math.floor((voiceModel.done / voiceModel.total) * 100) : 0, size: sizeLabel() } : null,
@@ -2733,13 +2832,16 @@ const phraseListening = () => VOICE_OK && !!config.voice && voiceReady() && phra
 // The last settings sent to the voice helper: the same ones again aren't sent (they were, 127 times in an evening).
 // Cleared when the helper starts again, so a new one hears them all.
 let voiceConfigSent = '';
+// Said once, when the overlay is up: an older build muted the Mac (nosystemmute.mjs). Hydra never unmutes it itself.
+let muteNotice = false;
 const voiceConfig = () => {
   ui({ kind: 'wake_phrase', on: phraseListening() });
   const enabled = VOICE_OK && config.voice && voiceReady();
   if (!enabled) { voiceHelperUp = false; clearWakeTake(); } // the helper stops; it says when it's up again
   nativeNow();
   // The key phrase listens asleep too (it wakes Hydra, W5 contract 4); it's Hydra's own (agent_settings.wake_phrase).
-  const msg = { type: 'voice_config', enabled, mute: config.muteWhileTalking !== false, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: wakePhraseNow(), lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), clapCal: config.clapCalibration ?? null, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) };
+  // No mute: Hydra never mutes or unmutes the Mac (nosystemmute.mjs).
+  const msg = { type: 'voice_config', enabled, sound: !!config.sound, wake: phraseOn(), wakeName: config.wakeName || '', wakePhrase: wakePhraseNow(), lang: MAC ? speechLangId() : 'auto', clap: MAC && (power.asleep || clapTalkOn()), asleep: power.asleep, clapTalk: clapTalkOn(), barge: bargeOn(), clapSensitivity: clapSensitivity(), clapCal: config.clapCalibration ?? null, sleepWord: config.sleepWord || DEFAULT_SLEEP_WORD, ...(NEEDS_MODEL ? { model: MODEL_DIR } : {}) };
   const key = JSON.stringify(msg);
   if (key !== voiceConfigSent) { voiceConfigSent = key; send(msg); }
   // The native listening pill beside the cursor stays hidden while the notch capsule is where I appear.
@@ -2810,6 +2912,7 @@ function emptyTakeEnded() {
 }
 function resetLostTake() {
   clearWakeTake();
+  voicePairing = null;
   const lostTake = voiceBusy || emptyTake || cutTake;
   if (!voiceHelperUp && !lostTake) return;
   ignoreWakeNothingHeard ||= lostTake;
@@ -2826,9 +2929,66 @@ function resetLostTake() {
   stir();
   pendingNow();
 }
+function discardVoiceArea(area) {
+  const file = area?.file;
+  if (typeof file !== 'string' || !/^sidekick-marked-\d+\.png$/.test(path.basename(file))) return;
+  const parent = path.dirname(path.resolve(file)), tmp = path.resolve(os.tmpdir());
+  const privateWorker = /^sidekick-voice-[A-Za-z0-9]{16}$/.test(path.basename(parent)) && path.dirname(parent) === tmp;
+  if (parent === tmp || privateWorker) fs.unlink(file).catch(() => {});
+}
+
 function onVoice(m) {
+  if (m.type === 'voice_take_reset') {
+    if (voiceResetPending && m.reset === voiceResetPending) { voiceResetPending = null; resetLostTake(); }
+    return;
+  }
+  if (voiceResetPending && ['voice', 'voice_partial', 'voice_state', 'voice_take_started'].includes(m.type)) {
+    if (m.type === 'voice') discardVoiceArea(m.area);
+    return;
+  }
+  const takeID = typeof m.take === 'string' ? m.take : null;
+  if (m.type === 'voice_take_started' || (m.type === 'voice_state' && m.state === 'listening' && takeID === null)) {
+    voicePairing = { takeID, onboarding: !!m.onboarding, pairBinding: notePairing(), pairingSignal: pairingLife.signal, finalized: false };
+    if (m.type === 'voice_take_started') return;
+  }
+  const take = voicePairing;
+  if (takeID !== null && takeID !== take?.takeID) {
+    if (m.type === 'voice') discardVoiceArea(m.area);
+    return;
+  }
+  if (m.type === 'voice' || m.type === 'voice_partial') {
+    if (!take || take.takeID !== takeID || take.onboarding !== !!m.onboarding || take.finalized || take.pairingSignal.aborted || take.pairBinding !== notePairing()) {
+      if (m.type === 'voice') discardVoiceArea(m.area);
+      if (take?.takeID === takeID && m.type === 'voice') emptyTake = false;
+      return;
+    }
+    const final = m.type === 'voice';
+    const display = { kind: 'voice', type: final ? 'final' : 'partial', text: m.text ?? null, ...(final && m.area ? { area: m.area } : {}) };
+    if (final) take.finalized = true;
+    if (take.onboarding) {
+      ob(display);
+      if (final) discardVoiceArea(m.area);
+      return;
+    }
+    ui(display);
+    pushWeb({ heard: { text: m.text ?? null, final }, reply: null });
+    if (!final) return;
+  }
+  if (m.type === 'voice_state') {
+    const state = { kind: 'voice', type: 'state', state: m.state, mode: m.mode, wave: m.wave, ask: m.ask, cancelled: m.cancelled };
+    if (m.onboarding) {
+      ob(state);
+      if (m.state === 'idle') voicePairing = null;
+      return;
+    }
+    ui(state);
+  }
   const wasVoiceBusy = voiceBusy;
-  if (m.type === 'voice_state') { voiceBusy = m.state === 'listening' || m.state === 'processing'; if (m.state === 'listening') { emptyTake = true; takeAt = Date.now(); } stir(); pendingNow(); }
+  if (m.type === 'voice_state') {
+    voiceBusy = m.state === 'listening' || m.state === 'processing';
+    if (m.state === 'listening') { emptyTake = true; takeAt = Date.now(); }
+    stir(); pendingNow();
+  }
   if (m.type === 'voice_state') {
     voiceTakeChanged(wasVoiceBusy, m.state);
     if (m.state === 'listening') {
@@ -2859,7 +3019,7 @@ function onVoice(m) {
   // With nothing running, a take over the last reply still being said holds it (C7): the owner's words stop it, and a
   // take that hears none (a noise opened it) lets the cut sentence go on, never silence.
   else if (m.type === 'voice_state' && m.state === 'listening') { addOnTake = false; const via = takeVia && Date.now() - takeVia.at < 3000 ? takeVia.via : ''; takeVia = null; cutTake = overReply({ saying: saidPending, voiceOn: VOICE_ON(), via }) === 'hold'; if (cutTake) hush(true); else speech.stop(); warmUp(); if (VOICE_ON()) speech.prewarm(); }
-  else if (m.type === 'voice_state' && m.state === 'processing') frontSoon = { at: Date.now(), p: whereNow() };
+  else if (m.type === 'voice_state' && m.state === 'processing') frontSoon = { at: Date.now(), p: whereNow(), owner: viewGate.owner() };
   else if (m.type === 'voice' && m.text?.trim()) {
     const held = cutTake ? afterHeld({ words: m.text, reply: heardTrack.said() }) : null;
     if (held === 'stop') { cutTake = false; speech.stop(); } // the owner said something over the reply: it stays cut
@@ -2868,9 +3028,9 @@ function onVoice(m) {
     if (held === 'echo') { logLine('echo_words', { chars: m.text.trim().length }); return; }
     // Key release to the words arriving (mic tail and the recogniser finishing), to see what that step costs.
     if (typeof m.ms === 'number') logLine('voice_final', { ms: m.ms, via: String(m.via ?? ''), chars: m.text.trim().length });
-    onSpoken(m.text.trim(), m.area);
+    onSpoken(m.text.trim(), m.area, take);
   }
-  else if (m.type === 'voice_state' && m.state === 'idle') { addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (emptyTake) { emptyTake = false; emptyTakeEnded(); } if (snap?.waitingVoice) snap.waitingVoice = false; if (cutTake) resumeCut(); } // the take ended (its words came first)
+  else if (m.type === 'voice_state' && m.state === 'idle') { voicePairing = null; addOnTake = false; hush(false); askTake = null; for (const [id, w] of yesNoOpen) if (w.a.voiced && !w.took) askArm(id, w); if (emptyTake) { emptyTake = false; emptyTakeEnded(); } if (snap?.waitingVoice) snap.waitingVoice = false; if (cutTake) resumeCut(); } // the take ended (its words came first)
   else if (m.type === 'voice_ready') { micPick(); voiceHelperUp = true; voiceConfigSent = ''; voiceConfig(); }
   // "Clap twice" (the panel): the owner's claps set the detector for his room; the live level while the page is open.
   else if (m.type === 'voice_clap_calibrated') {
@@ -2950,13 +3110,14 @@ function shellAnswer(m) {
 // from it interrupts a reply that's still running, as talking over it does.
 let barAsk = null;
 async function typeToAsk({ interrupt = false, value = '' } = {}) {
+  const pairBinding = notePairing(), pairingSignal = pairingLife.signal;
   warmUp();
   if (VOICE_ON()) speech.prewarm(); // the reply may be spoken: its socket opens while they type
-  frontSoon = { at: Date.now(), p: whereNow() }; // and the front window, as for talking
+  frontSoon = { at: Date.now(), p: whereNow(), owner: viewGate.owner() }; // and the front window, as for talking
   const ctl = barAsk = new AbortController();
-  const text = await ask({ placeholder: 'Ask me anything…', bar: true, ...(value ? { value } : {}) }, ctl.signal);
+  const text = await ask({ placeholder: 'Ask me anything…', bar: true, ...(value ? { value } : {}) }, AbortSignal.any([ctl.signal, pairingSignal]));
   if (barAsk === ctl) barAsk = null;
-  if (text?.trim()) { power.talked(); enqueue(text.trim(), { interrupt }); }
+  if (!pairingSignal.aborted && text?.trim()) { power.talked(); enqueue(text.trim(), { interrupt, pairBinding, pairingSignal }); }
 }
 function onWriteTap() {
   if (onboarding) return;
@@ -2968,7 +3129,11 @@ function onWriteTap() {
 async function onMenu(id, via) {
   if (id === 'show') ui({ kind: 'summon', show: true });
   else if (id === 'ask') await typeToAsk();
-  else if (id === 'stop') { if (voicePaused) setPaused(false); const cancelled = busy; if (busy) logLine('stopped', { by: via === 'esc' ? 'esc' : 'stop' }); endIntro(); controller?.abort(); foldWait?.abort(); for (const [k, w] of yesNoOpen) { w.took = true; askTakeEnd(k); } speech.stop(); ink.stop(cancelled); }
+  else if (id === 'phoneview') { config.phoneView = !config.phoneView; saveConfig(); remoteView.refresh(); menu(); } // RV
+  else if (id === 'phoneview:end') remoteView.endNow(); // RV
+  // Esc the phone typed (to close a menu during Take over) also fires the global Esc: not a Stop. RV
+  else if (id === 'stop' && via === 'esc' && remoteView?.phoneEsc?.()) logLine('stopped', { by: 'esc', ignored: 'phone' });
+  else if (id === 'stop') { viewGate.stop({ quiet: true }); if (voicePaused) setPaused(false); const cancelled = busy; if (busy) logLine('stopped', { by: via === 'esc' ? 'esc' : 'stop' }); endIntro(); controller?.abort(); foldWait?.abort(); for (const [k, w] of yesNoOpen) { w.took = true; askTakeEnd(k); } speech.stop(); ink.stop(cancelled); }
   else if (id === 'new') {
     endIntro();
     freshSession('new'); menu();
@@ -3163,7 +3328,7 @@ async function onMenu(id, via) {
   else if (id === 'snap') areaSnap();
   else if (id === 'list') showList({ seconds: 20 });
   else if (id.startsWith('mic:') && VOICE_OK) { config.mic = id.slice(4, 304); saveConfig(); micPick(); menu(); }
-  else if (id === 'mutetalk') { config.muteWhileTalking = config.muteWhileTalking === false; saveConfig(); voiceConfig(); menu(); }
+  // 'mutetalk' ("Mute Mac while talking") is gone: Hydra never mutes the Mac (nosystemmute.mjs). An old panel's click does nothing.
   else if (id === 'autolisten') { config.autoListen = !config.autoListen; saveConfig(); menu(); }
   else if (id === 'listenevery') { config.listenEvery = !config.listenEvery; saveConfig(); agentStale = true; menu(); }
   else if (id.startsWith('listensecs:') && LISTEN_SECS.includes(Number(id.slice(11)))) { config.listenSecs = Number(id.slice(11)); saveConfig(); menu(); }
@@ -3229,8 +3394,7 @@ async function onMenu(id, via) {
     if (typed == null) return;
     const r = cleanDeviceKey(typed);
     if (!r.ok) { say(r.why, 'concerned'); return; }
-    try { if (r.key) await secrets.set(HYDRA_KEY_SECRET, r.key); else await secrets.delete(HYDRA_KEY_SECRET); } catch (e) { say(`I couldn't save the key: ${e.message}`, 'concerned'); return; }
-    hydraLink.setKey(r.key); hydraKey = r.key || null; hydraKeyRead = true; hydraRevoked = false; if (hydraKey) hydraOnline(); else { relay.stop(); hydraTools.clear(); } agentStale = true; if (panelOpen) panel();
+    try { await storePairing(r.key || null); } catch (e) { say(`I couldn't save the key: ${e.message}`, 'concerned'); }
   }
   else if (id === 'voicedl') startVoiceDownload();
   else if (id === 'voice') {
@@ -3245,13 +3409,17 @@ async function onMenu(id, via) {
 let snap = null;
 async function areaSnap() {
   if (!SNAP_OK || snapping) return;
+  const pairBinding = notePairing();
+  const pairingSignal = pairingLife.signal;
   snapping = true;
   const file = path.join(os.tmpdir(), `sidekick-area-${Date.now()}.png`);
   try {
     const res = await hands('select', file);
     if (res.cancelled) return;
     await fitImage(file);
-    snap = { image: await imageBlock(file, 'image/png'), at: Date.now() };
+    const image = await imageBlock(file, 'image/png');
+    if (pairingSignal.aborted || pairBinding !== notePairing()) return;
+    snap = { image, at: Date.now(), pairBinding };
     if (VOICE_OK && config.voice) {
       // Snap, then just talk: start listening straight away (hands-free, ends when you pause).
       // Whatever is heard goes out with the picture. If nothing is said, ask by typing instead.
@@ -3262,18 +3430,18 @@ async function areaSnap() {
       if (!snap) return; // sent with what was said
       snap.waitingVoice = false;
     }
-    const q = await ask({ placeholder: 'What about this?' });
+    const q = await ask({ placeholder: 'What about this?' }, pairingSignal);
     if (!snap) return; // already sent by voice
     if (q === null) { snap = null; return; } // Escape: drop it
     const s = snap; snap = null;
-    enqueue(q.trim() || 'What is this? Explain it simply.', { image: s.image });
+    enqueue(q.trim() || 'What is this? Explain it simply.', { image: s.image, pairBinding: s.pairBinding, pairingSignal });
   } catch (e) {
     say(problem('screen', e).text, 'concerned');
   } finally { snapping = false; fs.unlink(file).catch(() => {}); }
 }
 let snapping = false;
 // Words said while ⌃⌥ was held, maybe with an area marked by drawing on the screen at the same time.
-async function onSpoken(text, area) {
+async function onSpoken(text, area, { pairBinding = notePairing(), pairingSignal = pairingLife.signal } = {}) {
   // The sleep word in a take: Hydra sleeps at once, and the words never reach the model. While a turn runs only its exact
   // words count (C5); what was heard is logged.
   if (heardSleepWord(text, config.sleepWord || DEFAULT_SLEEP_WORD, { strict: busy })) { logLine('sleep_word', { heard: text.slice(0, 120), strict: busy }); power.sleep('sleep_word'); return; }
@@ -3283,22 +3451,24 @@ async function onSpoken(text, area) {
   // Only from a take that started after the question was shown (askForTake).
   const asked = askForTake(yesNoOpen, { text, takeAt });
   if (asked) { const { id, w, said } = asked; addOnTake = false; w.to({ kind: 'cancel_ask', id }); w.a.answer(said === 'yes' ? 'yes' : null, 'voice'); return; }
-  if (addOnTake) { addOnTake = false; if (addOn(text)) return; }
-  if (!area?.file) return enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
+  if (addOnTake) { addOnTake = false; if (addOn(text, pairBinding)) return; }
+  if (!area?.file) return enqueue(text, { interrupt: true, image: takeSnap(pairBinding), byVoice: true, pairBinding, pairingSignal });
   try {
     await fitImage(area.file);
     const image = await imageBlock(area.file, 'image/png');
-    takeSnap(); // the drawing replaces an older ⌃⌥A snap
-    enqueue(text, { interrupt: true, image, note: describeMarks(area.strokes, area.rect), byVoice: true });
+    takeSnap(pairBinding); // the drawing replaces an older ⌃⌥A snap
+    enqueue(text, { interrupt: true, image, note: describeMarks(area.strokes, area.rect), byVoice: true, pairBinding, pairingSignal });
   } catch {
     fs.unlink(area.file).catch(() => {});
-    enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
+    enqueue(text, { interrupt: true, image: takeSnap(pairBinding), byVoice: true, pairBinding, pairingSignal });
   }
 }
 // Words added while Hydra thinks: into the running Claude Code session as one more user message; another agent
 // answers them right after this turn. False when nothing runs any more (they are a new request then).
 let addOnTake = false;
 let takeAt = null; // when the newest take started listening (its voice_state)
+let voicePairing = null;
+let voiceResetPending = null;
 // A take over the last reply while it was still being said (C7): held, not cut, until the take ends.
 let cutTake = false, resumedAt = 0;
 // What opened the next take, from the helper's voice_trigger just before its listening state (clap, barge); none for
@@ -3318,20 +3488,24 @@ function hush(on) {
   hushed = on;
   if (!voicePaused) { send({ type: 'ui', msg: { kind: 'voice_pause', on } }); nativeSpeech({ paused: on }); }
 }
-function addOn(text) {
-  if (busy) turnWords = turnWords ? `${turnWords}\n${text}` : text;
+function addOn(text, pairBinding) {
+  if (pairBinding !== notePairing() || pairBinding !== requestPair) return false;
   const into = addOnTo(text, { busy, addInput: (t) => agent?.addInput?.(t), enqueue });
+  if (into === 'turn') {
+    turnWords = turnWords ? `${turnWords}\n${text}` : text;
+    turnIntent += `\n${text}`;
+  }
   if (into) logLine('add_on', { chars: text.length, into });
   // Taken into the run after its answer: it works on, so progress lines come back (resume() is a no-op before then).
   if (into === 'turn') turnProgress?.resume();
   return !!into;
 }
 // A pending snap goes with the next spoken question, if it comes within two minutes.
-function takeSnap() {
+function takeSnap(pairBinding) {
   if (!snap || Date.now() - snap.at > 120_000) { snap = null; return null; }
   const s = snap; snap = null;
   for (const [id, resolve] of pending) { ui({ kind: 'cancel_ask', id }); panelAsk({ kind: 'cancel_ask', id }); resolve(null); pending.delete(id); }
-  return s.image;
+  return s.pairBinding === pairBinding ? s.image : null;
 }
 
 // ---------- getting to know them (a step of the setup guide, or the guide opened from the menu) ----------
@@ -3339,29 +3513,36 @@ function takeSnap() {
 // here). The chat is its own conversation; when it ends, a memory pass over it saves what it learned as facts.
 let introKnown = new Set(); // facts that existed before the chat, so the end can show only what it learned
 let beforeIntro = null; // the conversation the chat interrupted: it carries on afterwards
+let guideIntroReset = Promise.resolve(), guideMemory = Promise.resolve();
 const introFacts = () => liveFacts().filter((f) => !introKnown.has(f.id)).map((f) => ({ id: f.id, text: f.text }));
 async function startIntro() {
-  if (intro) return ob({ kind: 'chat_state', status: 'busy' });
+  const guideSignal = AbortSignal.any([pairingLife.signal, guideWindow.signal]);
+  await pairingChanges;
+  await guideIntroReset;
+  if (guideSignal.aborted || !onboarding) return;
   await refreshAuth();
+  if (guideSignal.aborted || !onboarding) return;
+  if (intro) return ob({ kind: 'chat_state', status: 'busy' });
   if (!ensureModel()) return ob({ kind: 'chat_state', status: 'no_model' });
-  intro = { n: 0 };
+  const me = intro = { n: 0, signal: guideSignal };
   introKnown = new Set(liveFacts().map((f) => f.id));
   beforeIntro = session?.messages.length ? session : null;
   freshSession(null);
   session.kind = 'intro';
   ob({ kind: 'chat_state', status: 'thinking', n: 0, total: QUESTIONS });
-  await enqueue(openNote(userName, lookName()));
-  introTurn();
+  await enqueue(openNote(userName, lookName()), { guide: me });
+  if (intro === me) await introTurn();
 }
 // However it ends, the chat's notes and questions don't steer what comes next (what it learned is in memory):
 // the conversation from before it carries on, or a clean one if there wasn't one.
 // Resolves once the memory pass over the chat is done (right away if they never answered).
 function endIntro() {
   if (!intro) return Promise.resolve([]);
-  const answered = intro.n > 0;
+  const { n, retired, signal } = intro;
   intro = null;
   controller?.abort();
-  const learned = freshSession(answered ? 'intro' : null);
+  const learned = freshSession(n > 0 && !retired && !signal.aborted ? 'intro' : null, signal);
+  guideMemory = learned.catch(() => {});
   if (beforeIntro) session = beforeIntro;
   beforeIntro = null;
   menu();
@@ -3370,26 +3551,29 @@ function endIntro() {
 // After each reply: the next question, or the end (all answered, they wanted out, or it failed).
 async function introTurn() {
   const me = intro;
-  if (!me) return;
+  if (!me || me.signal.aborted) return;
   if (lastFailed) { endIntro(); return ob({ kind: 'chat_state', status: 'failed' }); }
   const last = me.n >= QUESTIONS || (me.n > 0 && endsChat(lastReply));
   if (last) {
-    config.introDone = true; saveConfig();
     const text = plain(lastReply);
+    const known = introKnown;
     await endIntro(); // chat_done lists what the memory pass learned
+    if (me.signal.aborted || known !== introKnown) return;
+    config.introDone = true; saveConfig();
     // The drawn tour plays on the desktop once the guide window is closed.
-    tourPending = { goal: goalFrom(introFacts()) };
-    return ob({ kind: 'chat_done', text, facts: introFacts() });
+    const facts = introFacts();
+    tourPending = { goal: goalFrom(facts) };
+    return ob({ kind: 'chat_done', text, facts });
   }
   ob({ kind: 'chat_turn', n: me.n, total: QUESTIONS, ...splitTurn(lastReply) });
 }
 async function introAnswer(text) {
   const me = intro;
-  if (!me || !text || busy) return;
+  if (!me || me.signal.aborted || !text || busy) return;
   if (wantsSkip(text)) { endIntro(); config.introDone = true; saveConfig(); return ob({ kind: 'chat_done', skipped: true, facts: [] }); }
   const n = ++me.n;
   ob({ kind: 'chat_state', status: 'thinking', n, total: QUESTIONS });
-  await enqueue(answerTurn(n, userName, text));
+  await enqueue(answerTurn(n, userName, text), { guide: me });
   if (intro === me) await introTurn();
 }
 
@@ -3398,6 +3582,7 @@ function obState() {
   const current = getModel(config.model);
   ob({
     kind: 'state',
+    guideEpoch,
     platform: process.platform,
     // What this computer can do (platform.mjs): Ask About an Area, circling while talking, and on Wayland no
     // global shortcuts (bind: the commands to bind in the desktop's settings instead) and no Cursor size.
@@ -3442,15 +3627,20 @@ async function filesStatus(request) {
 
 let keysBefore = null;
 async function onGuide(m) {
-  if (m.type === 'ob_hello') { onboarding = true; await refreshAuth(); await voiceKeysLoaded; obState(); }
-  else if (m.type === 'ob_closed') { onboarding = false; endIntro(); stopShowcase(); if (tourPending) setTimeout(playTour, 800); }
+  if (m.type === 'ob_hello') { if (!onboarding) guideWindow = new AbortController(); onboarding = true; await refreshAuth(); await voiceKeysLoaded; obState(); }
+  else if (m.type === 'ob_closed') { onboarding = false; guideWindow.abort(); endIntro(); stopShowcase(); if (tourPending) setTimeout(playTour, 800); }
   else if (m.type === 'ob_showcase') playShowcase();
   else if (m.type === 'ob_showcase_warm') warmShowcase();
   else if (m.type === 'ob_showcase_stop') stopShowcase();
-  else if (m.type === 'chat_start') startIntro();
-  else if (m.type === 'chat_answer' && typeof m.text === 'string') introAnswer(m.text.trim().slice(0, 2000));
-  else if (m.type === 'chat_skip') { endIntro(); config.introDone = true; saveConfig(); menu(); }
-  else if (m.type === 'chat_forget' && typeof m.id === 'string') { await forgetFact(m.id); ob({ kind: 'chat_facts', facts: introFacts() }); menu(); }
+  else if (m.type === 'chat_start' && m.guideEpoch === guideEpoch) await startIntro();
+  else if (m.type === 'chat_answer' && m.guideEpoch === guideEpoch && !changingPairing && typeof m.text === 'string') introAnswer(m.text.trim().slice(0, 2000));
+  else if (m.type === 'chat_skip' && m.guideEpoch === guideEpoch && !changingPairing) { endIntro(); config.introDone = true; saveConfig(); menu(); }
+  else if (m.type === 'chat_forget' && m.guideEpoch === guideEpoch && !changingPairing && typeof m.id === 'string') {
+    const pairingSignal = pairingLife.signal;
+    await forgetFact(m.id);
+    if (!pairingSignal.aborted) ob({ kind: 'chat_facts', facts: introFacts() });
+    menu();
+  }
   else if (m.type === 'ob_step') { config.onboardStep = Math.max(0, Math.min(8, m.step | 0)); saveConfig(); }
   // Voice needs a working key first: without one, the guide asks for it (ob_fishkey or ob_geminikey) instead.
   else if (m.type === 'ob_replies' && (m.mode === 'text' || (m.mode === 'voice' && speech.on))) { await voiceKeysLoaded; await setReplies(m.mode); }
@@ -3489,14 +3679,83 @@ async function onGuide(m) {
 }
 
 // ---------- Hydra: pairing, the relay brain, connectors ----------
+function revokePairing() {
+  pairingLife.abort();
+  pairingLife = new AbortController();
+  guideEpoch = randomUUID();
+  tourPending = null;
+  const retiredIntro = intro;
+  let detachIntro;
+  if (retiredIntro) {
+    retiredIntro.retired = true;
+    detachIntro = running.then(() => { if (intro === retiredIntro) return endIntro(); });
+  }
+  // A replacement starts after the old guide has stopped publishing and writing its optional memory.
+  guideIntroReset = Promise.all([guideIntroReset, guideMemory, detachIntro]);
+  remoteView.stop();
+  controller?.abort();
+  foldWait?.abort();
+  pushWeb({ heard: null, reply: null });
+  const resetVoice = { kind: 'voice', type: 'state', state: 'idle', cancelled: true, pairingReset: true };
+  ui(resetVoice);
+  ob({ ...resetVoice, guideEpoch });
+  speech.stop();
+  if (MAC) {
+    voiceResetPending = randomUUID();
+    send({ type: 'listen_cancel', pairingReset: voiceResetPending });
+  } else if (voiceBusy || voicePairing) send({ type: 'listen_cancel' });
+  snap = null;
+  hydraLink.setKey(null);
+  hydraTools.clear();
+  agentSettings.stop({ reset: true });
+}
+
+function pairingAuth(ok, status) {
+  if (changingPairing || !hydraKey || (!ok && !authStale(status)) || hydraRevoked === !ok) return;
+  hydraRevoked = !ok;
+  if (hydraRevoked) revokePairing(); else hydraOnline();
+  logLine('hydra_auth', { stale: hydraRevoked, status });
+  if (panelOpen) panel();
+}
+
+function storePairing(key) {
+  const change = pairingChanges.then(async () => {
+    if (key) await secrets.set(HYDRA_KEY_SECRET, key); else await secrets.delete(HYDRA_KEY_SECRET);
+    hydraKeyRead = true;
+    if (key !== hydraKey || hydraRevoked) {
+      changingPairing = true;
+      hydraRevoked = true;
+      try { revokePairing(); await relay.stop(); }
+      finally { changingPairing = false; }
+    }
+    hydraKey = key;
+    hydraRevoked = false;
+    if (key) hydraOnline(); else useTts(tts().id).catch(() => {});
+    agentStale = true;
+    if (panelOpen) panel();
+  });
+  pairingChanges = change.catch(() => {});
+  return change;
+}
+
+async function restorePairing() {
+  const key = (await secrets.get(HYDRA_KEY_SECRET)) || null;
+  if (hydraKeyRead) return;
+  hydraKey = key;
+  hydraKeyRead = true;
+  if (key) hydraOnline();
+}
+
 function hydraOnline() {
   if (!hydraKey) return;
   if (!config.hydraUrl) { config.hydraUrl = HYDRA_ORIGIN; saveConfig(); }
   hydraLink.setKey(hydraKey);
   relay.start();
+  remoteView.start(); // RV: polls only while Phone View is on and both permissions hold
   hydraTools.refresh().then(() => { agentStale = true; if (panelOpen) panel(); }).catch((e) => logLine('hydra_tools', { error: String(e?.message ?? e).slice(0, 160) }));
   agentSettings.start();
   useTts(tts().id).catch(() => {}); // Hydra's own voice from now on
+  noteSync.flush(); // drawings queued for this pairing while offline
 }
 // Hydra's settings changed (agentsettings.mjs): the sleep word and wake phrase go to the voice helper; a new model or
 // effort rebuilds the agent before the next request (the same conversation).
@@ -3532,15 +3791,32 @@ async function connectorGate(name, input, signal, may = null) {
   const c = connectorTool(name);
   if (!c) return false;
   if (may && !may(connectorGroup(c.server), name)) { logLine('connector', { server: c.server, tool: c.tool, level: 'not_in_routine' }); return false; }
+  // Hard limit 1, before any read runs too: a typed credential in its arguments (a card number, a key) never goes to a
+  // connector, and a turn whose words ask to read or type one ("read me the verification code Chase emailed me":
+  // credentialTurn, a verb with its object, not a bare app or card name) runs no connector at all. A relay turn's words
+  // are its own (relayAsk).
+  const r = relayAsk.getStore();
+  const request = localRequestPair.getStore();
+  const pairBinding = r ? r.pairBinding : request ? request.pairBinding : notePairing();
+  const pairingSignal = request?.pairingSignal ?? pairingLife.signal;
+  signal = signal ? AbortSignal.any([signal, pairingSignal]) : pairingSignal;
+  const samePair = () => !signal.aborted && pairBinding === notePairing();
+  const credential = () => {
+    const words = r?.ownerWords?.() ?? turnIntent;
+    if (!credentialArgs(input) && !credentialTurn(words)) return false;
+    logLine('connector', { server: c.server, tool: c.tool, level: 'credential' });
+    return true;
+  };
+  const current = async () => samePair() && (!r || (r.live && await r.alive() && r.live)) && samePair() && !credential();
+  if (!samePair() || credential()) return false;
   const v = connectorLevel(c);
   logLine('connector', { server: c.server, tool: c.tool, level: v.level });
-  if (v.level === SAFE) return true;
+  if (v.level === SAFE) return current();
   if (v.level === 'block') return false;
   const app = c.server.replace(/^claude_ai_/, '').replace(/_/g, ' ');
-  if (!isYes(await ask({ placeholder: askSummary(app, c.tool, input), choices: ['Allow', "Don't allow"], always: true, deletion: deletesCall({ name: c.tool }) }, signal))) return false;
+  if (!isYes(await ask({ placeholder: askSummary(app, c.tool, input), choices: ['Allow', "Don't allow"], always: true, deletion: deletesCall({ name: c.tool }), pay: moneyCall({ server: c.server, name: c.tool, args: input }) }, signal))) return false;
   // A relay turn: still live right before the write runs.
-  const r = relayAsk.getStore();
-  return !r?.alive || await r.alive();
+  return current();
 }
 // Mac tools that only look: a relay turn runs them without checking it is still live first.
 const MAC_READS = new Set(['take_screenshot', 'list_windows', 'read_window', 'see_photo', 'read_file', 'list_files', 'search_files', 'show_list', 'list_commitments', 'list_jobs', 'plan_steps', 'use_skill', 'draw']);
@@ -3563,34 +3839,54 @@ const resultText = (r) => {
 // approval he answers on the phone with the full target, one too long to show whole is refused. Its words go back to
 // the brain, never into the thread.
 async function relayTurn(turn, h) {
-  const { emit, signal, approve, alive = async () => true } = h;
+  const { emit, approve, alive = async () => true } = h;
   // Its own request number (R11c-1): a screenshot, a read or a yes from the request before it is never this turn's.
-  nextTurn();
+  const drawTurn = nextTurn();
+  const drawPair = notePairing();
   await refreshAuth({ cached: true });
-  let cc = null;
-  try { cc = await claudeCodeRoute('anthropic'); } catch (e) { throw Object.assign(new Error(String(e?.message ?? e)), { code: 'mac_claude' }); }
-  if (!cc) throw Object.assign(new Error('Hydra Desktop is not signed in with Claude.'), { code: 'mac_signed_out' });
-  const said = turnPrompt(turn);
-  if (!said.said) throw new Error('The turn had no words.');
-  const may = toolFilter(turn.allowedTools);
-  const asking = { live: true, ask: relayAsker(approve), alive };
-  const inRelay = (fn) => relayAsk.run(asking, fn);
-  const list = [
-    ...tools.filter((t) => may('mac', t.name)).map((t) => ({ ...t, execute: async (a, ctx) => {
-      if (!MAC_READS.has(t.name) && !(await alive())) throw new Error(TURN_OVER);
-      return inRelay(() => t.execute(a, ctx));
-    } })),
-    ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive }).filter((t) => may('hydra', t.name)),
-    // A sub-turn's events never reach a window (the brain tells the owner), so it moves none.
-    ...(isSubturn(turn) ? [] : [showTool({ onUi: (action) => emit({ type: 'ui', action }) })]),
-  ];
-  const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
   // Hydra's model and effort (agent_settings): effort_routine for a routine, effort_live for the rest.
   const { model, thinking } = brainFor(agentSettings.current, turn.surface);
   const route = gptRoute({ model, chatgpt: !!oauthOn.get('openai') });
   const runModel = route.provider ? route.model : model;
+  let cc = null;
+  if (route.provider !== 'openai') {
+    try { cc = await claudeCodeRoute('anthropic'); } catch (e) { throw Object.assign(new Error(String(e?.message ?? e)), { code: 'mac_claude' }); }
+    if (!cc) throw Object.assign(new Error('Hydra Desktop is not signed in with Claude.'), { code: 'mac_signed_out' });
+  }
+  const said = turnPrompt(turn);
+  if (!said.said) throw new Error('The turn had no words.');
+  const may = toolFilter(turn.allowedTools);
+  const routineCall = turn.routineCallEvidence === true ? routineCallIdentity(turn) : undefined;
+  const callFields = (event) => {
+    const origin = routineCall?.(event.toolInvocationId ?? event.toolCallId);
+    return origin ? { callId: origin.callId } : {};
+  };
+  const asking = { live: true, turn: drawTurn, words: isSubturn(turn) ? '' : said.said, pairBinding: drawPair, ask: relayAsker(approve), alive,
+    ownerWords: () => isSubturn(turn) ? '' : `${said.said}\n${h.ownerAdditions?.() ?? ''}`,
+  };
+  const inRelay = (fn) => relayAsk.run(asking, fn);
+  // A turn the server tagged hard "money" (A3): every Mac tool that acts asks first, a money ask (moneyTools).
+  const macTools = moneyTools(tools.filter((t) => may('mac', t.name)), { money: h.money ?? moneyTurn(turn), ask: asking.ask, reads: MAC_READS, no: (n) => `${userName} said no, so ${n} didn't run.` });
+  const list = [
+    ...macTools.map((t) => ({ ...t, execute: async (a, ctx) => {
+      if (!MAC_READS.has(t.name) && !(await alive())) throw new Error(TURN_OVER);
+      return inRelay(() => t.execute(a, ctx));
+    } })),
+    ...hydraTools.tools({ onConfirm: (c) => emit({ type: 'confirm', ...c }), beforeRun: alive, routineCall }).filter((t) => may('hydra', t.name)),
+    // A sub-turn's events never reach a window (the brain tells the owner), so it moves none.
+    ...(isSubturn(turn) ? [] : [showTool({ onUi: (action) => emit({ type: 'ui', action }) })]),
+  ];
+  const words = (n) => n.replace(/^hydra_/, '').replace(/_/g, ' ');
+  // RV: busy for the phone view the whole turn, and Stop from the phone aborts it (its signal); done in the finally.
+  const vt = viewGate.turn(h.signal), signal = vt.signal;
+  h = { ...h, signal };
+  try {
   if (route.note) emit({ type: 'text', delta: `${route.note} ` });
-  if (route.fallback || route.provider === 'openai') emit({ type: 'model', model: runModel, effort: thinking || 'low', ...(route.fallback ? { fallback: route.fallback } : {}) });
+  if (route.fallback || route.provider === 'openai') {
+    const effort = thinking || 'low';
+    logLine('relay_model', { id: turn.id, model: runModel, effort, fallback: route.fallback });
+    emit({ type: 'model', model: runModel, effort, ...(route.fallback ? { fallback: route.fallback } : {}) });
+  }
   const agentRun = route.provider === 'openai'
     ? new Agent({
       model: runModel, provider: 'openai', system: system(), tools: list, maxTurns: 24, thinking, signal,
@@ -3613,14 +3909,16 @@ async function relayTurn(turn, h) {
     // done Hydra holds for his words is answered in it too (relaySession: relay.mjs, which sends the usage snake_case).
     await relaySession({
       agent: agentRun, text: said.text, h, onRound: () => reply.flush(),
+      modelRetries: { id: turn.id, provider: PROVIDER_LABELS[route.provider ?? 'anthropic'], log: logLine },
       onEvent: (e) => {
         if (e.type === 'text_delta') reply.push(e.text);
         else if (e.type === 'turn_end') reply.turnEnd(e.stopReason);
-        else if (e.type === 'tool_call_start') { reply.tool(); names.set(e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name) }); }
-        else if (e.type === 'tool_call_end') { const n = names.get(e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? resultText(e.result).slice(0, 160) : words(n) }); }
+        else if (e.type === 'tool_call_start') { reply.tool(); names.set(e.toolInvocationId ?? e.toolCallId, e.name); emit({ type: 'tool', name: e.name, status: 'start', summary: words(e.name), ...callFields(e) }); }
+        else if (e.type === 'tool_call_end') { const n = names.get(e.toolInvocationId ?? e.toolCallId) ?? 'tool'; emit({ type: 'tool', name: n, status: e.isError ? 'error' : 'done', summary: e.isError ? resultText(e.result).slice(0, 160) : words(n), ...callFields(e) }); }
       },
     });
-  } finally { asking.live = false; }
+  } finally { asking.live = false; noteSync.turnEnded(drawTurn); }
+  } finally { vt.done(); } // RV
 }
 // The bridge's promise calls (hydra.rs): setup, pair, signInClaude, unpair. The answer goes back through the push
 // channel with the call's id; it never carries the device key or the pairing code.
@@ -3633,8 +3931,7 @@ async function onBridge(m) {
       await refreshAuth();
       // The Keychain not read yet (or it failed): an error, never paired:false, so the web doesn't pair this Mac again.
       if (!hydraKeyRead) {
-        try { hydraKey = (await secrets.get(HYDRA_KEY_SECRET)) || null; hydraKeyRead = true; } catch { return answer({ ok: false, error: 'keychain' }); }
-        if (hydraKey) hydraOnline();
+        try { await restorePairing(); } catch { return answer({ ok: false, error: 'keychain' }); }
       }
       const perm = (v) => (['granted', 'denied', 'not_determined'].includes(v) ? v : 'not_determined');
       const p = m.perms ?? {};
@@ -3651,22 +3948,14 @@ async function pairHere(code) {
   if (!/^[A-Za-z0-9-]{6,20}$/.test(code)) return { ok: false, error: 'invalid_code' };
   const r = await pairDevice({ base: HYDRA_ORIGIN, code });
   if (!r.ok) { logLine('pair', { ok: false, error: r.error }); return { ok: false, error: r.error }; }
-  try { await secrets.set(HYDRA_KEY_SECRET, r.key); } catch (e) { logLine('pair', { ok: false, error: 'keychain' }); return { ok: false, error: 'keychain' }; }
-  // Paired again (a stale key: revoked, or without the relay scope): the relay polls with the new key at once, not
-  // after the long wait the old key's 401 or 403 put it in.
-  if (hydraRevoked) await relay.stop();
-  hydraKey = r.key; hydraKeyRead = true; hydraRevoked = false;
+  try { await storePairing(r.key); } catch (e) { logLine('pair', { ok: false, error: 'keychain' }); return { ok: false, error: 'keychain' }; }
   logLine('pair', { ok: true });
-  hydraOnline(); agentStale = true; if (panelOpen) panel();
   return { ok: true };
 }
 // Forgets this Mac's key (the web revokes it on the server, after asking the owner).
 async function unpairHere() {
-  await relay.stop();
-  hydraKey = null; hydraTools.clear(); hydraLink.setKey(null); agentSettings.stop();
-  useTts(tts().id).catch(() => {});
-  await secrets.delete(HYDRA_KEY_SECRET).catch((e) => console.error('unpair', e.message));
-  logLine('unpair', {}); agentStale = true; if (panelOpen) panel();
+  await storePairing(null);
+  logLine('unpair', {});
 }
 
 // ---------- main ----------
@@ -3689,7 +3978,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'answer') { pending.get(m.id)?.(m.text ?? null); pending.delete(m.id); }
   else if (m.type === 'ui_ready') {
     ui({ kind: 'hands_reset' }); // nothing is acting in an app when the overlay or this sidecar (re)starts
+    // A fresh overlay (rebuilt for a screen change) has no drawings: none is described as up, no note waits for its pictures.
+    if (ink.describe()) inkGone = true;
+    ink.reset(); noteSync.lost();
     retired.then((notes) => { if (notes.length) { retired = Promise.resolve([]); say(`${notes.join(' ')} Do it on the Model page in ${PANEL}.`, 'concerned'); } });
+    if (muteNotice) { muteNotice = false; say(MUTE_NOTICE, 'concerned'); }
     ui({ kind: 'sound', on: config.sound });
     ui({ kind: 'volume', v: volumeNow() / 100 });
     notchUi();
@@ -3755,7 +4048,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'list_toggle') toggleItem(String(m.id)).catch((e) => console.error('list', e));
   else if (m.type === 'show_list') showList({ seconds: 20, toggle: true });
   // The overlay's drawing: a segment started, a wait for a click or hover ended, a card was closed, a button clicked.
-  else if (m.type === 'draw_started') { ink.started(String(m.id), m.seg | 0); if (String(m.id) === showcase?.id) ob({ kind: 'showcase', phase: 'beat', beat: m.seg | 0 }); }
+  else if (m.type === 'draw_started') { ink.started(String(m.id), m.seg | 0); noteSync.playing(String(m.id)); if (String(m.id) === showcase?.id) ob({ kind: 'showcase', phase: 'beat', beat: m.seg | 0 }); }
   else if (m.type === 'draw_done') { if (String(m.id) === showcase?.id) showcaseDrawn(); }
   else if (m.type === 'draw_wait_done') ink.waitDone(String(m.id), m.beat | 0, String(m.result));
   else if (m.type === 'ink_closed') ink.closed(m.part);
@@ -3769,7 +4062,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'list_card') onListCard(String(m.part), m);
   else if (m.type === 'quiz_done') onQuizDone(String(m.part), Array.isArray(m.picks) ? m.picks.slice(0, 12).map((v) => (Number.isInteger(v) ? v : -1)) : []);
   else if (m.type === 'ink_cleared') { inkGone = true; ink.cleared(); endShowcase('gone'); }
-  else if (m.type === 'user_click' && Number.isFinite(m.x) && Number.isFinite(m.y)) ink.userClick({ x: m.x, y: m.y, role: String(m.role ?? ''), app: String(m.app ?? ''), acts: m.acts === true });
+  // After a stop: the parts still up (the ones it never drew are forgotten). Pictures of a drawing for its note.
+  else if (m.type === 'ink_parts') ink.alive(m.parts, m.ev);
+  else if (m.type === 'draw_image') noteSync.image({ id: String(m.id), part: String(m.part ?? ''), data: m.data, error: m.error });
+  else if (m.type === 'draw_images_done') noteSync.imagesDone(String(m.id), m.skipped);
+  // "Saved to Notes" clicked: that note in the Hydra window.
+  else if (m.type === 'open_note' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(m.note))) { send({ type: 'main_show' }); pushWeb({ ui: { kind: 'navigate', href: `/notes?note=${m.note}`, at: Date.now() } }); }
   else if (m.type === 'update_status') onUpdateStatus(m);
   // Wayland: the guide or panel copies one of the commands to bind (only those, never other text).
   else if (m.type === 'copy_bind' && Object.hasOwn(BIND, String(m.which))) shellCall({ type: 'clipboard', text: BIND[m.which] }).then((r) => send({ type: onboarding ? 'onboard' : 'panel', msg: { kind: 'copied', which: String(m.which), ok: !!r?.ok } }));
@@ -3796,6 +4094,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   Promise.race([flushWrites(), new Promise((r) => setTimeout(r, 3000))]).finally(() => process.exit(0));
 });
 
+// Once: "Mute Mac while talking" goes off for good, and an owner an older build muted is told how to unmute (nosystemmute.mjs).
+// Before the first await: a ui_ready already in the pipe is handled at that await, and must find the notice set.
+{
+  const move = noSystemMute(config, { logDirs: [path.join(HOME, '.gg'), LOG_DIR], done: path.join(DATA_DIR, 'no-system-mute') });
+  // The done file only once the saved config says the move ran (a quit in between runs it again next start).
+  if (move.save) Promise.resolve(saveConfig()).then(() => { if (readJson(CONFIG_PATH)?.noSystemMute) move.markDone(); });
+  muteNotice = move.notice;
+}
 // Retired sign-ins (Claude from before Claude Code, the old ChatGPT, Kimi, Grok and Google ones) no longer work:
 // each is removed from auth.json, and said once.
 let retired = (async () => {
@@ -3935,7 +4241,7 @@ if (config.onboarded && (config.setupVersion ?? 0) < SETUP_VERSION) {
 // window's Set up this Mac screen drives it through the bridge, so the separate guide no longer opens by itself.
 if (!config.onboarded) { config.onboarded = true; config.onboardStep = 0; config.setupVersion = SETUP_VERSION; saveConfig(); }
 // Paired already: serve relay turns and load Hydra's tools (tried again later if the Keychain can't be read yet).
-retryLoad(async () => { const k = await secrets.get(HYDRA_KEY_SECRET); if (hydraKeyRead) return; hydraKey = k || null; hydraKeyRead = true; if (hydraKey) hydraOnline(); }, { onError: (e) => console.error('hydra key', e.message) });
+retryLoad(restorePairing, { onError: (e) => console.error('hydra key', e.message) });
 // Just updated: the panel opens on What's new by itself, once, a moment after launch. whatsNewFrom (the version
 // before) marks which changes are this update's.
 {

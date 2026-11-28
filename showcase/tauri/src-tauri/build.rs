@@ -5,6 +5,7 @@ fn main() {
     {
         build_swift_helper("voice");
         build_swift_helper("hands");
+        build_swift_helper("remote"); // roamies-remote: the phone's live view and hands (RV plan D1)
     }
     tauri_build::build()
 }

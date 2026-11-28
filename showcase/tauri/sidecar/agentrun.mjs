@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { ClaudeCodeAgent } from './claudecode.mjs';
 import { agentEvents } from './agentstream.mjs';
 import { createTools } from './tools.mjs';
+import { hardAsk } from './safety.mjs';
 import { leanTools } from './lean.mjs';
 import { agentSystem, checkFinish, toolsFor } from './agents.mjs';
 
@@ -75,7 +76,8 @@ async function run({ agent: a, model: md, content }) {
     allowActions: () => allow, ui: (m) => { if (m?.kind === 'hands' && 'on' in m && process.send) process.send({ t: 'ui', msg: { kind: 'hands', on: !!m.on } }); }, openUrl: () => {}, onCommitments: () => {}, showList: () => {}, fmtWhen: (ms) => new Date(ms).toLocaleString(),
     commitmentsText: () => '', userName: a.userName || 'The user', workdir: a.dir, own: a.dir, pointScale: () => pointScale(md.model ?? ''),
     // deletion (E2): the ask's own tag; untagged counts as a deletion, so Approve all never answers it.
-    ask: (opts, signal) => request({ t: 'ask', question: String(opts?.placeholder ?? ''), always: !!opts?.always, deletion: opts?.deletion !== false }, signal).then((yes) => (yes ? 'yes' : null)),
+    // hard: Approve all never answers it (pay, secret: safety.mjs hardAsk), checked by the parent (agents.mjs).
+    ask: (opts, signal) => request({ t: 'ask', question: String(opts?.placeholder ?? ''), always: !!opts?.always, deletion: opts?.deletion !== false, hard: hardAsk(opts) }, signal).then((yes) => (yes ? 'yes' : null)),
     // web_search's side search runs on the same Anthropic sign-in as this agent; other providers use the keyless engines.
     sideSearch: async () => {
       if (md.provider !== 'anthropic') return null;

@@ -102,12 +102,14 @@ export const brainFor = (settings, surface) => ({ model: settings.model, thinkin
 export function createSettingsWatch({ api, onChange = () => {}, log = () => {}, everyMs = SETTINGS_EVERY_MS, setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (h) => clearTimeout(h) }) {
   // known: a read answered since start (paired), so the wake phrase is Hydra's own, not the default (R10-14).
   let current = { ...SETTINGS_DEFAULTS }, served = new Set(), timer = null, running = false, inflight = null, known = false, avatar = null;
+  let generation = 0;
   const arm = () => { if (!running) return; if (timer) clearTimer(timer); timer = setTimer(() => { timer = null; refresh(); }, everyMs); timer?.unref?.(); };
-  async function read() {
+  async function read(at) {
     try {
       const r = await api.req('/api/agent/state', { timeout: 20_000 });
       if (!r.ok) { log('agent_settings', { status: r.status }); return current; }
-      take(await r.json());
+      const body = await r.json();
+      if (at === generation) take(body);
     } catch (e) { if (e?.code !== 'unpaired') log('agent_settings', { error: String(e?.message ?? e).slice(0, 120) }); }
     return current;
   }
@@ -125,16 +127,22 @@ export function createSettingsWatch({ api, onChange = () => {}, log = () => {}, 
   }
   /** Saves a change made on the Mac (any subset of the contract's fields). { ok, status } */
   async function patch(fields) {
+    const at = generation;
     try {
       const r = await api.req('/api/agent/state', { method: 'PATCH', body: fields, timeout: 20_000 });
       if (!r.ok) { log('agent_settings', { patch: r.status }); return { ok: false, status: r.status }; }
-      take(await r.json());
+      const body = await r.json();
+      if (at !== generation) return { ok: false, status: 0 };
+      take(body);
       return { ok: true, status: r.status };
     } catch (e) { log('agent_settings', { patch: String(e?.message ?? e).slice(0, 120) }); return { ok: false, status: 0 }; }
   }
   function refresh() {
     arm();
-    inflight ??= read().finally(() => { inflight = null; });
+    if (!inflight) {
+      const request = read(generation).finally(() => { if (inflight === request) inflight = null; });
+      inflight = request;
+    }
     return inflight;
   }
   return {
@@ -146,6 +154,10 @@ export function createSettingsWatch({ api, onChange = () => {}, log = () => {}, 
     refresh,
     patch,
     start() { running = true; return refresh(); },
-    stop() { running = false; known = false; served = new Set(); if (timer) clearTimer(timer); timer = null; },
+    stop({ reset = false } = {}) {
+      generation += 1; inflight = null;
+      running = false; known = false; served = new Set(); if (timer) clearTimer(timer); timer = null;
+      if (reset) { current = { ...SETTINGS_DEFAULTS }; avatar = null; }
+    },
   };
 }
