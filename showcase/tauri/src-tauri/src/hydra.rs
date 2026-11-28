@@ -3,6 +3,7 @@
 // Hydra embeds), plus the matching Entertainment player iframe on macOS. Wry asks about every frame's navigation, so a blocked
 // load is never opened anywhere: only a link the owner opens in a new window (target=_blank) goes to the browser. The page gets no Tauri commands at all (main.rs refuses every invoke from this
 // window): it talks to the app only through `hydra-desktop://<command>` navigations, which are caught here.
+use percent_encoding::percent_decode_str;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
@@ -306,16 +307,27 @@ pub fn navigate(app: &AppHandle, link: &str) {
 }
 
 /// The relay's shared limits (Hydra's src/lib/agent/relay-schema.ts): the panels a UI action may open, and a path
-/// inside Hydra (one leading slash, no host, no whitespace, backslash or control character, at most 500, and never an
-/// API, auth or login route, even after dot segments: the schema's one navigate rule).
+/// inside Hydra. Match the schema's `internalHref`, including its decoded path checks and character limit.
 const PANEL_PARAMS: [&str; 9] = ["tx", "day", "account", "task", "goal", "deal", "category", "routine", "taxline"];
 fn is_internal_href(h: &str) -> bool {
-    if h.len() > 500 || !h.starts_with('/') || h.starts_with("//") || h.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control()) { return false; }
+    if h.chars().count() > 500 || !h.starts_with('/') || h.starts_with("//")
+        || h.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control() || c == '\u{feff}') { return false; }
     let Ok(base) = Url::parse("https://hydra.invalid") else { return false };
     let Ok(u) = base.join(h) else { return false };
     if u.origin() != base.origin() { return false; }
-    let first = u.path().trim_start_matches('/').split('/').next().unwrap_or("").to_ascii_lowercase();
-    !["api", "auth", "login"].contains(&first.as_str())
+
+    // The decoder preserves malformed escapes, while the web's decodeURIComponent rejects them.
+    let bytes = u.path().as_bytes();
+    if bytes.iter().enumerate().any(|(i, &b)| b == b'%'
+        && !bytes.get(i + 1..i + 3).is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit))) { return false; }
+    let Ok(path) = percent_decode_str(u.path()).decode_utf8() else { return false };
+    if path.contains("//") { return false; }
+    let path = path.to_ascii_lowercase();
+    let segments = path.strip_prefix('/').unwrap_or(&path);
+    let first = segments.split('/').next().unwrap_or("");
+    let player = |p: &str| p == "entertainment/play" || p.starts_with("entertainment/play/");
+    !["api", "auth", "login"].contains(&first)
+        && !player(segments) && !segments.strip_prefix("dev/").is_some_and(player)
 }
 
 /// What may go to the page from the app: the orb's state and levels, attached or not (version 2); muted, paused, the
@@ -566,6 +578,17 @@ mod tests {
         assert_eq!(p(json!({ "woke": { "at": 5, "from": "web" } })), None, "only a clap or the phrase");
         assert_eq!(p(json!({ "woke": { "at": 1.5, "from": "clap" } })), None, "at is whole ms");
         assert_eq!(p(json!({ "woke": { "at": "5", "from": "clap" } })), None);
+    }
+
+    #[test]
+    fn relay_navigation_matches_the_web_schema() {
+        let cases: Vec<(String, bool)> = serde_json::from_str(include_str!("../../sidecar/test/fixtures/relay-paths.json")).unwrap();
+        for (href, expected) in cases {
+            let action = json!({ "ui": { "kind": "navigate", "href": href } });
+            assert_eq!(clean_push(&action).is_some(), expected, "{href:?}");
+        }
+        assert!(is_internal_href(&format!("/{}", "🙂".repeat(499))));
+        assert!(!is_internal_href(&format!("/{}", "🙂".repeat(500))));
     }
 
     #[test]

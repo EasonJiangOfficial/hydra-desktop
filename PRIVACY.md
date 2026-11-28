@@ -29,6 +29,8 @@ found for it).
 
 **Hydra** (https://hydra-olive-one.vercel.app and its Supabase sign-in) is what the main window shows, as any browser
 would. When the Hydra agent API exists and the app is paired, the agent's Hydra tools talk to the address you set.
+When the Mac is paired, every drawing Hydra makes on your screen is saved to your Hydra Notes: its words, and pictures
+of its own cards and marks (never of your screen or other windows).
 
 **Hugging Face** is used once, on Windows and Linux, to download the speech model.
 

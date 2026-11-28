@@ -58,8 +58,9 @@ assert.equal(S.getCommitment(r.id).text, 'Call mom', 'a copy, not the stored one
   const { readFileSync } = await import('node:fs');
   const tools = readFileSync(new URL('../tools.mjs', import.meta.url), 'utf8'), side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
   assert.match(tools, /updateCommitment\(target, \{ status: 'open', dueMs: ms, keepSeries: true \}\)/);
-  const params = /async function prompt\(([^)]*)\)/.exec(side)[1].split(',').map((p) => p.trim().split(/\s*=/)[0]);
-  const args = /running\.then\(\(\) => prompt\(([^)]*)\)\)/.exec(side)[1].split(',').map((a) => a.trim());
+  const params = /^async function prompt\((.*)\) \{/m.exec(side)[1].split(',').map((p) => p.trim().split(/\s*=/)[0]);
+  const start = side.indexOf('function enqueue('), end = side.indexOf('\n}', start);
+  const args = /^\s*return prompt\((.*)\);$/m.exec(side.slice(start, end))[1].split(',').map((a) => a.trim() === 'pairBinding' ? 'drawPair' : a.trim());
   assert.deepEqual(args, params, 'enqueue passes prompt its arguments in prompt\'s order');
 }
 await S.flushWrites();

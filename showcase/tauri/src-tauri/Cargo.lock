@@ -2854,10 +2854,12 @@ dependencies = [
  "objc2",
  "objc2-service-management",
  "objc2-web-kit",
+ "percent-encoding",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+ "tempfile",
  "x11rb 0.14.0",
  "zbus",
 ]

@@ -136,7 +136,7 @@ function piece(from, to, names, st) {
   assert.match(side, /foldWait\?\.abort\(\); for \(const \[k, w\] of yesNoOpen\) \{ w\.took = true; askTakeEnd\(k\); \}/, 'Stop closes it');
   assert.match(side, /if \(w\.voice && w\.voice === voice\) \{ w\.took = true; askTakeEnd\(id\); \}/, 'the turn ending closes it');
   assert.match(side, /else if \(m\.type === 'voice_played'\) askPlayed\(String\(m\.mark \?\? ''\)\);/, "fed by the player's reports");
-  assert.match(side, /m\.state === 'idle'\) \{ addOnTake = false; hush\(false\); askTake = null; for \(const \[id, w\] of yesNoOpen\) if \(w\.a\.voiced && !w\.took\) askArm\(id, w\);/);
+  // wakeconfirm.test.mjs runs the real idle handler and checks the ask is re-armed only after the take clears.
   assert.doesNotMatch(side, /afterVoice: true/, 'no take on a plain quiet gap');
   assert.doesNotMatch(side, /askAudio|CHARS_PER_SEC|voiceEndsAt/, 'no estimate from chunk lengths anywhere');
 }
@@ -164,8 +164,14 @@ function piece(from, to, names, st) {
   const block = side.slice(side.indexOf('const wait = foldWait = new AbortController();'), side.indexOf('const notReady = await readyAgent();'));
   assert.match(block, /const line = endNote\(\{ how: wait\.signal\.reason === 'sleep' \? 'sleep' : 'stop' \}\)\.line;/, 'never the stale quiet flag');
   assert.doesNotMatch(block, /quiet/);
-  assert.match(block, /toThread\(turnWords, line\);\n      return;/, 'written to the thread');
-  assert.match(side, /function toThread\(user, assistant\) \{ if \(hydraKey && !hydraRevoked && user\) localSync\.record\(\{ user, assistant \}\); \}/);
+  assert.match(block, /toThread\(turnWords, line, drawPair\);\n      return;/, 'written to the originating thread');
+  const records = [];
+  const { toThread } = piece('function toThread(', 'const STALL_MS', ['toThread'], {
+    notePairing: () => 'current', localSync: { record: (record) => records.push(record) },
+  });
+  toThread('fixture request', 'stopped', 'earlier');
+  toThread('fixture request', 'stopped', 'current');
+  assert.deepEqual(records, [{ user: 'fixture request', assistant: 'stopped', pairBinding: 'current' }]);
   assert.match(side, /else if \(foldWait\) \{ logLine\('stopped', \{ by, waiting: 'fold' \}\); foldWait\.abort\('sleep'\); \}/, 'sleep says so by its reason');
   const ac = new AbortController(); ac.abort(); assert.notEqual(ac.signal.reason, 'sleep', 'a plain Stop is a stop');
 }
@@ -181,27 +187,28 @@ function piece(from, to, names, st) {
   assert.ok(said.length > n, 'resumed: lines again');
 }
 
-// ---- 9. A connected server's read of a sign-in file runs under Approve all (it is still tagged a deletion).
+// ---- 9. A connected server's read of a sign-in file asks under Approve all (secret: the owner's hard limits). Since
+// A3 round 3 a sign-in store under ~/.config (hub's) is refused outright; another hidden file asks, untagged.
 {
   const H = os.homedir(); fs.mkdirSync(path.join(H, '.config'), { recursive: true }); fs.writeFileSync(path.join(H, '.config/hub'), 'oauth_token: FAKE');
-  assert.equal(checkMcpCall({ name: 'read_text_file', annotations: { readOnlyHint: true }, args: { path: path.join(H, '.config/hub') }, home: H }).secret, true);
+  assert.equal(checkMcpCall({ name: 'read_text_file', annotations: { readOnlyHint: true }, args: { path: path.join(H, '.config/hub') }, home: H }).level, 'block', 'a sign-in store is refused');
   let ran = 0;
   const mcp = { tool: async () => ({ annotations: { readOnlyHint: true }, execute: async () => { ran++; return 'oauth_token: FAKE'; } }), list: () => [] };
   const asks = [];
   const ask = async (o) => { asks.push(o.deletion); return approveAllSays(true, o) ? 'yes' : null; };
   const t = createMcpTools({ mcp, ask, isYes, userName: 'Test', checkCall: (x) => checkMcpCall({ ...x, home: H }), openUrl: async () => {}, allowActions: () => true, keyStore: 'Keychain' }).find((x) => x.name === 'use_connection');
-  await t.execute({ server: 'files', tool: 'read_text_file', args: JSON.stringify({ path: path.join(H, '.config/hub') }) }, {});
-  assert.deepEqual(asks, [true]); assert.equal(ran, 1, 'Approve all read it without an ask');
+  await assert.rejects(t.execute({ server: 'files', tool: 'read_text_file', args: JSON.stringify({ path: path.join(H, '.config/hub') }) }, {}), /Blocked for safety/);
+  assert.deepEqual(asks, [], 'refused, never asked'); assert.equal(ran, 0, 'Approve all never read it');
 }
 
 // ---- 10, 11, 12. Under Approve all: a plan re-asked in another app keeps its deletion tag; opening a hidden sign-in file
-// asks; bringing a hidden password manager forward asks.
+// asks (secret); a screenshot of a hidden password manager is refused, never asked (the owner's hard limits).
 {
   const noop = async () => {};
   const run = async (mode, fn) => {
     fs.writeFileSync(stState, JSON.stringify({ mode })); fs.writeFileSync(stLog, '');
     const asks = [];
-    const ask = async (o) => { const auto = approveAllSays(true, o); asks.push({ auto, deletion: o.deletion, q: String(o.placeholder).split('\n')[0] }); return auto || mode === 'replan' ? 'yes' : null; };
+    const ask = async (o) => { const auto = approveAllSays(true, o); asks.push({ auto, deletion: o.deletion, secret: !!o.secret, q: String(o.placeholder).split('\n')[0] }); return auto || mode === 'replan' ? 'yes' : null; };
     const t = createTools({ allowActions: () => true, ui: () => {}, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', workdir: tmp, ask });
     t.nextTurn?.();
     const r = await fn((n) => t.tools.find((x) => x.name === n)).then(String, (e) => `ERR ${e.message}`);
@@ -214,15 +221,19 @@ function piece(from, to, names, st) {
   fs.mkdirSync(path.join(os.homedir(), '.config'), { recursive: true });
   const hidden = path.join(os.homedir(), '.config', 'b4fix2-hub');
   fs.writeFileSync(hidden, 'oauth_token: FAKE');
-  assert.equal(checkOpen(hidden, os.homedir(), { app: 'TextEdit' }).secret, true);
+  // A3 round 3: a hidden file is an ordinary ask (Approve all answers it); a real sign-in store is refused outright.
+  assert.equal(checkOpen(hidden, os.homedir(), { app: 'TextEdit' }).secret, undefined);
+  assert.equal(checkOpen(path.join(os.homedir(), '.config', 'gh', 'hosts.yml'), os.homedir(), { app: 'TextEdit' }).level, 'block');
   try {
     const op = await run('plain', (T) => T('open').execute({ target: hidden, app: 'TextEdit' }, {}));
-    assert.deepEqual(op.asks.map((a) => [a.auto, a.deletion]), [[true, true]], 'Approve all opens a sign-in file');
+    assert.deepEqual(op.asks.map((a) => [a.auto, a.secret]), [[true, false]], 'opening a hidden file is an ordinary ask under Approve all');
   } finally { fs.rmSync(hidden, { force: true }); }
   assert.equal(isPasswordApp('1Password'), true); assert.equal(isPasswordApp('Safari'), false);
   const vault = await run('vault', (T) => T('take_screenshot').execute({ target: '1Password' }, {}));
-  assert.ok(vault.asks.length >= 1 && vault.asks.every((a) => a.auto === true && a.deletion === true), `Approve all brings 1Password forward: ${JSON.stringify(vault.asks)}`);
-  assert.match(fs.readFileSync(launched, 'utf8'), /-a TextEdit/, 'the sign-in file was opened');
+  assert.deepEqual(vault.asks, [], `a screenshot of 1Password is refused, never asked: ${JSON.stringify(vault)}`);
+  assert.match(vault.r, /Blocked for safety/);
+  assert.ok(!vault.calls.some((c) => c.fwd), 'and nothing was brought forward');
+  // (Since A3 round 3 the hidden file above is an ordinary ask that Approve all answers, so it did open: no "no" here.)
 }
 
 // ---- 13, 19. Folding goes on when replies end with a '?' that is no question, or when every reply asks; a question is
@@ -286,7 +297,15 @@ function piece(from, to, names, st) {
 }
 
 // ---- 15. A new conversation drops the fold's kept screenshots.
-assert.match(side, /function freshSession\(why\) \{\n[^\n]*\n[^\n]*\n  foldImages = null;/);
+{
+  const old = { messages: [] }, fresh = { messages: [] };
+  const st = { session: old, newSession: () => fresh, config: {}, liveBlocks: new Map(), pruneSessions() {},
+    agent: null, pendingFold: null, lastInput: null, quizDone: null, lastRequest: null, foldFails: 1, foldImages: ['fixture-image'] };
+  const { freshSession } = piece('function freshSession(', 'const toolT', ['freshSession'], st);
+  await freshSession(null);
+  assert.equal(st.session, fresh);
+  assert.equal(st.foldImages, null);
+}
 
 // ---- 20. A brace in the model's preamble doesn't fail the fold.
 {

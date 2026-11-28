@@ -12,7 +12,7 @@ import crypto, { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import { ADDITIONS_UNANSWERED, HOLD_MAX, INPUT_PREFIX, TOO_MANY_ADDED, createRelay, isSubturn, relaySession, toolFilter, turnPrompt } from '../relay.mjs';
-import { ADDED_PREFIX, relayApprovalSchema, relayBatchSchema, relayEventsAnswerSchema, relaySubturnSchema, subturnResultSchema } from '../relayschema.mjs';
+import { ADDED_PREFIX, internalHref, relayApprovalSchema, relayBatchSchema, relayEventsAnswerSchema, relaySubturnSchema, subturnResultSchema } from '../relayschema.mjs';
 import { ClaudeCodeAgent } from '../claudecode.mjs';
 import { BRAIN_SYSTEM, MAC_OFFLINE_TEXT, MAC_UNSURE_TEXT, askMacTool, createBrainTurn } from '../brain-server.mjs';
 import { showTool } from '../hydramcp.mjs';
@@ -297,13 +297,16 @@ const askMac = (hydra, parent, o = {}) => askMacTool({ api: hydra.api('brain-1',
   assert.deepEqual(bad.events.filter((e) => e.type === 'ui'), [], 'never a scope the server refuses');
 }
 
-// ---- 6. relayschema.mjs is the web's src/lib/agent/relay-schema.ts on main at 00bda7a (capabilitiesSchema.signedIn and
-// the model event), byte for byte. The hash was taken from that file (gh api, raw, at 00bda7a9) with shasum -a 256.
+// ---- 6. The web's relay schema at 457bd57, byte for byte, and its navigation rules shared with the Rust bridge.
 {
-  const WEB_SHA256 = 'dcef8da0faa574142c1696d153da9e581aafaa24c9f3c821a904a6a7ea6e11bf';
+  const WEB_SHA256 = '663fd02bc86756d5eb0323223cf126e0297facb5f34087122a20cdcd7005cad1';
   const mine = fs.readFileSync(new URL('../relayschema.mjs', import.meta.url));
   assert.equal(crypto.createHash('sha256').update(mine).digest('hex'), WEB_SHA256, 'relayschema.mjs differs from the web\'s relay-schema.ts: copy it again and update the hash');
   assert.ok(relayEventsAnswerSchema.safeParse({ ok: true, status: 'claimed', inputs: [{ seq: 1, text: 'x' }] }).success);
+  const paths = JSON.parse(fs.readFileSync(new URL('./fixtures/relay-paths.json', import.meta.url), 'utf8'));
+  for (const [href, expected] of paths) assert.equal(internalHref.safeParse(href).success, expected, JSON.stringify(href));
+  assert.ok(internalHref.safeParse('/' + '🙂'.repeat(499)).success, '500 Unicode code points');
+  assert.ok(!internalHref.safeParse('/' + '🙂'.repeat(500)).success, '501 Unicode code points');
 }
 // ---- 7. Round 11.
 {

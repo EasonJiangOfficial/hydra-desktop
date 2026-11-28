@@ -1,7 +1,7 @@
 // Hydra's cues, played here in the voice helper (build 4 E4, recon-sounds fix). The helper is the one process that
-// sees every trigger with its source and owns OutputMute, so a cue is never silenced by mute-while-listening: listen
-// and wake are the overlay's own rendered chimes (showcase/roamies/sounds, bundled as resources, --sounds <dir>), and
-// pending is the soft loop while Hydra works. All follow the sound switch ('sound') and Hydra's volume (play_volume).
+// sees every trigger with its source. Listen and wake are the overlay's own rendered chimes (showcase/roamies/sounds,
+// bundled as resources, --sounds <dir>), and pending is the soft loop while Hydra works. All follow
+// the sound switch ('sound') and Hydra's volume (play_volume).
 import AVFoundation
 import Foundation
 
@@ -13,7 +13,7 @@ enum Cue {
     static var speaking: () -> Bool = { false }
     private static var players: [String: AVAudioPlayer] = [:]
     private static var missing = Set<String>()
-    /// When the last one-shot cue ends (uptime): a take that opens meanwhile keeps it audible (keepAudible).
+    /// When the last one-shot cue ends (uptime): a take's empty-silence check waits for it (Voice.chimeCovers).
     private(set) static var until = 0.0
 
     /// Which takes chime as they open: the owner's own triggers (a double clap, the key phrase, the talk keys, an orb
@@ -32,18 +32,11 @@ enum Cue {
         return p
     }
 
-    /// A one-shot chime (listen, wake). It lifts the mute for its own length, as SnapCue does.
+    /// A one-shot chime (listen, wake).
     static func play(_ name: String) {
         guard soundOn, volume() > 0, let p = player(name) else { return }
         p.numberOfLoops = 0; p.volume = volume(); p.currentTime = 0; p.play()
         until = uptime() + p.duration
-        OutputMute.lift(for: p.duration + 0.05)
-    }
-    /// A take just muted the output (OutputMute.begin) while a cue still plays (the wake chime, then its take): lift it
-    /// for the rest of the cue.
-    static func keepAudible() {
-        let left = until - uptime()
-        if left > 0 { OutputMute.lift(for: left + 0.05) }
     }
 
     // ---- pending: while Hydra thinks or runs tools in a spoken turn (the sidecar's 'pending') ----
@@ -114,12 +107,27 @@ enum CueTest {
         check("ask take: still speaking after 30 s, none", Voice.afterVoiceDue(started: true, quietFor: 0, waited: 31) == false)
         if let dir {
             Cue.dir = URL(fileURLWithPath: dir, isDirectory: true)
-            for (n, len) in [("listen", 0.5), ("wake", 0.9), ("pending", 2.4)] {
+            for (n, len) in [("listen", 0.5), ("wake", 0.9), ("pending", 2.4), ("startup", 1.2)] {
                 let p = Cue.player(n)
                 check("\(n).wav loads", p != nil)
                 check("\(n).wav is \(len) s", abs((p?.duration ?? 0) - len) < 0.02)
             }
             check("a missing file is no cue", Cue.player("nope") == nil)
+            // The startup tone (the app plays it at launch, main.rs) heard by the mic (clap-to-talk is on by default and
+            // is not told Hydra is speaking) is no double clap: at every sensitivity, 16 and 48 kHz, from 6 dB under the
+            // file to 20 dB over it (0 dBFS).
+            if let (x, r) = ClapBench.read(URL(fileURLWithPath: dir).appendingPathComponent("startup.wav")) {
+                var rng = ClapTest.Rng(s: 2026), fired = 0
+                for rate in [48000.0, 16000.0] { for gain: Float in [0.5, 1, 3, 10] { for k in [0.2, 0.5, 0.8] {
+                    var b = ClapTest.room(2.5, rate: rate, rng: &rng)
+                    let y = ClapBench.resample(x, from: r, to: rate), at = Int(0.5 * rate)
+                    for i in 0 ..< y.count where at + i < b.count { b[at + i] += y[i] * gain }
+                    let d = ClapDetector(rate: rate, sensitivity: k)
+                    var i = 0
+                    while i < b.count { let j = min(b.count, i + 1024); if d.feed(Array(b[i ..< j])) { fired += 1 }; i = j }
+                } } }
+                check("the startup tone in the mic is no double clap (\(fired) of 24 fired)", fired == 0)
+            } else { check("startup.wav reads", false) }
             // Sound off: nothing plays (and nothing is started here either way).
             Cue.soundOn = false
             let before = Cue.until

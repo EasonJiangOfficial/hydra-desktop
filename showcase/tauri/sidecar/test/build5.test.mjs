@@ -1,7 +1,6 @@
-// Desktop build 5: ChatGPT stays on the Mac, notes post, the voice cache key, and the phase list.
+// Desktop build 5: ChatGPT stays on the Mac, the voice cache key, and the phase list (drawn notes: notesync.test.mjs).
 import assert from 'node:assert/strict';
 import { avatarStyle, cleanAvatar, gptRoute } from '../agentsettings.mjs';
-import { noteBody } from '../notesync.mjs';
 import { phaseOf } from '../voiceturn.mjs';
 import { bestMacVoice } from '../sysvoice.mjs';
 
@@ -24,10 +23,6 @@ assert.equal(phaseOf({ asking: true, busy: true }), 'asking');
 assert.equal(phaseOf({ busy: true, answerSaid: false, playing: true }), 'working');
 assert.equal(phaseOf({ busy: true, answerSaid: true }), 'talking');
 assert.equal(phaseOf({}), 'idle');
-
-assert.deepEqual(noteBody({ kind: 'note', text: 'Milk', part: 'p1' }, 'draw-1:p1'), { text: 'Milk', source: 'desktop', client_id: 'draw-1:p1' });
-assert.equal(noteBody({ kind: 'ring', text: 'no' }, 'x'), null);
-assert.equal(noteBody({ kind: 'note', text: '  ' }, 'x'), null);
 
 const listing = [
   'Alex                en_US    # Hello',

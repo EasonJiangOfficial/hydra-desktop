@@ -134,6 +134,13 @@ const { LIMITS } = await import('../relayschema.mjs');
   assert.equal(got.length, 1);
   assert.ok(!store.liveFacts().some((f) => f.id === old.id), 'a yes saves it and marks the old one replaced');
   assert.deepEqual(await store.learnFactsAsked([{ text: 'x y' }], async () => { throw new Error('gone'); }), [], 'a failed ask is a no');
+  const retired = new AbortController();
+  const result = await store.learnFactsAsked([{ text: 'A retired pairing fact' }], async () => {
+    retired.abort();
+    return true;
+  }, retired.signal);
+  assert.deepEqual(result, [], 'an answer that arrives with a pairing reset cannot save the fact');
+  assert.ok(!store.listFacts().some((f) => f.text === 'A retired pairing fact'));
 }
 
 // ---- R10-8 (owner, 2026-11-22): Hydra's server owns the ask for its own data. A write runs with no second ask on this

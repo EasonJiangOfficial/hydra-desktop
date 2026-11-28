@@ -51,7 +51,7 @@ const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
   assert.match(side, /else if \(m\.type === 'voice' && m\.text\?\.trim\(\)\) \{\n\s+const held = cutTake \? afterHeld\(\{ words: m\.text, reply: heardTrack\.said\(\) \}\) : null;\n\s+if \(held === 'stop'\) \{ cutTake = false; speech\.stop\(\); \}/,
     'the owner\'s words over the reply keep it cut');
   assert.match(side, /if \(held === 'echo'\) \{ logLine\('echo_words', \{ chars: m\.text\.trim\(\)\.length \}\); return; \}/, "Hydra's own words are dropped, never sent as a request");
-  assert.match(side, /m\.state === 'idle'\) \{ addOnTake = false; hush\(false\);[^\n]*if \(snap\?\.waitingVoice\) snap\.waitingVoice = false; if \(cutTake\) resumeCut\(\); \}/, 'a take that heard nothing lets the reply go on');
+  assert.match(side, /m\.state === 'idle'\) \{ voicePairing = null; addOnTake = false; hush\(false\);[^\n]*if \(snap\?\.waitingVoice\) snap\.waitingVoice = false; if \(cutTake\) resumeCut\(\); \}/, 'a take that heard nothing lets the reply go on');
   const resume = side.match(/function resumeCut\(\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
   assert.match(resume, /cutTake = false;/);
   assert.match(resume, /interruptedAfter = '';/, 'the next turn isn\'t told the reply was cut off');

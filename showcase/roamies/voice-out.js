@@ -12,6 +12,7 @@
   const ADAPT = !!window.ROAMIE_LINUX, MAX_LEAD = 1, JITTER = 0.5;
   let lead = LEAD, late = false;
   let ac = null, out = null, meter = null, buf = null, id = null, endAt = 0, live = [], lv = 0;
+  const fading = new Set();
   // How fast the voice talks (characters a second), learned from each whole reply: its audio length against how much
   // text it said. Drawings pace their marks to it (ink.js).
   let rate = 15, secs = 0;
@@ -46,13 +47,19 @@
     return b;
   };
 
-  const stop = () => {
+  const stop = (immediate = false) => {
     if (id) isOver(id);
     id = null; endAt = 0;
-    if (!ac || !live.length) return;
-    const t = ac.currentTime, old = live; live = [];
-    out.gain.cancelScheduledValues(t); out.gain.setValueAtTime(out.gain.value, t); out.gain.linearRampToValueAtTime(0, t + 0.04);
-    for (const s of old) { try { s.stop(t + 0.05); } catch { /* not started */ } }
+    if (!ac || (!live.length && !(immediate && fading.size))) return;
+    const t = ac.currentTime, old = immediate ? [...live, ...fading] : live;
+    live = [];
+    if (immediate) fading.clear();
+    out.gain.cancelScheduledValues(t); out.gain.setValueAtTime(immediate ? 0 : out.gain.value, t);
+    if (!immediate) out.gain.linearRampToValueAtTime(0, t + 0.04);
+    for (const s of old) {
+      if (!immediate) fading.add(s);
+      try { s.stop(immediate ? t : t + 0.05); } catch { fading.delete(s); }
+    }
   };
 
   const play = (m) => {
@@ -69,7 +76,7 @@
     const at = Math.max(endAt, now + cushion);
     s.start(at); endAt = at + b.duration; secs += b.duration; sched.push([at, b.duration]);
     live.push(s);
-    s.onended = () => { live = live.filter((x) => x !== s); };
+    s.onended = () => { live = live.filter((x) => x !== s); fading.delete(s); };
   };
 
   let vol = null, volume = 1, paused = false, native = false;
@@ -77,6 +84,7 @@
   // it has played here, by the audio clock (a pause stops it), and only when this player is the one heard: with the
   // Mac's voice helper playing (native), the helper reports it. A reply stopped or replaced never reports. [mark, id, end]
   let marks = [], markTimer = null;
+  let guideEpoch; // undefined in the desktop overlay, null while the guide waits for its first state
   const checkMarks = () => {
     markTimer = null;
     marks = marks.filter(([mk, rid, end]) => {
@@ -92,8 +100,17 @@
     onPlayed: null,
     setVolume(v) { volume = Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : 1; if (vol) vol.gain.value = native ? 0 : volume; },
     setNative(on) { native = !!on; if (vol) vol.gain.value = native ? 0 : volume; },
+    setGuideEpoch(epoch) {
+      epoch = epoch || null;
+      if (guideEpoch === epoch) return;
+      guideEpoch = epoch;
+      stop(true);
+      clearTimeout(markTimer); markTimer = null;
+      marks = []; sched = []; feels.clear(); over.clear();
+    },
     handle(m) {
       if (m.stop) return stop();
+      if (guideEpoch === undefined ? m.guideEpoch : !guideEpoch || m.guideEpoch !== guideEpoch) return;
       if ('feel' in m) {
         if (!feels.has(m.id)) { feels.set(m.id, []); if (feels.size > 8) feels.delete(feels.keys().next().value); }
         feels.get(m.id).push([m.at ?? 0, m.feel]);

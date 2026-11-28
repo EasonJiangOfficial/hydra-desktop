@@ -25,7 +25,9 @@ WEB_EXT=(--external:@mozilla/readability --external:turndown --external:turndown
   --log-level=warning
 # The readers and their dependencies, laid out as npm installed them (a nested copy travels with its parent).
 # One that's missing only costs web_fetch its Markdown: it falls back to plain text.
-node - linkedom @mozilla/readability turndown turndown-plugin-gfm unpdf <<'EOF'
+# werift (the phone view's WebRTC peer) loads by dynamic import too (remoteview.mjs PEER_LIB): without it Phone View
+# stays off.
+node - linkedom @mozilla/readability turndown turndown-plugin-gfm unpdf werift <<'EOF'
 const fs = require('node:fs'), path = require('node:path');
 const done = new Set();
 function copy(name, from) {
@@ -39,7 +41,7 @@ function copy(name, from) {
       for (const dep of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies })) copy(dep, src);
       return;
     }
-    if (dir === process.cwd()) return console.error(`bundle: ${name} isn't installed; web_fetch will read pages as plain text`);
+    if (dir === process.cwd()) return console.error(`bundle: ${name} isn't installed; ${name === 'werift' ? 'Phone View stays off' : 'web_fetch will read pages as plain text'}`);
   }
 }
 for (const name of process.argv.slice(2)) copy(name, process.cwd());

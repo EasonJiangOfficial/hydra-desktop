@@ -134,14 +134,13 @@ console.log('shape radius tests: passed');
   console.log('draw window frame tests: passed');
 }
 
-// ---- parts: ids in order, never reused; screen marks clear on their own, cards stay
+// ---- parts: ids in order, never reused; each stays until it is closed or cleared
 {
   const p = createParts();
   const ids = p.assign([{ marks: [{ kind: 'ring', at: { name: 'Export' } }, { kind: 'emote', name: 'hype' }, { kind: 'card', heading: 'Interest' }] }]);
   assert.deepEqual(ids, ['p1', 'p2'], 'emotes get no id');
   assert.equal(p.describe(), 'p1 ring “Export”, p2 card “Interest”');
-  assert.equal(p.screenCount, 1);
-  p.clearScreen();
+  p.remove('p1');
   assert.deepEqual(p.ids, ['p2'], 'the card stays');
   assert.deepEqual(p.assign([{ marks: [{ kind: 'label', text: 'here', at: {} }] }]), ['p3'], 'ids are never reused');
   p.remove('p2');
@@ -150,17 +149,14 @@ console.log('shape radius tests: passed');
   p.assign([{ marks: [{ kind: 'note', text: 'a' }, { kind: 'note', text: 'b' }] }]);
   p.clear((id) => id === 'p4');
   assert.deepEqual(p.ids, ['p4'], 'clear keeps what keep() names (a pinned card)');
-  // Regression: eight cards in one drawing filled the screen and the last was drawn on top of the first. Only a
-  // few stay up: the oldest are forgotten (screen marks and cards that don't count are left alone).
+  // Owner, 2026-11-26: "and not go away automatically". No card cap: ten cards stay ten (the overlay has none either).
   const q = createParts();
-  q.assign([{ marks: [{ kind: 'ring', at: { name: 'Export' } }, ...'abcdefghij'.split('').map((text) => ({ kind: 'note', text }))] }]);
-  assert.deepEqual(q.trimCards(LIMITS.cardsShown, (id) => id === 'p2'), ['p3'], 'the oldest card that counts goes');
-  assert.deepEqual(q.ids, ['p1', 'p2', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9', 'p10', 'p11']);
-  assert.deepEqual(q.trimCards(LIMITS.cardsShown), ['p2'], 'now p2 counts too');
-  assert.deepEqual(q.trimCards(LIMITS.cardsShown), [], `${LIMITS.cardsShown} cards: nothing to close`);
-  // The overlay closes them by the same number.
+  q.assign([{ marks: 'abcdefghij'.split('').map((text) => ({ kind: 'note', text })) }]);
+  assert.equal(q.ids.length, 10);
+  assert.equal(q.trimCards, undefined);
+  assert.equal(LIMITS.cardsShown, undefined);
   const { readFileSync } = await import('node:fs');
-  assert.ok(readFileSync(new URL('../../../roamies/ink.js', import.meta.url), 'utf8').includes(`const MAX_CARDS = ${LIMITS.cardsShown};`), 'the overlay and the sidecar agree on how many cards stay up');
+  assert.ok(!readFileSync(new URL('../../../roamies/ink.js', import.meta.url), 'utf8').includes('MAX_CARDS'), 'the overlay closes no card to make room');
   console.log('draw parts tests: passed');
 }
 

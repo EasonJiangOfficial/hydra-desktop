@@ -4,6 +4,7 @@ import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import os from 'node:os';
 import nodePath from 'node:path';
+import { KEY_NAME, SECRET_FILE, WEB_SECRET_FILE, cardNumber, clearlyNotMoney, codeBox, credentialLabel, foldHard, hardMatch, inBrowser, moneyLabel, moneyStop, preciseTyped, showsAmount, typedCredential } from './hardlimits-core.mjs';
 // Rules work on forward-slash paths everywhere, so a Windows path (C:\Users\ken\.ssh) meets the same checks.
 const path = nodePath.posix;
 const slash = (p) => String(p ?? '').replace(/\\/g, '/');
@@ -16,14 +17,14 @@ const verdict = (level, reason = '') => ({ level, reason });
 const SECRET = [
   /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gnupg(\/|$)/, /(^|\/)\.aws(\/|$)/, /(^|\/)\.azure(\/|$)/, /(^|\/)\.kube\/config$/,
   /(^|\/)\.docker\/config\.json$/, /(^|\/)\.netrc$/, /(^|\/)\.cargo\/credentials(\.toml)?$/, /(^|\/)\.npmrc$/, /(^|\/)\.pypirc$/, /(^|\/)\.git-credentials$/,
-  /(^|\/)\.config\/gh(\/|$)/, /(^|\/)\.config\/gcloud(\/|$)/, /(^|\/)\.gg\/auth\.json$/, /(^|\/)(Roamies|HydraAgent)\/Data\/secrets\.json$/i, /(^|\/)\.tauri(\/|$)/,
+  /(^|\/)\.config\/(gh|gcloud|op|hydra|hub|github-copilot|doctl|heroku|stripe|vercel|netlify|gitlab|glab-cli|rclone|configstore|sops|age|1password|bitwarden|bw|anthropic|openai|claude)(\/|$)/i, /(^|\/)\.config\/.+\/(keys?|tokens?|api[_-]?keys?|secrets?|credentials?|auth|access[_-]?token)(\.(txt|json|ya?ml|toml|env|ini))?$/i, SECRET_FILE, /(^|\/)\.gg\/auth\.json$/, /(^|\/)(Roamies|HydraAgent)\/Data\/secrets\.json$/i, /(^|\/)\.tauri(\/|$)/,
   /(^|\/)Library\/Keychains(\/|$)/, /(^|\/)Library\/Cookies(\/|$)/, /\/(Cookies|Login Data[^/]*|Web Data)(-journal)?$/,
   // Any .env name (.env.production.local, .env.local.bak, .envrc), in any case, anywhere, but a template
   // (.env.example, .env.sample: hidden, so still asked); and Cloudflare's .dev.vars.
-  /(^|\/)\.env(?![^/]*\.(example|sample|template|dist)(\.md|\.txt)?$)[^/]*$/i, /(^|\/)\.dev\.vars$/i, /\.(pem|p12|pfx|key|keystore|jks)$/i, /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/,
+  /(^|\/)\.env(?![^/]*\.(example|sample|template|dist)(\.md|\.txt)?$)[^/]*$/i, /(^|\/)\.dev\.vars$/i, /\.(pem|p12|pfx|keystore|jks)$/i, /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/,
   // Sign-ins other tools keep (seventh review F3): any auth.json or credentials file (Codex, Claude Code, Vercel, gem,
   // Terraform), tokens, database and cloud configs, service-account keys and Terraform state (it holds secrets).
-  /(^|\/)auth\.json$/i, /(^|\/)\.?credentials[^/]*$/i, /(^|\/)\.claude\.json$/i, /(^|\/)(\.vault-token|\.pgpass|\.s3cfg|\.boto|\.my\.cnf|access-token|token)$/i,
+  /(^|\/)auth\.json$/i, /(^|\/)\.?credentials(?![^/]*\.(md|markdown|mdx|rst|adoc|html?|pdf|docx?|pages|key|png|jpe?g|[cm]?[jt]sx?|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|cs|php|sh)$)[^/]*$/i, /(^|\/)\.claude\.json$/i, /(^|\/)(\.vault-token|\.pgpass|\.s3cfg|\.boto|\.my\.cnf|access-token|token)$/i,
   /(^|\/)rclone\.conf$/i, /(^|\/)\.yarnrc\.yml$/i, /(^|\/)configstore(\/|$)/i, /(^|\/)\.railway(\/|$)/i, /(^|\/)\.supabase(\/|$)/i,
   /(^|\/)\.?huggingface\/(stored_)?tokens?$/i, /(^|\/)service[-_]?account[^/]*\.json$/i, /\.tfstate(\.backup)?$/i,
   // Key files kept outside dot folders (eighth review V8-8): App Store Connect .p8, PuTTY .ppk, Google OAuth client
@@ -132,9 +133,172 @@ const hits = (list, all, homes) => all.some((a) => homes.some((h) => ruleHit(lis
 const rootDot = (all) => all.some((a) => /^\/\.[^/]/.test(a));
 
 // Buttons that delete, pay, send or sign out: Sidekick needs the user's yes before clicking one,
-// even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift.
-export const RISKY_CLICK = /(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|quit anyway|quit|replace|trash|empty (the )?bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃/iu;
-export const isRiskyClick = (label) => RISKY_CLICK.test(String(label ?? ''));
+// even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift (the money words too: the helper
+// stops at a Sell, Swap or Subscribe it reaches by a spot or an id, and the sidecar asks with the label, B2).
+export const RISKY_CLICK = /(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close (my |your )?account|close without saving|quit anyway|quit|replace|trash|empty (the )?bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|move to (the )?(trash|bin)|force quit|overwrite|submit|cancel (my |your |the )?(subscription|plan|membership|account|order)|unsubscribe|pay|purchase|buy|place (the |your )?order|checkout|check out|confirm (payment|order|purchase|transfer)|confirm|send|transfer|withdraw|uninstall|empty trash|discard|sign out|log out|logout|format|revoke|publish|sell|trade|swap|subscribe|deposit|donate|tip|bid|wire|top up|add funds|redeem|stake|cash out|order now|submit order|complete order|book now|start (?:a )?(?:free )?trial|upgrade now|bestellen|verkaufen|vender|vendre|eliminar|borrar|pagar|comprar|enviar|cerrar sesi[oó]n|supprimer|effacer|payer|acheter|envoyer|se d[eé]connecter|d[eé]connexion|l[oö]schen|entfernen|bezahlen|kaufen|senden|abmelden|excluir|apagar|terminar sess[aã]o|elimina|cancella|paga|acquista|invia|esci|verwijderen|betalen|kopen|verzenden|uitloggen|afmelden|padam|hapus|bayar|beli|hantar|kirim|log keluar|nyahlanggan)(?![\p{L}])|删除|刪除|移除|清空|支付|付款|购买|購買|发送|發送|退出登录|登出|注销|削除|消去|支払|購入|送信|ログアウト|退会|삭제|결제|구매|전송|보내기|로그아웃|转账|轉帳|下单|下單|卖出|賣出|买入|買入|提现|提現|充值|注文|送金|入金|出金|売却|송금|이체|주문|충전|매수|매도|출금/iu;
+/** A click the hands helper stops at for a yes: risky words (delete, send, pay, quit, sign out), or money words that
+ *  pay in a money surface (moneyStop: a price button, Long, Short, Rent, PayPal, Kopen, 提交订单), so a click by a spot
+ *  or an id is judged with its real label and the window it is in. Kept in sync with RISKY and MONEY in
+ *  hands/main.swift. */
+export const isRiskyClick = (label) => RISKY_CLICK.test(String(label ?? '')) || moneyStop(label);
+/** Risky by its words alone (delete, send, pay, quit, sign out): asked about at a helper stop whatever the window. */
+export const riskyWords = (label) => RISKY_CLICK.test(String(label ?? ''));
+// Owner's hard limits (audit 2026-11-26 PLAN "Safety rule for Approve all"; fixed, not a setting), one classifier
+// for web and Mac (hardlimits-core.mjs, a port of the web's hard-limits.ts):
+// 1. typing a password, credential or card number into any field, and reading a password manager's or a secret file's
+//    window: refused, never asked, whatever the owner says;
+// 2. paying, buying, ordering, subscribing, transferring money or trading: always asked, Approve all too (hardAsk).
+/** A control's label that pays (moneyLabel): ctx.surface (a bank, broker, wallet, checkout, app store, or a plan
+ *  heading to checkout) and ctx.amount (the window shows a checkout's total) make a plain Confirm, Send or Continue pay
+ *  too. */
+// Round 4: in a money surface, a risky click that is not a delete, a sign-out, a quit or a post (Send, Submit, Transfer,
+// Withdraw, "Send 1,000 DOGE", "Preview send") pays too.
+const NOT_MONEY_RISKY = /(?:^|[^\p{L}])(delete|remove|erase|destroy|wipe|reset|deactivate|close|quit|replace|trash|bin|shut down|restart|post|reply|tweet|don[’']?t save|do not save|overwrite|cancel|unsubscribe|uninstall|discard|sign out|log out|logout|format|revoke|publish|eliminar|borrar|supprimer|effacer|l[oö]schen|entfernen|abmelden|excluir|apagar|elimina|cancella|verwijderen|uitloggen|afmelden|删除|刪除|移除|ログアウト|削除|삭제|로그아웃)(?![\p{L}])/iu;
+export const isPayClick = (label, ctx) => !!moneyLabel(label, ctx) || (!!ctx?.surface && RISKY_CLICK.test(String(label ?? '')) && !NOT_MONEY_RISKY.test(String(label ?? '')) && !clearlyNotMoney(label));
+// A connected server's tool that pays, buys, moves money or trades, by its name (one signal of moneyCall's).
+const PAY_CALL = /(?:^|_)(pay|pays|payment|payments|payout|payouts|purchase|buy|sell|charge|capture|sale|transfer|transfers|withdraw|withdrawal|deposit|refund|trade|order|orders|checkout|swap|subscription|subscriptions|subscribe|sendmoney|wire|donate|donation|give|tip|topup|invest|bridge|stake|bid|bet|wager|renew|upgrade|remit|zelle|venmo|rent|rental|book|booking|position|payroll|exchange_currency|convert_currency|currency_convert|long|short|leverage|margin|pledge|tier|ride|register_domain|domains_register|budget|budgets|convert|liquidate|rebalance|supply|borrow|lend|wrap|unwrap)(?:_|$)|(?:^|_)(send_money|send_payment|send_funds|send_transaction|send_raw|sign_and_send|send_usdc|send_usdt|send_eth|send_btc|send_sol|send_crypto|send_tokens?|top_up|add_funds|cash_out|place_order|create_order|submit_order|submit_cart|market_open|limit_open|open_long|open_short|join_tier|approve_and_send|run_payroll|confirm_booking|gpu_rent|gpu_rental\w*|gpu_job_start|incoming_phone_numbers?_create|buy_phone_number|phone_numbers?_purchase|reload|recharge|add_credits?|buy_credits?|credits?_purchase|mint|sponsor|sponsorships?|stars|send_stars|gift|authorize_payment)(?:_|$)/;
+const NOT_PAY = /(?:^|_)(sort_order|order_by|reorder|book_?mark\w*|bookmarks?|notebook\w*|facebook|book_?keeping|project_transfer|transfer_requests?|transfer_ownership|ownership_transfer|file_transfer|transfer_files?|transfer_repo\w*|feedback|planner|position_\w*cursor|cursor_position|book_(meeting|room|desk|slot|time|appointment|call|demo)\w*|swap_(component|instance|variant|columns?|rows?|layers?|panes?|tabs?)\w*)(?:_|$)/;
+// Never money, whatever the server: feedback to it, an implementation planner.
+const NEVER_PAY = /(?:^|_)(feedback|planner)$/;
+export const paysCall = (name) => { const n = snake(name); return PAY_CALL.test(n) && !NOT_PAY.test(n) && !readsOnly(n); };
+// Names that only read (L11: a read never asks, a money server's too): a read verb first (list_customers,
+// get_balance), a read word last (stripe_api_read, stripe_analytics, *_planner, *_feedback), or no verb at all
+// (coinbase.portfolio, alpaca.positions, wallet.address, plaid.sync_transactions reads them in).
+const READ_CALL = /^(list|get|search|retrieve|read|fetch|find|show|describe|query|count|lookup|view|preview|estimate|quote|check|status|info|history|export|download|balance|inspect|browse|stats|summary|sync|analy[sz]e)(?:_|$)|(?:^|_)(read|reads|get|list|search|analytics|stats|report|reports|planner|feedback|lookup|preview|quote|estimate|status|info|history|balance|balances|summary)$/;
+const WRITE_VERB = /(?:^|_)(create|add|new|make|setup|link|send|post|put|patch|update|set|write|edit|modify|delete|remove|cancel|submit|place|run|execute|exec|start|stop|open|close|approve|confirm|complete|capture|sale|charge|pay|buy|sell|transfer|withdraw|deposit|refund|trade|order|checkout|swap|subscribe|renew|upgrade|book|reserve|rent|request|register|join|give|donate|tip|bid|bet|sign|mint|bridge|stake|unstake|invest|redeem|claim|increase|decrease|raise|lower|top|fund|move|issue|void|finali[sz]e|apply|process|sql|query|call|invoke|trigger|import|mutate|convert|liquidate|rebalance|supply|borrow|lend|wrap|unwrap|simulate|authori[sz]e|authorization)(?:_|$)/;
+const readsOnly = (n) => READ_CALL.test(n) && !/(?:^|_)(write|send|create|update|delete|submit|execute|place|recharge|reload|top|add|buy|pay|mint|transfer|withdraw|deposit)(?:_|$)/.test(n.replace(/_(read|get|list|search)$/, ''));
+// Servers that move money: every write they have is a hard ask (B3): payment processors, banks, brokers, exchanges,
+// wallets and chains, betting and prediction markets, and stores that charge on a write (ride, food, travel, domains).
+const MONEY_SERVER = /(?:^|_)(stripe|lithic|marqeta|square|squareup|paypal|venmo|cash_?app|coinbase|kraken|binance|gemini|okx|bybit|bitget|kucoin|bitfinex|bitstamp|hyperliquid|dydx|jupiter|raydium|alpaca|robinhood|webull|tradier|etrade|schwab|fidelity|ibkr|interactive_brokers|wise|transferwise|revolut|monzo|starling|chime|sofi|ally|chase|amex|citi|wells_?fargo|capital_?one|bank|mybank|brex|ramp|mercury|plaid|shopify|app_?store|metamask|phantom|wallet|crypto|ledger|exodus|uniswap|evm|ethereum|solana|bitcoin|klarna|zelle|adyen|braintree|razorpay|paddle|mollie|checkout_com|gusto|bill_com|payoneer|polymarket|kalshi|doordash|instacart|ubereats|uber|lyft|expedia|booking|airbnb|namecheap|godaddy|patreon|gofundme|onchain|aave|compound|lido|cdp|defi|dex|apple_pay|google_pay|samsung_pay|opensea)(?:_|$)/;
+// A write on a money server about something that moves no money: a customer, a product's words, a watchlist, a contact,
+// a setting or a variable (stripe.create_customer, robinhood.add_to_watchlist, vercel.create_project_env "$5").
+const NON_MONEY_OBJECT = /(?:^|_)(customers?|products?|product_description|description|watchlists?|contacts?|notes?|tags?|labels?|metadata|envs?|env_vars?|variables?|config|configs|settings?|webhooks?|profiles?|address_book|alerts?|prices?|coupons?|promotion_codes?|payment_links?|tax_rates?|shipping_rates?)(?:_|$)/;
+// Round 6: a write of a catalog's words or a record's metadata moves no money, whatever it is on (a price, a coupon, a
+// payment link, a subscription's metadata).
+const META_WRITE = /(?:^|_)(metadata|description|tags?|labels?|notes?)$/;
+// A contract call or a method by its function's name that moves tokens (onchain.write_contract {functionName: 'transfer'}).
+const FUNCTION_KEY = /^(function_name|function|method|method_name|fn|abi_function)$/;
+const PAY_FUNCTION = /^(transfer|transfer_from|transferfrom|safe_transfer_from|safetransferfrom|approve|swap\w*|deposit|withdraw|mint|buy|sell|send\w*|pay\w*|stake|unstake|borrow|repay|supply)$/i;
+// Shopify and Plaid move money only through some of their writes.
+const PARTLY = /(?:^|_)(shopify|plaid)(?:_|$)/;
+const PARTLY_PAYS = /(?:^|_)(order|orders|checkout|refund|payment|payments|charge|payout|payouts|transfer|transfers|billing|gift_card)(?:_|$)/;
+// Arguments that carry money: an amount with a currency or a payee, a budget, a payout, transfer, order or
+// subscription endpoint, or SQL that changes balances or payments. Never a content write's words (a page, a draft, a
+// note, an issue, a cell: "Amount due: $500" in a draft body, a "Q3 budget" page with amount and currency columns).
+const MONEY_KEY = /^(amount|amount_\w+|\w+_amount|price|unit_amount|total|cost|qty|quantity|notional|sum|usd|eur|gbp|value|sz|size|shares|count|budget|daily_budget|\w+_budget|lifetime_budget|bid_amount)$/;
+const CURRENCY_KEY = /^(currency|currency_code|asset|coin|symbol|ticker|token|denom|side|is_buy|order_type|inst_id|market)$/;
+const PAYEE_KEY = /^(to|recipient|recipient_\w+|payee|payee_\w+|destination|beneficiary|account_to|to_account|iban|routing_number|charity|landlord|address_to)$/;
+const MONEY_PATH = /(^(get|post|put|patch|delete)\s+\S+|^\/|^https?:\/\/)[^\s]*(?:^|[/_ .-])(payouts?|transfers?|orders?|subscriptions?|charges?|payment_intents?|payments?|checkout|refunds?|invoices?\/[^/]+\/pay|withdrawals?|deposits?|trades?)(?:$|[/_ .?-])/i;
+// Round 6: balances, payments and the ledger only (an app's own orders or accounts table is its data).
+const MONEY_SQL = /\b(update|insert\s+into|delete\s+from)\b[^;]*\b(balances?|payments?|transfers?|payouts?|charges?|ledgers?|wallets?)\b/i;
+const CONTENT_WRITE = /(?:^|_)(page|pages|doc|docs|document|note|notes|draft|drafts|message|messages|email|mail|comment|comments|issue|issues|ticket|task|tasks|event|events|file|files|cell|cells|row|rows|record|records|item|items|entry|entries|transaction|transactions|sheet|block|blocks|post|card|deal|contact|product_description|description|title|component|meeting_room|label)(?:_|$)/;
+function argsPay(args, content) {
+  let amount = false, currency = false, payee = false, budget = false, shape = false, money = false, endpoint = false;
+  const walk = (x, depth = 0) => {
+    if (depth > 4 || x == null) return;
+    if (Array.isArray(x)) { for (const v of x.slice(0, 50)) walk(v, depth + 1); return; }
+    if (typeof x === 'object') {
+      for (const [k, v] of Object.entries(x).slice(0, 100)) {
+        const key = snake(k);
+        const num = v != null && v !== '' && typeof v !== 'object' && !Number.isNaN(Number(String(v).replace(/[$€£¥,\s]/g, '').replace(/[a-z]+$/i, '')));
+        if (MONEY_KEY.test(key) && num) { amount = true; if (/budget/.test(key)) budget = true; if (/^(usd|eur|gbp)$|_(usd|eur|gbp|cents)$/.test(key)) currency = true; }
+        // Round 6: an amount, a price, a total, stars or credits on a write is money with no currency said too.
+        if (/^(amount|\w+_amount|amount_\w+|price|total|cost|fee|tip|stars|credits?|unit_amount)$/.test(key) && num) money = true;
+        // Instructions in words to a server that acts on them (Zapier, an agent): judged like the turn's own words.
+        if (/^(instructions?|task|prompt|command|request|goal|action_text)$/.test(key) && typeof v === 'string' && hardMatch(null, v)?.kind === 'money') shape = true;
+        if (CURRENCY_KEY.test(key) && v != null && v !== '') currency = true;
+        if (PAYEE_KEY.test(key) && v != null && v !== '') payee = true;
+        if (typeof v === 'string' && (MONEY_PATH.test(v.trim()) || MONEY_SQL.test(v))) { shape = true; if (/^(url|uri|endpoint|path|href|route|api_path)$/.test(key)) endpoint = true; }
+        if (FUNCTION_KEY.test(key) && typeof v === 'string' && PAY_FUNCTION.test(v.trim())) shape = true;
+        walk(v, depth + 1);
+      }
+      return;
+    }
+    // A short value that is an amount ("2 ETH", "$500"); a message's body that mentions one is not.
+    if (typeof x === 'string' && x.trim().split(/\s+/).length <= 3 && showsAmount(x)) { amount = true; currency = true; }
+    if (typeof x === 'string' && (MONEY_PATH.test(x.trim()) || MONEY_SQL.test(x))) shape = true;
+  };
+  walk(args);
+  // A content write's words (an issue's "POST /v1/payouts", a draft's "$500") are its words, checked first (round 6).
+  if (content && !endpoint) return false;
+  return shape || money || budget || (amount && (currency || payee));
+}
+/** A connected server's call that pays, buys, moves money or trades (B3): never a read (L11: readOnlyHint, a read
+ *  verb first, a read word last, or no verb at all); every write of a money server; any server's write named for
+ *  money; any write whose arguments carry an amount with a currency or a payee, a budget, a money endpoint or SQL on
+ *  balances (never a page's, a draft's or a cell's words). */
+export function moneyCall({ server = '', name, args, annotations } = {}) {
+  const n = snake(name), srv = snake(server).replace(/^claude_ai_/, '');
+  if (annotations?.readOnlyHint === true || readsOnly(n) || NEVER_PAY.test(n)) return false;
+  if (NOT_PAY.test(n) && !WRITE_VERB.test(n.replace(NOT_PAY, '_'))) return false;
+  if (!WRITE_VERB.test(n) && !PAY_CALL.test(n)) return false;
+  const other = (NON_MONEY_OBJECT.test(n) && !PAY_CALL.test(n.replace(new RegExp(NON_MONEY_OBJECT, 'g'), '_'))) || META_WRITE.test(n);
+  if (MONEY_SERVER.test(srv) && !(PARTLY.test(srv) && !PARTLY_PAYS.test(n)) && !other) return true;
+  return (!other && paysCall(n)) || argsPay(args, CONTENT_WRITE.test(n) || other);
+}
+// An argument named for a secret (password, api_key, private_key...), and a value next to a key's name ({key:
+// 'API_KEY', value}, {STRIPE_SECRET_KEY: ...}): what it holds is a credential, whatever it looks like. A page's token
+// (page_token, next_token) or a count (max_tokens) is not one.
+// Round 4: by its name's end, in any case (db_password, X-Api-Key, auth.pass, pin, verification_code); a plain "token" only
+// when its value is no ticker (token: 'USDC' is a currency).
+const SECRET_ARG = /(^|_)(password|passwd|passphrase|passcode|pass|pwd|secret|client_secret|secret_key|api_key|apikey|access_key|access_token|refresh_token|auth_token|bearer_token|id_token|session_token|private_key|privatekey|seed_phrase|mnemonic|otp|totp|cvv|cvc|card_number|pin)$/;
+const CODE_ARG = /(^|_)(verification|security|auth|otp|sms|mfa|2fa|one_time|confirmation|login|signin|sign_in|recovery|backup)_code$/;
+const TICKER = /^[A-Z0-9]{2,10}([-/.][A-Z0-9]{2,10})?$|^0x[0-9a-fA-F]{40}$|^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+// A key's or variable's name that holds a secret: it ends in the secret's word (API_KEY, STRIPE_SECRET_KEY, DB_PASSWORD,
+// GITHUB_TOKEN), not a limit or a count (TOKEN_LIMIT, MAX_TOKENS).
+const SECRET_KEY_NAME = /(^|[_.-])(key|secret|token|password|passwd|pass|pwd|credentials?|private_?key|dsn|webhook(_url)?)$/i;
+// Round 6: keys that are public by design (a publishable key, a public key, a site key, an anon key).
+const PUBLIC_KEY_NAME = /(^|[_.-])(publishable|public|site|anon|pub)([_.-]|$)/i;
+const namedSecret = (x, depth = 0) => {
+  if (depth > 6 || x == null || typeof x !== 'object') return false;
+  if (Array.isArray(x)) return x.slice(0, 50).some((v) => namedSecret(v, depth + 1));
+  const has = (v) => typeof v === 'string' && v.trim().length >= 4;
+  const entries = Object.entries(x).slice(0, 100);
+  const named = entries.find(([k, v]) => /^(key|name)$/i.test(k) && typeof v === 'string' && SECRET_KEY_NAME.test(v.trim()) && !PUBLIC_KEY_NAME.test(v.trim()));
+  if (named && entries.some(([k, v]) => /^(value|secret_value)$/i.test(k) && has(v))) return true;
+  // Round 6: an Authorization header's Basic or Bearer value, and a user:password pair in an auth field, are secrets; a
+  // pin that is no number ("top") and a pass that is a plain word ("through") are not.
+  const secretValue = (k, v) => typeof v === 'string' && v.trim().length >= 3 && !/^(true|false|yes|no|on|off|null|none|undefined)$/i.test(v.trim()) && (/^(authorization|proxy_authorization)$/.test(snake(k)) ? /^(basic|bearer|token|digest)\s+\S{8,}/i.test(v.trim())
+    : /^(auth|basic_auth|userpass|user_pass|credentials?)$/.test(snake(k)) ? /^[^:\s]+:[^:\s]{3,}$/.test(v.trim())
+    : snake(k) === 'pin' ? /^\d{4,12}$/.test(v.trim())
+    : snake(k) === 'pass' ? /[\d\W_]/.test(v.trim()) || v.trim().length >= 12
+    : snake(k) === 'token' ? !TICKER.test(v.trim()) && v.trim().length >= 8
+    : SECRET_ARG.test(snake(k)) || (CODE_ARG.test(snake(k)) && /^[a-z0-9-]{4,10}$/i.test(v.trim())) || (/^[A-Z0-9_]+$/.test(k) && /_/.test(k) && SECRET_KEY_NAME.test(k) && !PUBLIC_KEY_NAME.test(k) && v.trim().length >= 4));
+  return entries.some(([k, v]) => secretValue(k, v) || namedSecret(v, depth + 1));
+};
+/** A typed credential in a call's arguments (a card number, a key or token, or a value named for a secret): such a call
+ *  is refused, never sent. */
+// Release round 2: an argument named for an ID, a page token, a cursor or an address (fileId, eventId, page_id,
+// pageToken, nextPageToken, cursor, url) holds a machine-made value by design: only typedCredential's precise part
+// (a card, a known key prefix) reads it, so a Drive file, a recurring event, a Notion page and page 2 of a list run.
+const ID_ARG = /(^|_)(ids?|cursor|page_?token|next_?(page_)?token|sync_?token|continuation(_token)?|etag|urls?|uri|href|link)$/;
+const splitIds = (x, ids, depth = 0) => {
+  if (depth > 6 || !x || typeof x !== 'object') return x;
+  if (Array.isArray(x)) return x.map((v) => splitIds(v, ids, depth + 1));
+  const rest = {};
+  for (const [k, v] of Object.entries(x)) if (ID_ARG.test(snake(k))) ids.push(v); else rest[k] = splitIds(v, ids, depth + 1);
+  return rest;
+};
+export const credentialArgs = (args) => {
+  const ids = [], rest = splitIds(args, ids);
+  return strings(rest).list.some((x) => typedCredential(x) != null) || strings(ids).list.some((x) => preciseTyped(x) != null) || namedSecret(args);
+};
+/** An ask Approve all never answers: it pays (pay, hard 'money') or can show sign-ins (secret, hard 'credential').
+ *  Checked before any Approve all yes: approveAllSays, a background agent's asks (agents.mjs), a relay approval. */
+export const hardAsk = (opts) => opts?.pay === true || opts?.secret === true || opts?.hard === 'money' || opts?.hard === 'credential' || opts?.hard === true;
+/** The relay's tag for a hard ask (relayschema hard): credential wins over money. */
+// A plain secret ask (a hidden file, an app's data) is no credential: only a real credential is tagged so (the server
+// refuses it), round 1 L12.
+export const hardTag = (opts) => (opts?.hard === 'credential' || opts?.vault === true ? 'credential' : opts?.pay === true || opts?.hard === 'money' || opts?.hard === true ? 'money' : null);
+export const NO_CREDENTIALS = "I never type passwords, credentials or card numbers, Approve all or not. Ask the user to type it in themselves.";
+/** A control (from read_window: { role, label }) or a field's name that takes a password, a credential or a card
+ *  number, in several languages (credentialLabel). ctx.cardForm: its form has a card field (an expiry field counts). */
+export const credentialField = (c, ctx) => (typeof c === 'string' ? credentialLabel(c, ctx)
+  : c?.role === 'password field' || c?.secure === true || /secure/i.test(String(c?.subrole ?? '')) || credentialLabel(String(c?.label ?? ''), ctx) || (c?.placeholder != null && credentialLabel(String(c.placeholder), ctx)));
+/** A box called just "Code" that a code is typed into (codeBox): a sign-in code. */
+export const codeField = (c, text, ctx) => codeBox(typeof c === 'string' ? c : String(c?.label ?? c?.placeholder ?? ''), text, ctx);
+/** A card number in any common shape (cardNumber: every 13-19 digit window of a run, brand prefix and length, Luhn). */
+export const hasCardNumber = (text) => cardNumber(text) != null;
 // Which kind of risky click a label is ("Delete post" → "delete"), so one yes can cover the same kind and no other.
 export function riskyKind(label) {
   const m = RISKY_CLICK.exec(String(label ?? ''));
@@ -259,12 +423,23 @@ export function redactArgs(name, args = {}) {
   return args;
 }
 
+/** A .key file that is a key (M7). A Keynote document is a .key too: a package folder or a zip (it starts PK), and
+ *  that is a document. Any other .key (PEM, DER, or one that can't be read to say) is a key. */
+function keyFile(a) {
+  if (!/\.key$/i.test(a)) return false;
+  try {
+    if (fs.statSync(a).isDirectory()) return false;
+    const fd = fs.openSync(a, 'r'), b = Buffer.alloc(4);
+    try { fs.readSync(fd, b, 0, 4, 0); } finally { fs.closeSync(fd); }
+    return !(b[0] === 0x50 && b[1] === 0x4b);
+  } catch { return true; }
+}
 /** A path's read verdict by the deny rules alone (secrets, Hydra's data, other apps' data, hidden files): what typed
  *  text, a connection's non-path values and open are judged by. Returns { level, reason, path }. */
 function readCheck(p, home, { recursive = false } = {}) {
   const { real, all } = pathsOf(p, home), homes = homesOf(home);
   if (rootDot(all)) return { ...verdict(BLOCK, `${p} names a file by a hidden name at the top of the disk, so I don't read it. Use its usual path.`), path: real };
-  if (hits(SECRET, all, homes)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: real };
+  if (hits(SECRET, all, homes) || all.some(keyFile)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: real };
   if (hits(OWN_DATA, all, homes)) return { ...verdict(BLOCK, `${p} is Hydra's own data (memory, chats, settings and Recently deleted), so I don't read it with tools.`), path: real };
   if (hits(PRIVATE, all, homes)) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: real };
   // The whole home folder, a folder above it (/Users, /) or all of Library: never searched or listed down through.
@@ -278,8 +453,9 @@ function readCheck(p, home, { recursive = false } = {}) {
   // A denylist always has gaps, so hidden files and folders (settings and sign-ins of every tool) and app data in the
   // home folder are read only with a yes, every time, naming the real path.
   const hidden = (a) => homes.some((h) => { const r = rel(a, h); return r !== a && r.split('/').some((x) => x.startsWith('.')); });
-  // secret: it can hold sign-ins, so Approve all never answers it (tools.mjs readable).
-  if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true, secret: true };
+  // An ordinary ask (Approve all answers it): the files that really hold sign-ins are refused above (SECRET), so a
+  // dotfile, a project's settings or app data is not a hard limit (round 1 L12: ~/.zshrc, .gitignore, .eslintrc).
+  if (all.some((a) => hidden(a) || appData(a))) return { ...verdict(ASK, `Read ${real}? It's a hidden or app-data file, which can hold sign-ins.`), path: real, always: true };
   return { ...verdict(SAFE), path: real };
 }
 
@@ -322,7 +498,8 @@ const WINDOW_VIEWERS = /^(preview|textedit|pages|numbers|keynote|quicktime playe
 // Single-document apps only: a code editor's window shows its terminal panel, other tabs and an AI chat beside the
 // file it reports (R11c-6), so it asks.
 const DOC_APPS = /^(preview|textedit|pages|numbers|keynote|quicktime player|photos|microsoft (word|excel|powerpoint))$/i;
-const BROWSER_APPS = /^(safari|google chrome|chrome|chromium|arc|firefox|microsoft edge|msedge|brave browser|brave|opera|vivaldi|orion|zen)$/i;
+// Browsers by family (Chrome Canary, Firefox Developer Edition, Safari Technology Preview, Edge Beta, Dia, Comet).
+const BROWSER_APPS = { test: inBrowser };
 // The file names a title shows: ".env - Notepad", "*id_rsa - Notepad", "id_rsa — Edited", "● .env — shop — Code", and
 // with a folder after the name, Vim's "id_rsa + (~/.ssh) - VIM" and Sublime's "C:\\keys\\id_rsa (keys) - Sublime Text"
 // (R11h-2). Each piece with its marks (Vim's +, =, -, [+], [RO]) and folder taken off, its first word, the folder,
@@ -339,16 +516,61 @@ const titleNames = (t) => String(t ?? '').split(/\s+[-–—|]\s+/).flatMap((x) 
 });
 // Password managers and 2FA code apps, with a Beta, Nightly, Desktop or version after the name ("1Password Beta",
 // "Authy Desktop", "Secrets 4"). ponytail: names from memory, not read off a Mac; add any the owner uses.
-const PASSWORD_APPS = /^(?:1password|bitwarden|lastpass|dashlane|keeper(?: password manager)?|keepass\w*|keeweb|macpass|kypass|minikeepass|strongbox|enpass|proton pass|nordpass|roboform|(?:apple )?passwords|keychain access|secrets|codebook|buttercup|padloc|psono|passbolt|sticky password|myki|authy|(?:google |microsoft )?authenticator|2fas(?: auth)?|ente auth|step two|otp auth|raivo(?: otp)?|aegis)(?:[ -](?:beta|nightly|desktop|\d+(?:\.\d+)*))*$/i;
+const PASSWORD_APPS = /^(?:1password|bitwarden|lastpass|dashlane|keeper(?: password manager)?|keepass\w*|keeweb|macpass|kypass|minikeepass|strongbox|enpass|proton pass|nordpass|roboform|(?:apple )?passwords|keychain access|secrets|codebook|buttercup|padloc|psono|passbolt|sticky password|myki|elpass|safeincloud(?: password manager)?|msecure|minimalist(?: password manager)?|pass|qtpass|passforios|duo(?: mobile)?|zoho vault|authy|(?:google |microsoft |yubico )?authenticator|2fas(?: auth)?|ente auth|step two|otp auth|raivo(?: otp)?|aegis)(?:[ -](?:beta|nightly|desktop|\d+(?:\.\d+)*))*$/i;
 // Any other name or bundle id with one of these in it ("Passwords Pro", com.agilebits.onepassword7, "OTP Manager").
 const PASSWORD_WORDS = /password|vault|keychain|authenticator|(?:^|[^a-z0-9])otp|2fa/i;
+// Round 4: the Passwords app and Keychain Access under their localized names (the helper reports an app's localized
+// name), and password managers by their bundle ids.
+const PASSWORD_APPS_LOCAL = /^(passw[oö]rter|mots de passe|contrase[nñ]as|contrasenyes|senhas|wachtwoorden|l[oö]senord|adgangskoder|passord|salasanat|has[lł]a|hesla|jelszavak|[sş]ifreler|kata sandi|m[aậ]t kh[aẩ]u|пароли|паролі|密码|密碼|パスワード|암호|비밀번호|كلمات السر|סיסמאות|รหัสผ่าน|schl[uü]sselbundverwaltung|trousseau d['’]acc[eè]s|acceso a llaveros|accesso portachiavi|sleutelhangertoegang|nyckelrings[aå]tkomst|acesso [aà]s chaves|nøgleringsadgang|nøkkelringtilgang|avainnippujen hallinta|dostęp do pęku kluczy|связка ключей|钥匙串访问|鑰匙圈存取|キーチェーンアクセス|키체인 접근)$/i;
+const PASSWORD_BUNDLES = /^(com\.apple\.(passwords|keychainaccess)|com\.agilebits\.|com\.1password\.|com\.bitwarden\.|com\.8bit\.bitwarden|com\.lastpass\.|com\.dashlane\.|com\.callpod\.keeper|com\.keepersecurity\.|org\.keepassxc\.|com\.nordpass\.|me\.proton\.pass|ch\.protonmail\.pass|com\.enpass\.|in\.sinew\.enpass|com\.siber\.roboform|com\.authy\.|com\.twilio\.authy|com\.google\.authenticator|com\.yubico\.|io\.ente\.auth|com\.stepstwo\.|com\.strongbox\.|com\.markmcguill\.strongbox)/i;
+const SETTINGS_APPS = /^(system settings|system preferences|systemeinstellungen|r[eé]glages syst[eè]me|pr[eé]f[eé]rences syst[eè]me|ajustes del sistema|configuraci[oó]n del sistema|impostazioni di sistema|configura[cç][oõ]es do sistema|ajustes do sistema|systeeminstellingen|systeminst[aä]llningar|systemindstillinger|systeminnstillinger|j[aä]rjestelm[aä]asetukset|ustawienia systemowe|syst[eé]mov[eé] nastaven[ií]|системные настройки|系统设置|系統設定|システム設定|시스템 설정)$/i;
+const PASSWORDS_PANE = /^(passwords|passw[oö]rter|mots de passe|contrase[nñ]as|senhas|password|wachtwoorden|l[oö]senord|adgangskoder|passord|salasanat|has[lł]a|hesla|пароли|密码|密碼|パスワード|암호)$/i;
 /** A password manager or 2FA app (its window shows sign-ins), by name or bundle id: bringing it forward asks under
  *  Approve all too (tools.mjs). */
-export const isPasswordApp = (app) => { const a = String(app ?? '').trim().replace(/\.app$/i, ''); return PASSWORD_APPS.test(a) || PASSWORD_WORDS.test(a); };
-// A window whose title or address names a vault or a password page: a web vault in a browser (Bitwarden Web Vault,
-// 1Password's sign-in, passwords.google.com), a note called Passwords. The managers' own names count too.
-const VAULT_SHOWN = /\b(?:1password|bitwarden|lastpass|dashlane|keeper|nordpass|proton pass|roboform|enpass|keepass\w*|authy)\b/i;
-const vaultShown = (win) => { const t = `${win?.title ?? ''} ${win?.url ?? ''}`; return PASSWORD_WORDS.test(t) || VAULT_SHOWN.test(t); };
+export const isPasswordApp = (app) => { const a = String(app ?? '').trim().replace(/\.app$/i, ''); return PASSWORD_APPS.test(a) || PASSWORD_WORDS.test(a) || PASSWORD_APPS_LOCAL.test(a) || PASSWORD_BUNDLES.test(a); };
+// A window that shows a real vault (M6): a web vault by its address (passwords.google.com, vault.bitwarden.com,
+// my.1password.com, LastPass's, Keeper's, Dashlane's and Proton Pass's web vaults, a browser's own password pages),
+// System Settings' Passwords pane, or, with no address read, a manager's name in a browser's title. Any other title
+// with password, vault, 2FA or OTP in it ("Reset your password · GitHub", an Obsidian vault, "Enable 2FA") is an
+// ordinary window.
+const MANAGER = String.raw`1password|bitwarden|vaultwarden|lastpass|dashlane|keeper|nordpass|proton pass|roboform|enpass|keepass\w*|authy|passbolt|zoho vault|sticky password|elpass|safeincloud|msecure`;
+// A browser's title that names a vault page: its first part is the manager (with "Web Vault", "Vault" or "Password
+// Manager" after it), "Passwords", "Saved Passwords" or "Password Manager" ("LastPass - My Vault", "Bitwarden Web
+// Vault", "Passwords — Mozilla Firefox"). A review or a list that names a manager is not ("Keeper Review 2026", "Best
+// password managers 2026: Bitwarden, 1Password").
+const VAULT_TITLE = new RegExp(String.raw`^((${MANAGER})( (web )?vault| online| password manager)?|(saved |google |my )?passwords|password manager|(my |web )?vault)$`, 'i');
+const LOCAL_MANAGER = /(google[- ]?passwortmanager|passwortmanager|passwort-manager|gestionnaire de mots de passe|administrador de contraseñas|gestor de contraseñas|gestore (delle )?password|gerenciador de senhas|wachtwoordmanager|менеджер паролей|密码管理器|密碼管理|パスワード ?マネージャー|비밀번호 관리자)/i;
+const firstPart = (t) => String(t ?? '').split(/\s+[-–—|·:]\s+|:\s+/)[0].replace(/[®™]/g, '').trim();
+const VAULT_HOSTS = /^(passwords\.google\.com|vault\.bitwarden\.(com|eu)|my\.1password\.(com|eu|ca)|(?!(blog|support|developer|developers|www|status|community|releases|downloads|start|app-updates|cache|c|1password)\.)[\w-]+\.1password\.(com|eu|ca)|(www\.)?lastpass\.com|lastpass\.eu|keepersecurity\.(com|eu)|app\.dashlane\.com|vault\.dashlane\.com|pass\.proton\.me|app\.nordpass\.com|vault\.zoho\.(com|eu|in)|personal\.okta\.com|online\.roboform\.com|[\w-]+\.passbolt\.(com|io)|(www\.)?icloud\.com)$/i;
+const VAULT_PATHS = { 'lastpass.com': /^\/vault/i, 'www.lastpass.com': /^\/vault/i, 'lastpass.eu': /^\/vault/i, 'keepersecurity.com': /^\/vault/i, 'keepersecurity.eu': /^\/vault/i, 'icloud.com': /^\/passwords/i, 'www.icloud.com': /^\/passwords/i };
+const VAULT_PAGES = /^(chrome|edge|brave|opera|vivaldi|arc|dia|comet):\/\/(password-manager|passwords|settings\/passwords|settings\/autofill|settings\/payments|wallet\/passwords|wallet\/paymentMethods)|^about:logins/i;
+// Password managers' browser extensions (Chrome Web Store and Edge ids): Bitwarden, 1Password, LastPass, Dashlane,
+// Keeper, RoboForm, Proton Pass, Enpass, NordPass.
+const VAULT_EXTENSIONS = /^(bhghoamapcdpbohphigoooaddinpkbai|nngceckbapebfimnlniiiahkandclblb|jbkfoedolllekgbhcbcoahefnbanhhlh|aeblfdkhhhdcdjpifhhbdiojplfjncoa|dppgmdbiimibapkepcbdbmkaabgiofem|khgocmkkpikpnmmkgmdnfckapcdkgfaf|hdokiejnpimakedhajhdlcegeplioahd|fdjamakpfbbddfjaooikfcpapjohcfmg|bfogiafebfohielmmehodmfbbebbbpei|pnlccmojcmeohlpggmfnbbiapkmbliob|ghmbeldphafepmbegfdlkpapadhbakde|kmcfomidfpdkfieipokbalgegidffkal|eiaeiblijfjekdanodkjadfinkhbfgcd|fooolghllnmhmmndgjiamiiodkpenpbb)$/i;
+// A terminal whose title shows a command that prints a secret (round 6): 1Password's op with --reveal or op read, the
+// keychain's find-*-password -w, pass, gopass, Bitwarden's and LastPass's CLIs.
+const SECRET_CLI = /\bop (item get\b.*--reveal|read op:\/\/|item get\b.*--fields?\b.*(password|credential))|\bsecurity find-(generic|internet)-password\b.*-w\b|\b(pass|gopass) show\b|\bbw get (password|totp)\b|\blpass show\b/i;
+const vaultShown = (win) => {
+  const url = String(win?.url ?? '').trim(), app = String(win?.app ?? '').trim(), title = String(win?.title ?? '').trim();
+  if (SETTINGS_APPS.test(app) && PASSWORDS_PANE.test(title)) return true;
+  if (PASSWORD_BUNDLES.test(String(win?.bundle ?? ''))) return true;
+  // Round 6: any part of the title ("Vaults | Bitwarden Web vault"), and the localized names ("Passwörter", "Contraseñas",
+  // "Gestionnaire de mots de passe Google").
+  const titleParts = title.split(/\s+[-–—|·:]\s+|\s*[|·•]\s*/).map((x) => x.replace(/[®™]/g, '').trim()).filter(Boolean);
+  const titled = VAULT_TITLE.test(firstPart(title)) || VAULT_TITLE.test(title.replace(/[®™]/g, '')) || /google password manager|passwords\.google\.com/i.test(title)
+    || titleParts.some((x) => VAULT_TITLE.test(x) || PASSWORD_APPS_LOCAL.test(x)) || LOCAL_MANAGER.test(title);
+  // No address read: a browser whose title names a vault page (Safari's and Firefox's Passwords windows too).
+  if (!url) return BROWSER_APPS.test(app) && titled;
+  if (VAULT_PAGES.test(url)) return true;
+  try {
+    const u = new URL(url), h = u.hostname.toLowerCase();
+    // A manager's extension page (its popup or vault), by its id or its title.
+    if (/^(chrome|moz|safari-web|ms-browser)-extension:$|^extension:$/i.test(u.protocol)) return VAULT_EXTENSIONS.test(h) || new RegExp(String.raw`\b(${MANAGER})\b`, 'i').test(title);
+    if (VAULT_HOSTS.test(h) && (!VAULT_PATHS[h] || VAULT_PATHS[h].test(u.pathname))) return true;
+    // A self-hosted vault (Vaultwarden, Bitwarden, Passbolt): the manager's title on a vault, passwords or unlock page.
+    return new RegExp(String.raw`^(${MANAGER})\b`, 'i').test(firstPart(title)) && /(^|[/#])(vault|passwords?|unlock|items)\b/i.test(`${u.pathname}${u.hash}`);
+  } catch { return false; }
+};
 export function checkWindow(win, home, { viewers = true } = {}) {
   const app = String(win?.app ?? '').trim(), files = [];
   if (win?.document) files.push(String(win.document));
@@ -358,11 +580,12 @@ export function checkWindow(win, home, { viewers = true } = {}) {
   if (!files.length && !win?.url) {
     // Its words are never quoted: a title is an email's subject, a page's name or a command (R11h-5).
     const homes = homesOf(home);
-    if (titleNames(win?.title).some((n) => hits(SECRET, [norm(n, home)], homes))) return verdict(BLOCK, `${app ? `${app}'s window title` : "That window's title"} names a file that holds passwords or keys, so I won't read it or look at it.`);
+    if (titleNames(win?.title).some((n) => hits(SECRET, [norm(n, home)], homes)) || WEB_SECRET_FILE.test(foldHard(String(win?.title ?? ''))) || SECRET_CLI.test(String(win?.title ?? ''))) return verdict(BLOCK, `${app ? `${app}'s window title` : "That window's title"} names a file that holds passwords or keys, so I won't read it or look at it.`);
   }
   let worst = verdict(SAFE);
   for (const f of files) {
-    const v = checkRead(f, home);
+    // A Keynote document is a .key file too: in Keynote it is a slide deck, not a key (M7, by app and extension).
+    const v = /^keynote$/i.test(app) && /\.key$/i.test(f) ? checkRead(f.replace(/\.key$/i, '.keynote'), home) : checkRead(f, home);
     if (v.level === BLOCK) return verdict(BLOCK, `${app || 'That window'} shows ${f}, so I won't read it or look at it. ${v.reason}`);
     if (v.level === ASK) worst = { ...verdict(ASK, `${v.reason} (${app || 'A window'} has it open.)`), ...(v.secret ? { secret: true } : {}) };
   }
@@ -374,16 +597,19 @@ export function checkWindow(win, home, { viewers = true } = {}) {
     const name = app ? `the ${app} window${title ? ` "${title}"` : ''}` : "a window I can't name";
     // A browser window with no address said: its address wasn't read, so it isn't said to have no file (R11g-2).
     const none = BROWSER_APPS.test(app) && !win?.url ? "I couldn't read which page or file it shows" : 'It has no file I can check';
-    worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a password, a message, a terminal).`), app };
+    worst = { ...verdict(ASK, files.length ? `Look at ${name}? It shows ${files[0]}, but it could show more than that file.` : `Look at ${name}? ${none}, so it could show anything (a message, a document, a terminal).`), app };
   }
-  // A password manager's window, or one showing a vault or a password page, shows sign-ins: always asked, Approve all
-  // never answers it (secret), and no earlier yes covers it.
+  // A password manager's window, or one showing a vault or a password page, shows sign-ins: tools.mjs refuses to read
+  // it (vault, the owner's hard limit), and no earlier yes covers it.
   const vault = vaultShown(win);
   if (worst.level === SAFE && vault) {
     const title = String(win?.title ?? '').trim();
     worst = { ...verdict(ASK, `Look at ${app ? `the ${app} window` : 'that window'}${title ? ` "${title}"` : ''}? It looks like a password manager or a sign-in page, so it could show passwords.`), app };
   }
-  if (worst.level === ASK && (isPasswordApp(app) || vault)) worst = { ...worst, secret: true };
+  // vault: a password manager's window (or one showing a real vault): reading it is refused (owner's hard limit,
+  // tools.mjs). A file that holds sign-ins (SECRET: keys, sign-in stores under ~/.config, password exports, recovery
+  // codes, seed phrases) is refused above, as read_file refuses it (M7); any other dotfile asks as an ordinary ask.
+  if (worst.level === ASK && (isPasswordApp(app) || isPasswordApp(win?.bundle) || vault)) worst = { ...worst, secret: true, vault: true };
   return worst;
 }
 
@@ -519,7 +745,7 @@ const RUN_SCHEMES = /(?:^|[^a-z0-9+.-])(javascript|vbscript|livescript|data|file
 export const movesCaret = (combo) => { const p = parseKey(combo); return !!p && ['left', 'right', 'up', 'down', 'home', 'end', 'pageup', 'pagedown'].includes(p.key); };
 /** Text the hands tools type (act_in_app type, fill and set; draw's type): never a link to a file or a page's
  *  source, never a scheme a browser or the system acts on, and a path in it is checked like a read (F2). */
-export function checkTyped(text, home) {
+export function checkTyped(text, home, { credentials = true } = {}) {
   // Invisible characters (a zero-width space before javascript:) and look-alike forms come off first (V8-4).
   const t = String(text ?? '').normalize('NFKC').replace(/\p{Cf}/gu, '');
   const lead = /^\s*([a-z][a-z0-9+.-]*):(?=\S)/i.exec(t)?.[1]?.toLowerCase();
@@ -530,6 +756,11 @@ export function checkTyped(text, home) {
   if ((lead && !port && !['http', 'https', 'mailto'].includes(lead)) || inner) {
     return verdict(BLOCK, `I only type web and mail addresses, not ${inner ? `${inner}:` : `${lead}:`} links: they open files or run things.`);
   }
+  // Owner's hard limit (fixed, not a setting): a card number or a key (sk_live_, ghp_, AKIA...) is never typed,
+  // Approve all or not (M9).
+  // credentials false: text joined from separate fields (a request's typing put together for its paths), whose pieces
+  // were each checked on their own and whose join is no one value.
+  if (credentials && typedCredential(t)) return { ...verdict(BLOCK, NO_CREDENTIALS), credential: true };
   let worst = verdict(SAFE);
   // A path after = (--key=~/.ssh/id_rsa) is a token too; one without a leading ~ or / (.ssh/id_rsa) is checked from
   // the home folder, where Go to Folder and Open panels start (V8-4). Web addresses were checked above.
@@ -695,9 +926,11 @@ const MCP_OVERWRITE = /(?:^|_)(write|edit|update|overwrite|replace|clear|discard
 export const deletesCall = ({ name, annotations } = {}) => annotations?.destructiveHint === true || MCP_RISKY.test(snake(name)) || MCP_OVERWRITE.test(snake(name))
   || !(annotations?.readOnlyHint === true || annotations?.destructiveHint === false);
 /** Approve all says yes for every yes/no, including a deletion and a step the safe set called deletion-class.
- *  A typed prompt (no choices, or a mask) still asks. A menu that is not a yes/no (the orb's Attach / Keep) still asks.
- *  Off: every ask asks. The deletion tag is ignored while Approve all is on. */
+ *  Never for a hard ask (hardAsk: pay or secret), checked first. A typed prompt (no choices, or a mask) still asks.
+ *  A menu that is not a yes/no (the orb's Attach / Keep) still asks. Off: every ask asks. The deletion tag is ignored
+ *  while Approve all is on. */
 export const approveAllSays = (approveAll, opts) => {
+  if (hardAsk(opts)) return false;
   if (approveAll !== true || !opts || opts.mask || opts.prompt != null) return false;
   const choices = opts.choices;
   if (!Array.isArray(choices) || choices.length === 0) return false;

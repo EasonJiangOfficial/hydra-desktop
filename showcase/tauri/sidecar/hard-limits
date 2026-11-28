@@ -1,0 +1,10 @@
+// The web's hard-limits.ts as relayschema.mjs imports it ("./hard-limits": relay-schema.ts is copied byte for byte, so
+// its import stays as the web wrote it; node and esbuild load this file with no extension as ES module JavaScript).
+// Everything is hardlimits-core.mjs (Part 1 is the web file's port); only the web's zod schemas are made here.
+import { z } from 'zod';
+import { HARD_LIMITS, HARD_VERDICTS } from './hardlimits-core.mjs';
+
+export * from './hardlimits-core.mjs';
+export const hardLimitSchema = z.enum(HARD_LIMITS);
+export const hardVerdictSchema = z.enum(HARD_VERDICTS);
+export const hardTagSchema = hardVerdictSchema.nullish();

@@ -266,7 +266,7 @@
   // While a drawing plays, the rest of the answer (its last line, the end of the turn) waits for it, so the reply's
   // bubble doesn't ride along on the drawing cursor. Drawings themselves, and a new request or an error, never wait.
   let deferred = null;
-  const PASS = new Set(['draw', 'ink_clear', 'ink_stale', 'start', 'error', 'tool_target', 'tool_image', 'list_items']);
+  const PASS = new Set(['draw', 'ink_clear', 'ink_stop', 'ink_saved', 'start', 'error', 'tool_target', 'tool_image', 'list_items']);
   function onAgent(e) {
     if (e.type === 'start' || e.type === 'error') flushDeferred();
     // Notch mode: the words and the end of the turn go to the capsule, never held behind a drawing.
@@ -383,7 +383,9 @@
         Roamie.ink?.play(e);
         break;
       case 'ink_clear': Roamie.ink?.clear(e); break;
-      case 'ink_stale': Roamie.ink?.stale(); break;
+      // Stop: playing ends, the drawing stays. Saved: these parts are in the owner's Notes (or will be).
+      case 'ink_stop': Roamie.ink?.halt?.(); break;
+      case 'ink_saved': Roamie.ink?.saved?.(e); break;
       // A drawn list's items after the user added or edited one on the card.
       case 'list_items': Roamie.ink?.listItems?.(e.part, e.items); break;
       case 'tool_target': {
@@ -510,7 +512,7 @@
         waveTurn = false;
         thought?.end(); thought = null;
         if (a.visible) a.hide();
-        if (!ask?.choices) N().listen(); // a yes/no waiting keeps its question in the capsule // the listen chime plays in the voice helper (cue.swift), never muted by mute-while-listening
+        if (!ask?.choices) N().listen(); // a yes/no waiting keeps its question in the capsule // the listen chime plays in the voice helper (cue.swift)
         return;
       }
       // macOS: the listening shows as voice bars beside the cursor, so the sidekick steps away until it answers.
@@ -538,7 +540,8 @@
       else if (notchOn()) { const take = listenTake; setTimeout(() => { if (take === listenTake && !responding && !ask && Roamie.notch?.active) N().close(); }, 20000); }
       heardText = false;
       listen?.close(); listen = null;
-      if (heard) { const h = heard; setTimeout(() => { if (heard === h) { h.close(); heard = null; } }, 4000); }
+      if (m.pairingReset) { heard?.close(); heard = null; if (notchOn()) N().heard(''); }
+      else if (heard) { const h = heard; setTimeout(() => { if (heard === h) { h.close(); heard = null; } }, 4000); }
     }
   }
 
@@ -558,6 +561,7 @@
     endTalk(); listen?.close(); listen = null;
     if (a?.visible) a.hide({ instant: true });
     Roamie.notch?.close();
+    Roamie.ink?.moved?.(); // drawings stay with the screen they were drawn on
     if (held) return;
     held = { q: [], t: setTimeout(flush, 150) };
     addEventListener('resize', () => requestAnimationFrame(() => requestAnimationFrame(flush)), { once: true });
@@ -657,11 +661,10 @@
   // ---------- Esc ----------
   // While it's on screen, Esc stops an answer (and the voice), or sends it away when it's idle. The shell holds a
   // global Esc only meanwhile (other apps don't get Esc while it does), so this overlay says when it's up.
-  // A drawing counts while it plays and while its marks are still on the screen (frames, loops: Esc is their only
-  // way out once the Roamie has gone). Cards left on screen have their own close button and don't hold Esc. The
-  // reminders card does while it shows (it goes by itself in a few seconds).
+  // A drawing counts while it plays and a short while after (ink.js ESC_REST): it stays until it's closed, by Esc then
+  // or later by its × or the Clear chip, so a card left up never takes Esc from other apps. Pinned cards don't count. The reminders card does while it shows (it goes by itself in a few seconds).
   // A voice turn counts too: on macOS the sidekick steps away while the mic is on and until the answer shows.
-  const up = () => !!(getAgent()?.visible || Roamie.notch?.active || ask || Roamie.panel?.isOpen || Roamie.ink?.playing || Roamie.ink?.loose || Roamie.ink?.reminding || hearing || waveTurn || Roamie.voiceOut?.playing());
+  const up = () => !!(getAgent()?.visible || Roamie.notch?.active || ask || Roamie.panel?.isOpen || Roamie.ink?.holding || Roamie.ink?.reminding || hearing || waveTurn || Roamie.voiceOut?.playing());
   function onEsc() {
     dropAutoListen();
     const a = getAgent();
@@ -669,8 +672,10 @@
     if (ask) { finishAsk(null); return; }
     if (hearing) { hearing = false; send({ type: 'listen_cancel' }); return; }
     if (responding || Roamie.voiceOut?.playing()) { send({ type: 'menu', id: 'stop', via: 'esc' }); Roamie.voiceOut?.stop(); return; }
-    // A drawing on screen: Esc takes it all away (and the sidecar forgets its parts).
-    if (Roamie.ink?.busy) { Roamie.ink.clear({ all: true }); send({ type: 'ink_cleared' }); return; }
+    // A drawing playing or just drawn (ink.js ESC_REST): Esc takes it all away (and the sidecar forgets its parts).
+    // Not one left up for a while: in Hydra mode the docked agent keeps Esc held, and an Esc meant for another app
+    // (closing its dialog) must not wipe the drawings (review r3).
+    if (Roamie.ink?.holding) { Roamie.ink.clear({ all: true }); send({ type: 'ink_cleared' }); return; }
     if (Roamie.panel?.isOpen) Roamie.panel.close();
     endTalk(); listen?.close(); listen = null;
     Roamie.notch?.close();

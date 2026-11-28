@@ -20,7 +20,7 @@ process.env.ROAMIES_DATA_DIR = mkdtempSync(path.join(os.tmpdir(), 'b4fix-'));
 const { askForTake, ownTurn, spokenAnswer, spokenQuestion, startProgress, trackAsk, ASK_DEADLINE_MS } = await import('../voiceturn.mjs');
 const { heardSleepWord } = await import('../power.mjs');
 const { canNudge } = await import('../agents.mjs');
-const { checkRead, checkWindow, deletesCall, stepsLose } = await import('../safety.mjs');
+const { approveAllSays, checkRead, checkWindow, deletesCall, stepsLose } = await import('../safety.mjs');
 const { CAPABILITIES_HEADER, capabilitiesSchema, relayApprovalSchema } = await import('../relayschema.mjs');
 const { CAPABILITIES, hydraApi } = await import('../hydramcp.mjs');
 const S = await import('../store.mjs');
@@ -147,34 +147,55 @@ function fakeClock() {
 
 // ---- 10. After Stop (an aborted signal) an ask is a no before Approve all could say yes.
 {
-  const at = (re) => side.search(re);
-  assert.ok(at(/if \(signal\?\.aborted\) return Promise\.resolve\(null\);/) > 0);
-  assert.ok(at(/if \(signal\?\.aborted\) return Promise\.resolve\(null\);/) < at(/if \(autoYes\(opts\)\) \{ logLine\('ask_auto'/), 'checked first');
+  const start = side.indexOf('function ask(opts, signal)'), end = side.indexOf('\n}', start);
+  assert.ok(start >= 0 && end > start, 'the real ask handler is present');
+  const prompted = [];
+  let relayed = null;
+  const ask = new Function('relayAsk', 'autoYes', 'logLine', 'oneYesNoAtATime', 'showAsk',
+    `let askQueued; ${side.slice(start, end + 2)}; return ask;`)(
+    { getStore: () => relayed }, (opts) => approveAllSays(true, opts), () => {}, (show) => show,
+    async (opts) => { prompted.push(opts); return null; },
+  );
+  const ordinary = { placeholder: 'Open the report?', choices: ['Allow', "Don't allow"] };
+  const guide = { placeholder: 'Remember this?', choices: ['Remember', "Don't remember"], guideEpoch: 'fixture-pair' };
+  assert.equal(approveAllSays(true, guide), true, 'the fixture would otherwise auto-approve');
+  for (const opts of [ordinary, guide]) assert.equal(await ask(opts, AbortSignal.abort()), null);
+  assert.deepEqual(prompted, [], 'retired asks never reach the owner');
+  assert.equal(await ask(ordinary), 'yes');
+  assert.deepEqual(prompted, [], 'ordinary allowed asks still use Approve all');
+  assert.equal(await ask(guide), null);
+  assert.deepEqual(prompted, [guide], 'current guide memory waits for an explicit answer');
+  relayed = { live: true, ask: async () => 'server decision' };
+  assert.equal(await ask(ordinary), 'server decision');
 }
 
 // ---- 11. The capability header is the web contract's, on every request; the schema is the web's.
 {
   assert.equal(CAPABILITIES_HEADER, 'x-hydra-capabilities');
-  assert.equal(CAPABILITIES, '{"approveAllDeletionTags":1}');
+  assert.equal(CAPABILITIES, '{"approveAllDeletionTags":1,"hardTags":1}');
   const seen = [];
   const api = hydraApi({ base: 'https://hydra.invalid', getKey: async () => 'k'.repeat(20), fetchImpl: async (u, o) => { seen.push(o.headers); return { ok: true }; } });
   await api.req('/api/agent/relay/next?wait=1&slot=live');
   await api.req('/api/agent/jobs');
-  for (const h of seen) assert.deepEqual(capabilitiesSchema.parse(h[CAPABILITIES_HEADER]), { approveAllDeletionTags: 1 });
+  for (const h of seen) assert.deepEqual(capabilitiesSchema.parse(h[CAPABILITIES_HEADER]), { approveAllDeletionTags: 1, hardTags: 1 });
   const ok = relayApprovalSchema.safeParse({ turnId: crypto.randomUUID(), claimId: crypto.randomUUID(), summary: 'Trash it?', danger: true, deletion: true });
   assert.equal(ok.success, true); assert.equal(ok.data.deletion, true, 'deletion is a schema field');
 }
 
-// ---- 12. A sign-in file read and a password manager's window: Approve all never answers them.
+// ---- 12. A sign-in file read and a password manager's window: Approve all never answers them. Since A3 round 3 a
+// sign-in file is refused outright (owner's hard limit), and an ordinary dotfile is an ordinary ask (round 2 L12).
 {
   const home = '/Users/k';
-  const hidden = checkRead(`${home}/.config/anthropic/key.txt`, home);
-  assert.equal(hidden.secret, true);
+  assert.equal(checkRead(`${home}/.config/anthropic/key.txt`, home).level, 'block', 'a key under ~/.config is refused');
+  const hidden = checkRead(`${home}/.config/nvim/init.lua`, home);
+  assert.equal(hidden.level, 'ask'); assert.equal(hidden.secret, undefined, 'a dotfile is no hard ask');
   assert.equal(checkRead(`${home}/Documents/a.txt`, home).secret, undefined);
   assert.equal(checkWindow({ app: '1Password', title: 'All Items' }, home).secret, true);
   assert.equal(checkWindow({ app: 'Safari', title: 'Orbs' }, home).secret, undefined);
-  assert.match(tools, /confirm\(v\.reason, ctx, \{ deletion: !!v\.secret \}\)/, 'readable tags it');
-  assert.match(tools, /confirm\(asks\.join\('\\n'\), ctx, \{ deletion: secret \}\)/, 'windowShows tags it');
+  // Tagged secret: a hard ask Approve all never answers (owner's hard limits, hardlimits.test.mjs).
+  assert.match(tools, /confirm\(v\.reason, ctx, \{ secret: !!v\.secret \}\)/, 'readable tags it');
+  assert.match(tools, /confirm\(asks\.join\('\\n'\), ctx, \{ secret \}\)/, 'windowShows tags it');
+  assert.equal(checkWindow({ app: '1Password', title: 'All Items' }, home).vault, true, 'a vault window is refused (tools.mjs windowShows)');
 }
 
 // ---- 13. Connector and MCP calls: unclassified or overwrite-class is a deletion.

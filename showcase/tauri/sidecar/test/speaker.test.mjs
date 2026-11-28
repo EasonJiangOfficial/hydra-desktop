@@ -39,6 +39,26 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   v.onEnd();
   assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true, chars: 3 }, 'a whole reply says how much it said');
 }
+{ // An ended guide turn can still have live synthesis. Its callbacks retain the original pairing and stop retires it.
+  const { sp, out } = setup();
+  sp.setKey('k'); await tick();
+  const earlier = sp.start({ guideEpoch: 'pair-a' });
+  earlier.say('[happy] Earlier fixture.');
+  earlier.end();
+  const retired = made.at(-1);
+  retired.onAudio(new Uint8Array([1, 0]));
+  assert.equal(out.at(-1).guideEpoch, 'pair-a');
+  sp.stop();
+  assert.equal(retired.aborted, true);
+  const newer = sp.start({ guideEpoch: 'pair-b' });
+  newer.say('New fixture.');
+  newer.end();
+  const count = out.length;
+  retired.onAudio(new Uint8Array([1, 0])); retired.onEnd();
+  assert.equal(out.length, count, 'late provider callbacks cannot restart an ended/stopped reply');
+  made.at(-1).onAudio(new Uint8Array([2, 0])); made.at(-1).onEnd();
+  assert.deepEqual(out.filter((event) => event.id === newer.id).map((event) => event.guideEpoch), ['pair-b', 'pair-b']);
+}
 { // No credit → the free model.
   const { sp } = setup({ ok: true, credit: 0 });
   sp.setKey('k'); await tick();
@@ -328,6 +348,11 @@ console.log('bundled beats: passed');
   local.at(-1).onEnd();
   assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true, chars: 12 });
   assert.equal(made.length, 0, 'Fish was never used');
+
+  const guide = sp.start({ guideEpoch: 'local-guide-fixture' });
+  guide.say('A local fixture.'); guide.end();
+  local.at(-1).onAudio(new Uint8Array([4, 0]), 24000); local.at(-1).onEnd();
+  assert.deepEqual(out.filter((event) => event.id === guide.id).map((event) => event.guideEpoch), ['local-guide-fixture', 'local-guide-fixture']);
 
   // Unavailable before any audio: reported with its reason and message, the reply ends as text, and Fish is NOT tried,
   // even when a Fish key is handed over meanwhile (it's ignored while VoiceStudio is the pick).

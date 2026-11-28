@@ -120,6 +120,7 @@
 
   // ---------------------------------------------------------------- shared bits
   let state = null, cur = -1;
+  Roamie.voiceOut?.setGuideEpoch(null);
   const led = (mode = 'on') => el('i', { className: `led ${mode}`, ariaHidden: 'true' });
   const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids.filter((k) => k != null)); return n; };
   const okMark = (label) => el('span', { className: 'status' }, led(), label);
@@ -454,6 +455,25 @@
     leave() { if (!ai.busy) poseFn = null; },
   };
   let askId = null;
+  let guideAsk = null;
+  function closeGuideAsk() {
+    if (!guideAsk) return;
+    guideAsk = null;
+    $('guide-memory').hidden = true;
+    $('guide-memory-title').textContent = '';
+    $('guide-memory-facts').replaceChildren();
+    chat.render();
+  }
+  function answerGuideAsk(text) {
+    if (!guideAsk) return;
+    send({ type: 'answer', id: guideAsk, text });
+    closeGuideAsk();
+  }
+  $('guide-memory-allow').addEventListener('click', () => answerGuideAsk('yes'));
+  $('guide-memory-deny').addEventListener('click', () => answerGuideAsk(null));
+  $('guide-memory').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); answerGuideAsk(null); }
+  });
   $('code-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const v = $('code-input').value.trim();
@@ -1016,7 +1036,7 @@
     enter() {
       if (chat.status === 'idle') {
         chat.status = 'thinking';
-        send({ type: 'chat_start' });
+        send({ type: 'chat_start', guideEpoch: state?.guideEpoch });
         setTimeout(() => at('chat') && act('wave'), 700);
       }
       chat.voiceHint();
@@ -1035,7 +1055,7 @@
     next() { if (chat.over()) return false; chat.send(); return true; },
     skip() {
       if (chat.over()) return false;
-      send({ type: 'chat_skip' });
+      send({ type: 'chat_skip', guideEpoch: state?.guideEpoch });
       chat.status = 'skipped';
       Roamie.voiceOut?.stop();
       chat.render();
@@ -1045,7 +1065,7 @@
     send(text = $('chat-input').value.trim()) {
       if (!text || chat.status !== 'asking') return;
       Roamie.voiceOut?.stop();
-      send({ type: 'chat_answer', text });
+      send({ type: 'chat_answer', text, guideEpoch: state?.guideEpoch });
       $('chat-input').value = '';
       chat.text = '';
       chat.status = 'thinking';
@@ -1081,7 +1101,7 @@
     // nothing below moves), and the nudge appears with its first word.
     slots() {
       const busy = chat.status === 'thinking' && !reveal.shown('chat-lead');
-      $('chat-busy').hidden = !busy;
+      $('chat-busy').hidden = !busy || !!guideAsk;
       $('chat-lead').hidden = busy;
       // The nudge keeps its two lines reserved while the chat runs (visibility, not display), so it appearing
       // never pushes the answer box up.
@@ -1113,7 +1133,7 @@
       };
       if (FIXED[st] && chat.fixed !== st) { chat.fixed = st; reveal.now('chat-q', FIXED[st][0]); reveal.now('chat-lead', FIXED[st][1]); reveal.now('chat-hint', ''); }
       else if (thinking && !chat.n && !reveal.shown('chat-q')) reveal.now('chat-q', 'Getting to know you');
-      $('chat-form').hidden = chat.over();
+      $('chat-form').hidden = chat.over() || !!guideAsk;
       $('chat-input').disabled = !asking;
       chat.slots();
       if (at('chat') && !$('chat-talk').classList.contains('on')) poseFn = thinking ? POSE.think() : asking ? POSE.wait() : null;
@@ -1121,7 +1141,7 @@
       $('chat-facts-list').replaceChildren(...chat.facts.map((f) => {
         const b = el('button', { className: 'link', type: 'button', textContent: 'Remove' });
         b.setAttribute('aria-label', `Forget: ${f.text}`);
-        b.onclick = () => { send({ type: 'chat_forget', id: f.id }); chat.facts = chat.facts.filter((x) => x.id !== f.id); chat.render(); };
+        b.onclick = () => { send({ type: 'chat_forget', id: f.id, guideEpoch: state?.guideEpoch }); chat.facts = chat.facts.filter((x) => x.id !== f.id); chat.render(); };
         return el('li', { className: 'px row fact-row' }, el('span', { className: 'fact', textContent: f.text, title: f.text }), b);
       }));
       nav();
@@ -1157,6 +1177,29 @@
   };
   $('chat-form').addEventListener('submit', (e) => { e.preventDefault(); chat.send(); });
   $('chat-input').addEventListener('input', () => nav());
+
+  function resetGuideVoice(epoch) {
+    if (state) state.guideEpoch = epoch;
+    Roamie.voiceOut?.setGuideEpoch(epoch);
+    closeGuideAsk();
+    voice.listening = false; voice.level = 0; voice.target = 0; voice.bars = [];
+    keys.heard = false; keys.drew = false;
+    $('heard').textContent = '';
+    $('meter').replaceChildren();
+    chat.heard = false; chat.before = '';
+    $('chat-input').value = '';
+    $('chat-input').placeholder = 'Type your answer…';
+    $('chat-talk').classList.remove('on');
+    $('chat-meter').replaceChildren();
+    if (at('keys')) { poseFn = null; keys.tryLabel(); }
+    const restart = at('chat') && chat.status !== 'idle' && chat.status !== 'skipped';
+    Object.assign(chat, { status: chat.status === 'skipped' ? 'skipped' : 'idle', n: 0, text: '', facts: [], fixed: '', lead: '', question: '', hint: '', done: '' });
+    for (const id of ['chat-lead', 'chat-q', 'chat-hint']) reveal.now(id, '');
+    $('chat-say').textContent = '';
+    if (restart) chat.enter();
+    else chat.render();
+    nav();
+  }
 
   // ---------------------------------------------------------------- flow
   // ---------------------------------------------------------------- step 0: welcome
@@ -1206,6 +1249,12 @@
     $('skip').hidden = !(s.skip && !ready) && !(escape && !ready);
     $('skip').textContent = s.skip ? 'Skip for now' : 'Continue anyway';
     s.nav?.();
+    $('next').hidden = !!guideAsk;
+    if (guideAsk) {
+      $('next').disabled = true;
+      $('back').disabled = true;
+      $('skip').hidden = true;
+    }
   }
   function go(i) {
     if (i === cur || i < 0 || i >= STEPS.length) return;
@@ -1246,6 +1295,7 @@
 
   // ---------------------------------------------------------------- messages from the app
   window.__onboard = (msg) => {
+    if (msg.kind?.startsWith('chat') && state?.guideEpoch && msg.guideEpoch !== state.guideEpoch) return;
     switch (msg.kind) {
       case 'copied': {
         if (msg.which === 'problem') {
@@ -1262,6 +1312,7 @@
       case 'state': {
         const first = !state;
         state = msg;
+        Roamie.voiceOut?.setGuideEpoch(msg.guideEpoch);
         $('lite-switch').setAttribute('aria-checked', String(!!msg.lite));
         if (Roamie.sfx) Roamie.sfx.enabled = msg.sound !== false;
         if (first) { sidekick.setLook?.('hydra'); sidekick.setForm?.('default'); }
@@ -1273,6 +1324,18 @@
       case 'login': ai.onLogin(msg); break;
       case 'fish': replies.onFish(msg); break;
       case 'ask':
+        if (msg.guideEpoch) {
+          if (msg.guideEpoch !== state?.guideEpoch) break;
+          if (!at('chat')) { send({ type: 'answer', id: msg.id, text: null }); break; }
+          guideAsk = msg.id;
+          const [title, ...facts] = String(msg.placeholder ?? '').split('\n');
+          $('guide-memory-title').textContent = title;
+          $('guide-memory-facts').replaceChildren(...facts.map((fact) => el('li', { className: 'px row', textContent: fact.replace(/^- /, '') })));
+          $('guide-memory').hidden = false;
+          chat.render();
+          $('guide-memory-title').focus();
+          break;
+        }
         askId = msg.id;
         $('code-label').textContent = msg.prompt || 'Paste the code from your browser';
         $('code-input').type = msg.mask ? 'password' : 'text';
@@ -1280,7 +1343,10 @@
         $('code-form').hidden = false; $('code-input').focus();
         quip('Paste the code here');
         break;
-      case 'cancel_ask': if (askId === msg.id) { askId = null; $('code-form').hidden = true; } break;
+      case 'cancel_ask':
+        if (guideAsk === msg.id) closeGuideAsk();
+        if (askId === msg.id) { askId = null; $('code-form').hidden = true; }
+        break;
       case 'files': perms.applyFiles(msg.status); if (at('perms')) perms.render(); break;
       case 'keys':
         if (state) state.keys = msg.keys;
@@ -1290,8 +1356,14 @@
         break;
       case 'say': quip(msg.text, 3); break;
       case 'showcase': demo.on(msg); break;
-      case 'voice': if (at('chat')) chat.voice(msg); else voice.on(msg); break;
-      case 'speech': Roamie.voiceOut?.handle(msg); break;
+      case 'voice':
+        if (msg.pairingReset) resetGuideVoice(msg.guideEpoch);
+        else if (at('chat')) chat.voice(msg);
+        else voice.on(msg);
+        break;
+      case 'speech':
+        if (msg.stop || (state?.guideEpoch && msg.guideEpoch === state.guideEpoch)) Roamie.voiceOut?.handle(msg);
+        break;
       case 'chat': case 'chat_state': case 'chat_turn': case 'chat_done': case 'chat_facts': chat.on(msg); break;
       case 'mode': if (msg.mode === 'chat' && !at('chat')) { const i = STEPS.findIndex((s) => s.name === 'chat'); if (i >= 0) go(i); } break;
       case 'voice_model':

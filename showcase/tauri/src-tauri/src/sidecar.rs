@@ -55,6 +55,7 @@ pub(crate) fn spawn_sidecar(app: &AppHandle) {
     cmd.arg(&script)
         .env("ROAMIES_VERSION", app.package_info().version.to_string())
         .env("ROAMIES_HANDS", helper_binary("roamies-hands").map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
+        .env("ROAMIES_REMOTE", helper_binary("roamies-remote").map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr);

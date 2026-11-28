@@ -8,7 +8,8 @@ import path from 'node:path';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isPasswordApp, isYes, planDeletion } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkWindow, isHiddenRead, movesCaret, checkFetch, checkMcpServer, checkOpen, checkRead, checkTyped, checkWrite, isPasteKey, isRiskyClick, keyChar, riskyKey, isPasswordApp, isYes, planDeletion, NO_CREDENTIALS, credentialField, codeField, hasCardNumber, isPayClick, riskyWords, parseKey } from './safety.mjs';
+import { KEY_NAME, SEARCH_FIELD, SECRET_NAME_END, piecesCredential, TERMINALS, checkoutText, confirmWord, inBrowser, membershipPage, payStepPage, moneySurface, ordinaryPage, storePage, passwordLike, passwordPrompt, revealLabel, signinPage, strongSecret, toCheckout, typedCredential } from './hardlimits-core.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, pickTextMatch, quizNote, readSecs, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -172,6 +173,8 @@ const ACT_FIXED = [
   'In Finder, clicks and keys can rename, move, open or delete files\\.',
   'Finder came to the front: clicks and keys there can rename, move, open or delete files\\.',
   `A Save or Open panel is up in ${ACT_APP}: in it any file in any folder can be picked, uploaded or made\\.`,
+  // The helper's own refusal to type into a password, code, key or card field (B1).
+  'Blocked for safety: step \\d+ types into a field that takes a password, a code, a key or a card number\\. I never type passwords, credentials or card numbers, Approve all or not\\. Ask the user to type it in themselves\\.',
 ].map((x) => new RegExp(`^${x}$`));
 const TOO_MANY_WINDOWS = 'Too many windows are open for me to check them all. Name the app.';
 // A box [x, y, w, h] inside another (a point of slack for rounding).
@@ -196,7 +199,8 @@ async function launchApp(name, hands) {
 // read_window and act_in_app output: visible controls first, then up to 15 scrolled out of view.
 function controlList(controls, texts = []) {
   const vis = controls.filter((c) => !c.offscreen), off = controls.filter((c) => c.offscreen).slice(0, 15);
-  const line = (c) => `${c.id} ${c.role}${c.label ? ` "${c.label}"` : ''}${c.value ? ` = "${c.value}"` : ''}${c.focused ? ' (focused)' : ''}`;
+  // A password field's value is never shown, also once it stops being secure (an eye clicked: round 4).
+  const line = (c) => `${c.id} ${c.role}${c.label ? ` "${c.label}"` : ''}${c.value ? ` = "${credentialField(c) ? '•••' : c.value}"` : ''}${c.focused ? ' (focused)' : ''}`;
   const labels = new Set(controls.map((c) => c.label));
   const words = texts.filter((t) => !labels.has(t));
   return vis.map(line).join('\n')
@@ -336,7 +340,10 @@ export function stepsText(steps, { clipboard } = {}) {
   return steps.map((s, i) => `${i + 1}. ${one(s)}`).join('\n');
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null, readClipboard = defaultClipboard, remote = () => false, onNotes = () => {} }) {
+// RV: each act step (what it does and the element's name, never typed text) for the phone view's caption (viewgate.mjs).
+let handsStep = null;
+export const setHandsStep = (f) => { handsStep = f; };
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', jobs = null, skills = null, readClipboard = defaultClipboard, remote = () => false, onDrawn = () => {} }) {
   // Relative paths start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   let axNudged = 0;
@@ -345,6 +352,15 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   // Bumped for every new request: what was seen before it may be another page, tab or app by now.
   let turn = 0;
   let typedSoFar = { turn: -1, text: '' }; // what act_in_app typed in this request, joined (V8-4)
+  // What act_in_app typed into each field, for card numbers only (H4): key by key, a type after a type, and the next
+  // request typing on into the same field are one text ("4242 4242", then "4242 4242" is one card). A fill replaces its
+  // field's text, and separate fields are never joined (a phone, a ZIP and a date are not a card). Kept for this
+  // request and the one after it (not reset by a new turn). ponytail: two requests back is forgotten.
+  let cardBufs = { turn: -9, map: new Map() };
+  // Everything typed in this request and the one before, in order, whatever steps came between (round 6, H4): a card
+  // in four boxes with clicks, hovers, scrolls or waits between, over several act_in_app calls, or a seed phrase split
+  // by a space key. Kept only for plans that passed the checks.
+  let pieces = { turn: -9, text: '' };
   async function shotPoint(x, y) {
     const problem = shotProblem(lastShot, turn);
     if (problem) throw new Error(problem);
@@ -402,8 +418,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const r = await hands('resolve', `app:${name}`).catch(() => null);
     const real = r && !r.window && r.running ? String(r.running) : null;
     if (!real) return null;
-    // A password manager unhidden puts its vault on screen: Approve all never answers that (as its window's look).
-    if (!(await confirm(`Bring ${real} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx, { deletion: isPasswordApp(real) || isPasswordApp(name) }))) throw new Error(`${userName} said no, so I didn't bring ${real} forward.`);
+    // A password manager unhidden puts its vault on screen: looking at it is refused (owner's hard limit), and only
+    // bringing it forward asks, Approve all too (secret).
+    const vault = isPasswordApp(real) || isPasswordApp(name);
+    if (vault && look) refuseVault(real);
+    if (!(await confirm(`Bring ${real} forward${look ? ' and look at its window' : ''}? It has no window on screen now.`, ctx, { secret: vault }))) throw new Error(`${userName} said no, so I didn't bring ${real} forward.`);
     forward.apps.set(name, { real, call: toolCall.getStore() });
     return look ? real.trim().toLowerCase() : null;
   }
@@ -426,9 +445,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       try { ev = JSON.parse(line.slice(1)); } catch { return; }
       if (ev.ev === 'borrow') ui({ kind: 'hands', borrow: true });
       else if (ev.ev === 'step' && Array.isArray(ev.bounds) && ev.bounds.length === 4 && ev.bounds.every(Number.isFinite)) ui({ kind: 'hands', step: { bounds: ev.bounds, ...(ev.do === 'hover' ? { hover: true } : {}) } });
+      if (ev.ev === 'step') handsStep?.({ do: ev.do, label: ev.label, bounds: ev.bounds }); // RV
     } : undefined;
     let r;
-    try { r = await runHands(args, { timeout: 120_000, onLine, env: { ...process.env, ROAMIES_FORWARD: fwd ?? '' } }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
+    // Stop (the Mac's or the phone's) aborts the tool call's signal: the helper process is killed, its plan ends.
+    const signal = toolCall.getStore()?.signal;
+    if (signal?.aborted) throw new Error('Stopped.');
+    try { r = await runHands(args, { timeout: 120_000, onLine, env: { ...process.env, ROAMIES_FORWARD: fwd ?? '' }, ...(signal ? { signal } : {}) }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
+    if (signal?.aborted) throw new Error('Stopped.');
     // Every act error goes through actWords (every caller of act: act_in_app, draw's typing).
     const told = (m) => (acting ? actWords(m, (() => { try { return JSON.parse(args[1]).planApp; } catch { return ''; } })()) : m);
     let res;
@@ -448,18 +472,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   }
   async function readWindow(target = 'front', ctx) {
     const t = String(target || 'front');
+    if (isPasswordApp(t)) refuseVault(t);
     const looked = t !== 'front' ? await bringForward(t, ctx, true) : null;
     const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
     const [res, all] = await read().catch(async (err) => {
       if (t === 'front' || !/No matching window/.test(String(err?.message ?? err))) throw err;
       // Opening an app isn't a plain read: it asks first (owner's rule, DESIGN.md "Mac actions").
-      // A password manager opened puts its vault on screen: asked under Approve all too.
-      if (!(await confirm(`Open ${t} to read its window? It isn't open now.`, ctx, { deletion: isPasswordApp(t) }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
+      // (A password manager never gets here: reading its window is refused above.)
+      if (!(await confirm(`Open ${t} to read its window? It isn't open now.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
       if (!(await launchApp(t, hands))) throw err;
       return read();
     });
     await windowShows(res.window, ctx, { looked });
-    lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
+    lastRead = { win: res.window.id, app: res.window.app, title: res.window.title, url: res.window.url, controls: res.controls, texts: res.texts ?? [], turn };
     const others = (all?.windows ?? []).filter((w) => w.app === res.window.app && w.id !== res.window.id).length;
     const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which draw with text also searches)` : ''}`;
     if (!res.controls.length) return `${head}\n${res.note}`;
@@ -467,11 +492,17 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
   // Every ask asks while Approve all is off, including a deletion. Approve all says yes for every yes/no, including
-  // one tagged deletion: true. The tag stays so Approve all off still asks. BLOCK verdicts never reach here.
+  // one tagged deletion: true, but never a hard one (owner's hard limits, safety.mjs hardAsk): pay (it pays, buys,
+  // moves money or trades) or secret (it can show sign-ins). BLOCK verdicts and refusals never reach here.
   // `always` tells an agent job's parent that only the owner may answer (answer_agent can't say yes for them).
-  async function confirm(question, ctx, { deletion = false } = {}) {
-    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true, deletion }, ctx?.signal);
+  async function confirm(question, ctx, { deletion = false, pay = false, secret = false } = {}) {
+    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"], always: true, deletion, pay, secret }, ctx?.signal);
     return isYes(answer);
+  }
+  // Owner's hard limit (fixed, not a setting): a password manager's window is never read, looked at or acted in.
+  function refuseVault(app, secretFile = false) {
+    if (secretFile) throw new Error(`Blocked for safety: ${app ? `${app}'s window` : 'That window'} shows a file that holds sign-ins or keys. I never read, look at or act in one, Approve all or not. Ask the user to do it themselves.`);
+    throw new Error(`Blocked for safety: ${app || 'That window'} is a password manager or shows a vault or sign-in page. I never read, look at or act in one, Approve all or not. Ask the user to do it themselves.`);
   }
   /** A tool that asks before it runs: question(args) is the whole question, or throws when it can't say what runs. */
   const askFirst = (t, question) => ({ ...t, execute: async (args, ctx) => {
@@ -484,8 +515,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   async function readable(p, ctx, opts) {
     const v = checkRead(p, HOME, { ...opts, own });
     const f = allowed(v);
-    // A file that can hold sign-ins (secret) is never answered by Approve all.
-    if (v.level === ASK && !(await confirm(v.reason, ctx, { deletion: !!v.secret }))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
+    // A file that can hold sign-ins (secret) is never answered by Approve all (a hard ask).
+    if (v.level === ASK && !(await confirm(v.reason, ctx, { secret: !!v.secret }))) throw new Error(`${userName} said no, so I didn't read ${f}.`);
     return f;
   }
   /** What windows show (each one's document, a browser's file:// page, or the app when there's no file) is checked
@@ -504,10 +535,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   async function windowShows(wins, ctx, { okApp = null, whole = null, ok = null, blockOnly = false, looked = null } = {}) {
     const asks = whole && !blockOnly ? [whole] : [], key = (w) => JSON.stringify([w?.id, w?.app, w?.title, w?.document, w?.url]);
     const list = [wins].flat();
-    let secret = false; // a password manager or a sign-in file shows: Approve all never answers, no earlier yes covers it
+    let secret = false; // a sign-in file shows: Approve all never answers, no earlier yes covers it
     for (const w of list) {
       const v = checkWindow(w, HOME, { viewers: !remote() });
       if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
+      // A password manager's window, or one showing a vault or sign-in page: refused, never asked (hard limit).
+      if (v.vault) refuseVault(v.app ?? w?.app, !!v.secretFile);
       if (blockOnly) continue;
       if (v.level === ASK && v.secret) { secret = true; if (!asks.includes(v.reason)) asks.push(v.reason); continue; }
       if (whole || ok?.has(key(w))) continue;
@@ -515,7 +548,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       if (v.level === ASK && v.app && looked && v.app.trim().toLowerCase().normalize('NFC') === looked.normalize('NFC')) continue;
       if (v.level === ASK && !asks.includes(v.reason)) asks.push(v.reason);
     }
-    if (asks.length && !(await confirm(asks.join('\n'), ctx, { deletion: secret }))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
+    if (asks.length && !(await confirm(asks.join('\n'), ctx, { secret }))) throw new Error(`${userName} said no, so I didn't read or look at that window.`);
     if (ok) for (const w of list) ok.add(key(w));
   }
 
@@ -650,28 +683,40 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
 
   // ---------- drawing on screen (the draw tool) ----------
   // The overlay plays a drawing a beat at a time; each beat's places are looked up just before it's sent, so a
-  // walkthrough's next step is found on the screen as it is after the click. A drawing stays until it's cleared or the
-  // screen changes: a new drawing in a later request replaces it (unless it edits it), the front window switching,
-  // moving or closing clears it, so does a click there that changes what it shows (a link, button, tab, menu item, a
-  // double-click that opens something: the user's or the agent's own), the page or document in it changing (another
-  // address in a browser, another title elsewhere: keys, swipes and script-driven clicks too), and Esc or Clear all on
-  // screen. All of it goes, cards too: they were about that screen. Screen marks also go at the end of a request that
-  // drew nothing.
-  // Parts (p1 …) stay editable meanwhile.
+  // walkthrough's next step is found on the screen as it is after the click. A drawing stays on screen until the user
+  // closes it (a card's ×, Esc, Clear): owner, 2026-11-26, "and not go away automatically". Nothing clears it by
+  // itself: not a window or page change, a click, the next request, Stop or the number of cards. Every drawing is also
+  // saved to their Notes page (onDrawn, notesync.mjs). Parts (p1 …) stay editable meanwhile.
   const parts = createParts();
   // Pictures looked at with see_photo: a photo's labels are only drawn on one of these.
   const photos = createPhotos();
   const buttons = new Map(); // part id → the button's action, for when it's clicked
   const quizzes = new Map(); // part id → the quiz drawn there, to score what was clicked
   const lists = createLists(); // part id → a drawn checklist, with what the user changed on it
-  // Parts of drawings that go by themselves (the tour, the setup showcase): about no window, so switching windows keeps them.
-  const loose = new Set();
   // Cards the user pinned (ink.js): the overlay keeps them through clears and window changes, so they're remembered here too.
   const pinned = new Set();
   const keepPinned = (id) => pinned.has(id);
-  const forgetInk = () => { parts.clear(keepPinned); lists.clear(keepPinned); for (const m of [buttons, quizzes]) for (const id of [...m.keys()]) if (!pinned.has(id)) m.delete(id); for (const id of [...loose]) if (!pinned.has(id)) loose.delete(id); };
-  const windowBound = () => parts.ids.some((p) => !loose.has(p));
-  const ink = { waits: new Map(), turn: -1, active: 0, front: '', win: null, page: '', watch: null, checks: [], fresh: new Set() };
+  const forgetInk = () => { parts.clear(keepPinned); lists.clear(keepPinned); for (const m of [buttons, quizzes]) for (const id of [...m.keys()]) if (!pinned.has(id)) m.delete(id); };
+  const ink = { waits: new Map() };
+  // Each draw event's number (ev) and the parts it carried: after a stop the overlay's ink_parts names the newest it had,
+  // so a part sent after that (still on its way) is never forgotten. And each drawing's parts, by its id.
+  let drawEv = 0;
+  const sentIn = new Map(), drawnBy = new Map();
+  const forget = (p) => { parts.remove(p); buttons.delete(p); quizzes.delete(p); lists.drop(p); pinned.delete(p); sentIn.delete(p); };
+  // Its parts, one more draw event, and what is no longer up is let go.
+  function noteSent(id, ids) {
+    const ev = ++drawEv;
+    for (const p of ids) sentIn.set(p, ev);
+    if (ids.length) { if (!drawnBy.has(id)) drawnBy.set(id, new Set()); for (const p of ids) drawnBy.get(id).add(p); }
+    for (const [d, ps] of drawnBy) if (![...ps].some((p) => parts.has(p))) drawnBy.delete(d);
+    for (const p of sentIn.keys()) if (!parts.has(p)) sentIn.delete(p);
+    return ev;
+  }
+  // A drawing's id on the overlay and in its note: the tool call's id, made unique (review r3). Claude Code calls
+  // without one get gg_call_N, counted per MCP server, so two drawings up at once could share an id and one's pictures
+  // go in the other's note. ponytail: one short string per draw call kept for the app's life.
+  const drawIds = new Set();
+  const drawId = (raw) => { const base = String(raw ?? 'draw'); let id = base, n = 1; while (drawIds.has(id)) id = `${base}~${++n}`; drawIds.add(id); return id; };
   const inkWait = (key, ms, signal) => new Promise((resolve) => {
     const done = (v) => { clearTimeout(t); signal?.removeEventListener('abort', stop); ink.waits.delete(key); resolve(v); };
     const t = setTimeout(() => done('timeout'), ms), stop = () => done('stopped');
@@ -680,66 +725,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     signal?.addEventListener('abort', stop, { once: true });
     ink.waits.set(key, done);
   });
-  const clearScreenInk = (stop = false) => { parts.clearScreen(); for (const id of buttons.keys()) if (!parts.has(id)) buttons.delete(id); ui({ kind: 'agent', e: { type: 'ink_clear', screen: true, stop } }); };
   const clearAllInk = () => { forgetInk(); ui({ kind: 'agent', e: { type: 'ink_clear' } }); };
-  // Cancelled: what this request drew goes (#113); cards kept from before it (draw keep) stay.
-  const cancelInk = () => {
-    if (!parts.ids.some((p) => !ink.fresh.has(p) && !pinned.has(p))) return clearAllInk();
-    const ids = [...ink.fresh].filter((p) => parts.has(p) && !pinned.has(p));
-    for (const p of ids) { parts.remove(p); buttons.delete(p); quizzes.delete(p); lists.drop(p); loose.delete(p); }
-    parts.clearScreen(); for (const p of buttons.keys()) if (!parts.has(p)) buttons.delete(p);
-    ui({ kind: 'agent', e: { type: 'ink_clear', screen: true, stop: true, parts: ids } });
-  };
-  // The window a drawing belongs to: the front window's id and place. Its title isn't part of it (a page updating
-  // its title, a document being edited, isn't the screen changing).
-  // Its rect and app too, so a click can be told to be in it.
-  const frontWin = async () => {
-    if (!HANDS) return null;
-    const r = await runHands(['locate', 'front'], { timeout: 900 });
-    try { const w = JSON.parse(r.stdout.trim().split('\n').pop() || '{}').window; return w ? { key: `${w.id}|${(w.bounds ?? []).map((v) => Math.round(v / 4)).join(',')}`, rect: w.bounds ?? null, app: w.app ?? '' } : null; } catch { return null; }
-  };
-  const frontKey = async () => (await frontWin())?.key ?? '';
-  // What the front window shows: a browser's address (without the #part), else its title, less what changes on its
-  // own ("(3) Inbox", "— Edited"). '' when it can't be read, which never counts as a change.
-  const pageOf = ({ url, title } = {}) => (url ? String(url).replace(/#.*$/, '') : String(title ?? '').replace(/^\(\d+\)\s*/, '').replace(/\s+[—–-]\s+Edited$/i, '').trim());
-  const frontPage = async () => {
-    if (!HANDS) return '';
-    const r = await runHands(['front'], { timeout: 900 });
-    try { return pageOf(JSON.parse(r.stdout.trim().split('\n').pop() || '{}')); } catch { return ''; }
-  };
-  // The screen under the drawing changed: all of it fades (cards too), and the model is told nothing is there.
-  function screenChanged(why) {
-    forgetInk(); ink.front = ''; ink.win = null; ink.page = ''; watchClicks(false);
-    for (const t of ink.checks) clearTimeout(t);
-    ink.checks = [];
-    ui({ kind: 'agent', e: { type: 'ink_stale' } });
-    onInkGone(why);
-  }
-  // Has the page or document in its window changed since it was drawn?
-  async function pageCheck() {
-    if (!windowBound() || !ink.page || ink.active) return;
-    const now = await frontPage();
-    if (now && ink.page && now !== ink.page && windowBound()) screenChanged('page');
-  }
-  // When another window comes to the front, or that window moves or closes, the drawing no longer sits on what it was about.
-  function watchStale() {
-    if (!HANDS || ink.watch) return;
-    ink.watch = setInterval(async () => {
-      if (ink.active) return;
-      if (!windowBound()) { clearInterval(ink.watch); ink.watch = null; watchClicks(false); return; }
-      const [k, page] = await Promise.all([frontKey(), frontPage()]);
-      if (!windowBound()) return;
-      // Not read when it was drawn (the helper was slow): what's there now is what it's about.
-      if (!ink.front && k) ink.front = k;
-      if (!ink.page && page) ink.page = page;
-      if (k && k !== ink.front) screenChanged('window');
-      else if (page && page !== ink.page) screenChanged('page');
-    }, 1500);
-    ink.watch.unref?.();
-  }
-  // Steps that change what a window shows: the agent doing one is the screen changing under a drawing.
-  const CHANGING = new Set(['click', 'click_text', 'press_button', 'key', 'click_at', 'choose', 'hover']);
-  const agentChangesScreen = () => { if (windowBound() && !ink.active) screenChanged('agent'); };
   const toClipboard = (text) => copyText(text, askShell);
   // How each kind of place is found. retry: just after a click, when a menu or dialog may still be opening.
   // gate: before any words or controls are read off a window (draw's relay check, R11b-A).
@@ -878,13 +864,16 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       else if (m.kind === 'type') {
         if (!HANDS) throw new Error('Typing into apps needs the Hydra app.');
         const src = m.at.src, app = t === 'front' || t === 'screen' ? {} : { app: t };
+        // Owner's hard limit: no password, credential or card number is typed, into any field.
+        if (hasCardNumber(m.text) || credentialField(String(src?.text ?? '')) || credentialField({ role: m.at.role ?? src?.role, label: m.at.name ?? src?.label })) throw new Error(`Blocked for safety: ${NO_CREDENTIALS} Nothing was typed.`);
         const steps = src.text != null ? [{ do: 'fill', field: src.text, text: m.text }]
           : src.id != null ? [{ do: 'click', id: m.at.live, ...(m.at.name ? { shown: m.at.name } : {}) }, { do: 'type', text: m.text }]
             : [{ do: 'click_at', x: m.at.rect[0] + m.at.rect[2] / 2, y: m.at.rect[1] + m.at.rect[3] / 2, global: true }, { do: 'type', text: m.text }];
         // Typing is a Mac action: asked every time, with the real app and the whole text (owner's rule).
         const where = await hands('locate', app.app ? `app:${app.app}` : 'front').then((r) => r?.window?.app ?? null, () => null);
-        // A fill replaces what the field holds (lost); a password manager brings its vault forward: asked under Approve
-        // all (planDeletion, the same rule as act_in_app).
+        // A fill replaces what the field holds (lost): a deletion (planDeletion, the same rule as act_in_app). A password
+        // manager's window is never typed in (hard limit).
+        if ([where, app.app].some(isPasswordApp)) refuseVault(where ?? app.app);
         if (!(await confirm(`In ${where ?? app.app ?? 'the app in front'}, every step I'd take:\n${stepsText(steps)}`, undefined, { deletion: planDeletion(steps, [where, app.app]) }))) throw new Error(`${userName} said no, so nothing was typed.`);
         const r = await hands('act', JSON.stringify({ steps, ...app, wholeOk: ['plan'], planApp: where ?? app.app ?? '' }));
         if (r?.needsConfirm) throw new Error(`${actWords(r.why, where ?? app.app)} Nothing more was typed; use act_in_app for that.`);
@@ -900,29 +889,25 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     const unseen = photos.unseen(args.beats);
     if (unseen) throw new Error(unseen);
     const t = String(args.target || 'front'), spec = t === 'front' ? 'front' : t === 'screen' ? 'screen' : `app:${t}`;
-    const id = ctx.toolCallId, edits = args.edit ?? [], notes = [], said = [];
+    const id = drawId(ctx.toolCallId), edits = args.edit ?? [], notes = [], said = [];
     // Clicks and hovers in other apps can't be seen here (Wayland): the beats play one after another instead.
     const beats = (args.beats ?? []).map((b) => (POINTER_OK || !b.wait ? b : { ...b, wait: undefined }));
     if (beats.some((b, i) => b !== (args.beats ?? [])[i])) notes.push("This desktop doesn't let Hydra see clicks in other apps, so the beats played one after another instead of waiting for clicks.");
     for (const e of edits) if (e.do !== 'clear' && !parts.has(e.part)) throw new Error(`There's no ${e.part} on screen now${parts.ids.length ? ` (there is: ${parts.describe()})` : ' (nothing is drawn)'}. Draw it again instead.`);
-    // A new drawing in a later request replaces the old one (cards too), unless it's editing what's there or keeps
-    // the cards (the user asked to keep them up, #113).
-    if (ink.turn !== turn && !edits.length && parts.ids.length) { if (args.keep) clearScreenInk(true); else clearAllInk(); }
-    if (ink.turn !== turn) ink.fresh = new Set();
-    ink.turn = turn;
-    for (const e of edits) if (e.do === 'erase') { parts.remove(e.part); lists.drop(e.part); } else if (e.do === 'clear') { parts.clear(); lists.clear(); pinned.clear(); }
+    for (const e of edits) if (e.do === 'erase') { parts.remove(e.part); lists.drop(e.part); } else if (e.do === 'clear') forgetInk(); // pinned cards stay, as with Esc
     // One segment per beat: each is sent as soon as its places are found, so the first marks draw while the rest
     // are still being looked up (each lookup is a helper round trip). after: it comes after a click or hover.
     const segs = beats.map((b, i) => ({ from: i, to: i + 1, after: i > 0 && !!beats[i - 1].wait }));
     if (!segs.length) segs.push({ from: 0, to: 0 });
-    const drawn = [], shut = [];
-    // Cut off (they spoke over it): the overlay stops too, or it keeps the caption up waiting for a click.
-    const stopped = () => { if (ctx?.signal?.aborted) cancelInk(); return 'Stopped.'; };
+    const drawn = [], paged = [];
+    let sent = -1; // the last segment sent to the overlay
+    // Cut off (they spoke over it): the overlay stops playing (or it keeps the caption up waiting for a click); what it
+    // drew stays.
+    const stopped = () => { if (ctx?.signal?.aborted) ui({ kind: 'agent', e: { type: 'ink_stop' } }); return 'Stopped.'; };
     // Where there's room for cards: the screen minus the front window; and what's on it, so names avoid covering words.
     const hasCards = beats.some((b) => b.marks.some((m) => CARDS.includes(m.kind)));
     const win = hasCards && HANDS ? (await hands('locate', 'front').catch(() => null))?.window?.bounds ?? null : null;
     const busy = lastRead?.turn === turn ? lastRead.controls.filter((c) => !c.offscreen && c.bounds).slice(0, 300).map((c) => c.bounds) : [];
-    ink.active++;
     // Lookups are shared until a click or hover (then the screen may have changed, and words are retried a moment).
     let look = null, segNo = 0;
     // A relay turn (R11b-A): the windows draw reads words or controls in are checked first, as read_window's are. Again
@@ -938,61 +923,60 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
       if (!gated.has(k)) gated.set(k, searchedShows(where, ctx, okWins, !remote() || (where === 'screen' && screenAsked)).then((r) => { if (where === 'screen') screenAsked = true; return r; }));
       return gated.get(k);
     };
-    try {
-      for (const [k, sg] of segs.entries()) {
+    for (const [k, sg] of segs.entries()) {
+      if (ctx?.signal?.aborted) return stopped();
+      let seg;
+      try {
+        segNo = k;
+        if (!look || sg.after) look = lookups(spec, sg.after, gate);
+        seg = await resolveTargets(beats.slice(sg.from, sg.to), look);
+        // Typing needs the original place (its words or id) to act on; resolveTargets keeps it.
+        seg.forEach((b, j) => b.marks.forEach((m, n) => { if (m.at) m.at.src = beats[sg.from + j].marks[m.from ?? n]?.at; }));
+        await prepare(seg, t, notes);
+      } catch (e) {
+        // Stop during a lookup (hands throws "Stopped." on an aborted signal): stopped, never an error.
         if (ctx?.signal?.aborted) return stopped();
-        let seg;
-        try {
-          segNo = k;
-          if (!look || sg.after) look = lookups(spec, sg.after, gate);
-          seg = await resolveTargets(beats.slice(sg.from, sg.to), look);
-          // Typing needs the original place (its words or id) to act on; resolveTargets keeps it.
-          seg.forEach((b, j) => b.marks.forEach((m, n) => { if (m.at) m.at.src = beats[sg.from + j].marks[m.from ?? n]?.at; }));
-          await prepare(seg, t, notes);
-        } catch (e) {
-          if (!k) throw e;
-          notes.push(`Stopped before beat ${sg.from + 1}: ${e.message}`);
-          break;
-        }
-        // Cancelled while this step's places were looked up: it never shows.
-        if (ctx?.signal?.aborted) return stopped();
-        const ids = parts.assign(seg);
-        for (const p of ids) ink.fresh.add(p);
-        const drawnNotes = seg.flatMap((b) => b.marks.filter((m) => ['note', 'card', 'clip', 'list'].includes(m.kind)));
-        if (drawnNotes.length) onNotes(drawnNotes, id);
-        drawn.push(...ids.map((p) => [p, parts.get(p)]));
-        if (opts.fade) for (const p of ids) loose.add(p);
-        // Only a few cards stay up at once (the overlay closes the oldest as each new one is drawn), so the oldest are
-        // forgotten here too. Eight cards at once covered the screen, and the last one landed on top of the first.
-        // A deep explanation shows one big card at a time.
-        else for (const p of parts.trimCards(args.deep ? 1 : LIMITS.cardsShown, (q) => loose.has(q) || pinned.has(q))) { shut.push(p); buttons.delete(p); lists.drop(p); }
-        for (const b of seg) for (const m of b.marks) if (m.action && m.part) buttons.set(m.part, m.action);
-        for (const b of seg) for (const m of b.marks) if (m.kind === 'quiz' && m.part) quizzes.set(m.part, m);
-        for (const b of seg) for (const m of b.marks) if (m.kind === 'list' && m.part) lists.set(m.part, m);
-        // A deep card is closed by the next one, so each but the last says how long its words take to read (#143).
-        const out = seg.map((b, j) => ({ ...b, n: sg.from + j + 1, caption: plain(b.say), voiced: !!speak(b.say), ...(args.deep && sg.from + j + 1 < beats.length ? { read: readSecs(b.marks) } : {}) }));
-        said.push(...out.map((b) => b.caption));
-        ui({ kind: 'agent', e: { type: 'draw', id, seg: k, beats: out, edits: k ? [] : edits, last: k === segs.length - 1, win, busy: k ? [] : busy, ...(opts.fade ? { fade: opts.fade } : {}), ...(args.deep ? { deep: true } : {}) } });
-        // The first beat must show; later ones queue behind it on the overlay without holding this up.
-        if (!k) {
-          const started = await inkWait(`${id}:start:0`, 15_000, ctx?.signal);
-          if (started === 'stopped') return stopped();
-          if (started === 'timeout') throw new Error("The drawing didn't show (the overlay isn't responding).");
-        }
-        const w = out.at(-1)?.wait;
-        if (!w) continue;
-        const n = out.at(-1).n, r = await inkWait(`${id}:wait:${n}`, w === 'click' ? 120_000 : 60_000, ctx?.signal);
-        if (r === 'stopped') return stopped();
-        notes.push(`Beat ${n}: ${r === 'timeout' ? `no ${w} within ${w === 'click' ? 2 : 1} minute${w === 'click' ? 's' : ''}, so I stopped there` : `${userName} ${r}`}.`);
-        if (r === 'timeout') break;
-        // They clicked: the screen has changed under the old screenshot.
-        if (lastShot) lastShot.used = true;
-        await new Promise((res) => setTimeout(res, 350));
+        if (!k) throw e;
+        notes.push(`Stopped before beat ${sg.from + 1}: ${e.message}`);
+        break;
       }
-    } finally { ink.active--; }
-    if (windowBound()) { [ink.win, ink.page] = await Promise.all([frontWin(), frontPage()]); ink.front = ink.win?.key ?? ''; watchStale(); if (ink.win) watchClicks(true); }
+      // Cancelled while this step's places were looked up: it never shows.
+      if (ctx?.signal?.aborted) return stopped();
+      const ids = parts.assign(seg);
+      drawn.push(...ids.map((p) => [p, parts.get(p)]));
+      // A deep explanation pages: one big card at a time, each closing the one before it (its picture is in the note).
+      if (args.deep) for (const p of ids) if (CARDS.includes(parts.get(p)?.kind)) { const before = paged.at(-1); if (before) { parts.remove(before); buttons.delete(before); lists.drop(before); } paged.push(p); }
+      for (const b of seg) for (const m of b.marks) if (m.action && m.part) buttons.set(m.part, m.action);
+      for (const b of seg) for (const m of b.marks) if (m.kind === 'quiz' && m.part) quizzes.set(m.part, m);
+      for (const b of seg) for (const m of b.marks) if (m.kind === 'list' && m.part) lists.set(m.part, m);
+      // A deep card is closed by the next one, so each but the last says how long its words take to read (#143).
+      const out = seg.map((b, j) => ({ ...b, n: sg.from + j + 1, caption: plain(b.say), voiced: !!speak(b.say), ...(args.deep && sg.from + j + 1 < beats.length ? { read: readSecs(b.marks) } : {}) }));
+      said.push(...out.map((b) => b.caption));
+      // Saved to their Notes page, every mark (notesync.mjs). Not the app's own drawings (the tour, the showcase).
+      if (!opts.fade) onDrawn({ id, turn, beats: out });
+      sent = k;
+      ui({ kind: 'agent', e: { type: 'draw', id, ev: noteSent(id, ids), seg: k, beats: out, edits: k ? [] : edits, last: k === segs.length - 1, win, busy: k ? [] : busy, ...(opts.fade ? { fade: opts.fade } : {}), ...(args.deep ? { deep: true } : {}) } });
+      // The first beat must show; later ones queue behind it on the overlay without holding this up.
+      if (!k) {
+        const started = await inkWait(`${id}:start:0`, 15_000, ctx?.signal);
+        if (started === 'stopped') return stopped();
+        if (started === 'timeout') throw new Error("The drawing didn't show (the overlay isn't responding).");
+      }
+      const w = out.at(-1)?.wait;
+      if (!w) continue;
+      const n = out.at(-1).n, r = await inkWait(`${id}:wait:${n}`, w === 'click' ? 120_000 : 60_000, ctx?.signal);
+      if (r === 'stopped') return stopped();
+      notes.push(`Beat ${n}: ${r === 'timeout' ? `no ${w} within ${w === 'click' ? 2 : 1} minute${w === 'click' ? 's' : ''}, so I stopped there` : `${userName} ${r}`}.`);
+      if (r === 'timeout') break;
+      // They clicked: the screen has changed under the old screenshot.
+      if (lastShot) lastShot.used = true;
+      await new Promise((res) => setTimeout(res, 350));
+    }
+    // Stopped early (a step not found, no click in time): the overlay still hears the drawing ended (an empty last
+    // segment), so it makes the note's pictures and lets the pen go.
+    if (sent >= 0 && sent < segs.length - 1) ui({ kind: 'agent', e: { type: 'draw', id, ev: noteSent(id, []), seg: sent + 1, beats: [], edits: [], last: true, win, busy: [], ...(opts.fade ? { fade: opts.fade } : {}), ...(args.deep ? { deep: true } : {}) } });
     const list = describeParts(drawn);
-    if (shut.length) notes.push(args.deep ? `A deep explanation shows one card at a time, so each closed as the next came (${shut.join(', ')}); only the last is up now.` : `Only ${LIMITS.cardsShown} cards stay up at once, so the oldest closed as newer ones were drawn (${shut.join(', ')}).`);
+    if (paged.length > 1) notes.push(`A deep explanation shows one card at a time, so each closed as the next came (${paged.slice(0, -1).join(', ')}); only the last is up now.`);
     // The lines were already said (and captioned) as it drew. Said here, right before the reply is written, so the
     // reply doesn't say them again: models restated each step after a walkthrough even with the rule in the prompt.
     const spoken = said.filter(Boolean);
@@ -1005,7 +989,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
   const inkEvents = {
     started: (id, seg) => ink.waits.get(`${id}:start:${seg}`)?.('started'),
     waitDone: (id, beat, result) => ink.waits.get(`${id}:wait:${beat}`)?.(['clicked', 'hovered', 'skipped'].includes(result) ? result : 'skipped'),
-    closed: (part) => { parts.remove(String(part)); buttons.delete(String(part)); lists.drop(String(part)); loose.delete(String(part)); pinned.delete(String(part)); },
+    closed: (part) => { parts.remove(String(part)); buttons.delete(String(part)); lists.drop(String(part)); pinned.delete(String(part)); },
     pinned: (part, on) => { if (!on) pinned.delete(String(part)); else if (parts.has(String(part))) pinned.add(String(part)); },
     button: (part) => buttons.get(String(part)) ?? null,
     // A quiz was answered on screen (the option clicked for each question): how it went, in words for the model.
@@ -1020,31 +1004,34 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
     },
     // What they changed on lists since the last message, once (null if nothing).
     listNote: () => lists.note(),
-    // A request ended: if it drew nothing, the marks from before it are done with.
-    endRequest: () => { if (ink.turn !== turn && parts.screenCount) clearScreenInk(); },
-    // Stop. Cancelling a request that drew: all of its drawing goes, diagrams and cards too, and the overlay stops
-    // playing it. Otherwise (only the voice was still going) the screen marks go and the cards stay.
-    stop: (cancelled = false) => {
+    // Stop: the overlay stops playing and says which parts are still up (alive); what it drew stays.
+    stop: () => {
       for (const done of [...ink.waits.values()]) done('stopped');
-      if (cancelled && ink.turn === turn && parts.ids.length) cancelInk(); else clearScreenInk(true);
+      ui({ kind: 'agent', e: { type: 'ink_stop' } });
+    },
+    // The parts still on the overlay after a stop (ink_parts): the ones it never got to are forgotten. ev: the newest
+    // draw event it had; parts sent after it are on their way, and stay.
+    alive: (ids, ev) => {
+      const up = new Set((Array.isArray(ids) ? ids : []).map(String)), seen = Number.isInteger(ev) ? ev : Infinity;
+      for (const p of parts.ids) if (!up.has(p) && (sentIn.get(p) ?? 0) <= seen) forget(p);
     },
     // The user sent the whole drawing away (Esc): nothing is on screen any more.
     cleared: () => { for (const done of [...ink.waits.values()]) done('stopped'); forgetInk(); },
-    // The app takes its own drawing away (the setup showcase, when its step is left): everything goes.
-    clear: () => { for (const done of [...ink.waits.values()]) done('stopped'); clearAllInk(); },
-    describe: () => parts.describe(),
-    // The user clicked ({ x, y, role, app, acts } from the voice helper). In the drawing's window, or one of its app's
-    // menu items: on something that does something, the drawing goes now; anywhere else in it, it goes if the page then
-    // changes (a script-driven link). Not while a walkthrough waits for exactly that click.
-    userClick: (c) => {
-      if (!windowBound() || !ink.win) return watchClicks(false);
-      if (ink.active || ink.waits.size) return;
-      const [x, y, w, h] = ink.win.rect ?? [], inside = w > 0 && c.x >= x && c.x <= x + w && c.y >= y && c.y <= y + h;
-      const menu = /^AXMenu(Bar)?Item$/.test(String(c.role)) && !!c.app && c.app === ink.win.app;
-      if (!inside && !menu) return;
-      if (c.acts) return screenChanged('click');
-      for (const ms of [700, 1600]) ink.checks.push(setTimeout(() => pageCheck().catch(() => {}), ms));
+    // The overlay started afresh (a screen was plugged in or out and the shell rebuilt it, review r3): every drawing,
+    // pinned ones too, is gone from the screen.
+    reset: () => { for (const done of [...ink.waits.values()]) done('stopped'); pinned.clear(); forgetInk(); },
+    // The app takes its own drawing away (the setup showcase, when its step is left): only the drawings match(id) names
+    // go, never the owner's (they stay until the owner closes them). No match: everything.
+    clear: (match) => {
+      if (!match) { for (const done of [...ink.waits.values()]) done('stopped'); return clearAllInk(); }
+      for (const [k, done] of [...ink.waits]) if (match(k.replace(/:(start|wait):\d+$/, ''))) done('stopped');
+      const ids = [...drawnBy.keys()].filter(match);
+      for (const id of ids) { for (const p of drawnBy.get(id)) forget(p); drawnBy.delete(id); }
+      ui({ kind: 'agent', e: { type: 'ink_clear', ids } });
     },
+    // Whether any part of the drawings match(id) names is still on screen.
+    up: (match) => [...drawnBy].some(([id, ps]) => match(id) && [...ps].some((p) => parts.has(p))),
+    describe: () => parts.describe(),
     copy: (text) => toClipboard(text),
     // A drawing the app makes itself (the welcome tour): the same checks and overlay as one from the model.
     show: (beats, id, opts) => draw({ beats }, { toolCallId: id }, opts),
@@ -1096,7 +1083,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           // Only reading steps (models sometimes send read_window here): read the window instead of failing the call.
           if (!steps.length) return readWindow(asked, ctx);
           if (!allowActions()) throw new Error(actionsOff);
-          if (steps.some((s) => CHANGING.has(s.do))) agentChangesScreen();
+          // A password manager is never acted in (hard limit): its window shows sign-ins, and typing there is credentials.
+          if (isPasswordApp(asked)) refuseVault(asked);
           // "Type a web address into the browser's bar and press Return" is just opening a link: do that directly
           // (instant, and nothing can land in the wrong field) instead of clicking the bar and typing.
           const url = typedAddress(asked, steps);
@@ -1113,14 +1101,120 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           const spec = t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
           // Before the locate below, whose failure is passed over: a no ends it here.
           if (spec.startsWith('app:')) await bringForward(t, ctx);
+          const appName = sameApp && lastRead.app ? lastRead.app : asked;
           const live = steps.slice(0, upTo).some((s) => s.id != null) ? await liveControls(spec) : null;
           const mapped = [];
+          // Owner's hard limit: no password, credential or card number is typed into any field (B1). The field a step
+          // types into: its id's control, a control read with that name, the one clicked, focused or tabbed to before it,
+          // else the focused one read. Key by key, paste and choose (it types its option into a type-to-search box)
+          // count as typing. Refused, never asked. This is the early layer: the hands helper itself refuses typing, keys,
+          // paste and choose into a password field or a credential-labelled one, whatever was sent (main.swift
+          // CRED_FIELD), for the fields seen only there (after a click_at, a re-read).
+          // The page's fields: the read's, else (a plan that types with no read this request) the helper's own list of
+          // the window's controls, so a tab or a click that lands on a password field is known here too.
+          const read = lastRead?.turn === turn ? lastRead.controls ?? [] : [];
+          // An opt (alt) chord types a character too (opt+h is ˙): it is typing, as in the helper's keyTypes (round 4).
+          const optTypes = (k) => { const p = parseKey(k); return !!p && p.mods.has('opt') && !p.mods.has('cmd') && !p.mods.has('ctrl') && p.key.length === 1; };
+          const typesText = (s) => ['type', 'fill', 'set', 'choose'].includes(s.do) || (s.do === 'key' && (isPasteKey(s.key) || optTypes(s.key) || !['', '\n', '\b'].includes(keyChar(s.key))));
+          // Not for an app with no window on screen (it waits to be brought forward by the steps themselves: a look would
+          // bring it forward first); the helper's own check covers that one.
+          const hidden = forward.turn === turn && spec.startsWith('app:') && forward.apps.has(spec.slice(4));
+          const ui = read.length || hidden || !steps.some(typesText) ? null : await hands('ui', spec, 'controls').catch(() => null);
+          const page = ui ? ui.controls ?? [] : read;
+          const pageTexts = (ui ? ui.texts : lastRead?.turn === turn ? lastRead.texts : null) ?? [];
+          // A terminal at a password prompt (sudo, ssh, gpg): what is typed now is the password, and the shell shows no
+          // field to judge. Its last line says so (the focused text area's value, or the window's text).
+          const atPrompt = [appName, lastRead?.turn === turn ? lastRead.app : null].some((a) => TERMINALS.test(String(a ?? '').trim()))
+            && [...pageTexts, ...page.filter((c) => c.focused).map((c) => c.value)].some((t) => passwordPrompt(t));
+          // A key's name typed (or shown) in one field: the value typed next is the key itself (a Vercel or .env form:
+          // Key API_KEY, Value <the secret>).
+          // Round 6: by the name's end (API_KEY, DB_PASSWORD; not GOOGLE_AUTH_REDIRECT, TOKEN_COUNT, AUTHOR_NAME), and for the
+          // value typed next only.
+          let keyNamed = page.some((c) => /\b(key|name|variable)\b/i.test(String(c.label ?? '')) && SECRET_NAME_END.test(String(c.value ?? '').trim()) && /_|^[A-Z0-9]+$/.test(String(c.value ?? '').trim()));
+          const norm = (x) => String(x ?? '').trim().toLowerCase();
+          const named = (f) => page.find((c) => c.label && norm(c.label) === norm(f));
+          const isField = (c) => /field|text|combo|search|area/i.test(String(c?.role ?? ''));
+          const cardForm = page.some((c) => credentialField(c) && /card|cvv|cvc|kart|tarjeta|carte|卡|カード|카드/i.test(String(c.label ?? '')));
+          const credOnPage = page.some((c) => credentialField(c, { cardForm }));
+          // A sign-in or verify page (round 4): a credential field on it, or a sign-in title or text. Only there is a bare
+          // "Code" box a sign-in code, and a password-like word typed blind a password.
+          const winNow = ui?.window ?? (lastRead?.turn === turn ? lastRead : null);
+          const signin = credOnPage || signinPage([winNow?.title, ...pageTexts, ...page.map((c) => c.label)]);
+          const isCred = (c) => !!c && c !== UNKNOWN && credentialField(c, { cardForm });
+          const refuse = (i, c) => { throw new Error(`Blocked for safety: step ${i + 1} types into ${c?.label ? `"${c.label}", ` : ''}a password, code, key or card field. ${NO_CREDENTIALS} Nothing ran.`); };
+          // UNKNOWN: focus went somewhere the sidecar can't name (a spot clicked, a button pressed, Return, a tab with no
+          // field read). Typing there on a page that shows a credential field, or typing what looks like a password, is
+          // refused: use fill with the field's label.
+          const UNKNOWN = { label: '' };
+          const blind = (i) => { throw new Error(`Blocked for safety: step ${i + 1} types where I can't tell which field has the cursor, and this window has a password, code or card field (or the text looks like a password). ${NO_CREDENTIALS} Fill a field by its label instead. Nothing ran.`); };
+          // The field a live id or a read id names, as the page lists it (its role too).
+          const onPage = (c) => (c && c.id != null ? page.find((x) => x.id === c.id && (!c.label || norm(x.label) === norm(c.label))) ?? c : c);
+          let into = page.find((c) => c.focused) ?? null;
+          if (pieces.turn !== turn) pieces = { turn, text: pieces.turn === turn - 1 ? pieces.text : '' };
+          let pend = pieces.text;
           for (const [i, s] of steps.entries()) {
-            if ((s.do === 'click_at' || s.do === 'hover') && s.x != null && s.y != null) { const [x, y] = await shotPoint(s.x, s.y); mapped.push({ ...s, x, y, global: true }); }
-            else if (live && i < upTo && s.id != null) { const c = live(s.id); mapped.push({ ...s, id: c.id, label: c.label }); }
-            else mapped.push(s);
+            let c = null;
+            if ((s.do === 'click_at' || s.do === 'hover') && s.x != null && s.y != null) { const [x, y] = await shotPoint(s.x, s.y); mapped.push({ ...s, x, y, global: true }); if (s.do === 'click_at') into = UNKNOWN; }
+            else if (live && i < upTo && s.id != null) { c = onPage(live(s.id)); mapped.push({ ...s, id: c.id, label: c.label }); }
+            // After a click the helper re-reads the page, but the id read before is still the best guess at the field.
+            else { if (s.id != null) c = read[s.id - 1] ?? page.find((x) => x.id === s.id) ?? null; mapped.push(s); }
+            if (s.field != null) c = named(s.field) ?? { label: s.field };
+            // Where the cursor is after this step.
+            if (['fill', 'set', 'choose'].includes(s.do)) into = c;
+            else if (['click', 'focus'].includes(s.do)) into = c && (isField(c) || credentialField(c)) ? c : UNKNOWN;
+            else if (s.do === 'click_text') { const n = named(s.text ?? ''); into = n && (isField(n) || credentialField(n)) ? n : UNKNOWN; }
+            else if (s.do === 'key' && parseKey(s.key)?.key === 'tab') {
+              // Tab goes to the next field (shift+tab the one before), in the order the page lists them.
+              const k = into && into !== UNKNOWN ? page.indexOf(into) : -1, dir = parseKey(s.key).mods.has('shift') ? -1 : 1;
+              into = UNKNOWN;
+              for (let j = k + dir; k >= 0 && j >= 0 && j < page.length; j += dir) if (isField(page[j]) || credentialField(page[j])) { into = page[j]; break; }
+            } else if (s.do === 'key' && ['return', 'space'].includes(parseKey(s.key)?.key)) into = UNKNOWN; // a form moves on
+            const ch = s.do === 'key' ? keyChar(s.key) : '';
+            const typesHere = typesText(s);
+            const target = ['fill', 'set', 'choose'].includes(s.do) ? c : s.do === 'type' ? c ?? into : s.do === 'key' ? into : null;
+            const text = s.do === 'choose' ? s.option : s.do === 'key' ? ch : s.text;
+            if (typesHere && (isCred(target) || codeField(target, text, { signin }))) refuse(i, target);
+            if (typesHere && atPrompt) throw new Error(`Blocked for safety: step ${i + 1} types at a password prompt in ${appName}. ${NO_CREDENTIALS} Nothing ran.`);
+            // A control that copies or shows a secret ("Copy password", "Show password"): clicking it reads a credential.
+            const clicks = ['click', 'click_text', 'focus', 'choose'].includes(s.do) ? (s.do === 'click_text' ? s.text : s.do === 'choose' ? s.option : c?.label ?? mapped.at(-1)?.label) : null;
+            if (clicks && revealLabel(clicks)) throw new Error(`Blocked for safety: step ${i + 1} clicks "${clicks}", which copies or shows a password, code or key. ${NO_CREDENTIALS} Nothing ran.`);
+            if (typesHere && text && s.do !== 'key') {
+              const t = String(text).trim();
+              if (SECRET_NAME_END.test(t) && (/_|^[A-Z0-9]+$/.test(t) || /\b(key|name|variable)\b/i.test(String(target?.label ?? '')))) keyNamed = true;
+              else if (keyNamed && /^\S{8,}$/.test(t) && !/^(https?:\/\/|www\.)/i.test(t)) throw new Error(`Blocked for safety: step ${i + 1} types the value of a key or secret. ${NO_CREDENTIALS} Nothing ran.`);
+              else keyNamed = false;
+            }
+            // Focus moved somewhere unnamed (a spot, a button, Return): blind. No focus read at all: the helper checks the
+            // focused field itself, so only a page with a credential field is refused here.
+            if (typesHere && ((target === UNKNOWN && (credOnPage || (s.do !== 'key' && signin && passwordLike(text)))) || (target == null && credOnPage))) blind(i);
+            // A tab inside typed text moves to the next field: on a page with a credential field it may be that one.
+            if (typesHere && s.do !== 'key' && /\t/.test(String(text ?? '')) && credOnPage) blind(i);
+            if (['type', 'fill', 'set', 'choose'].includes(s.do) && hasCardNumber(text)) {
+              throw new Error(`Blocked for safety: step ${i + 1} types text that looks like a card number. ${NO_CREDENTIALS} Nothing ran.`);
+            }
+            // A card number made of pieces (H4): what went into each field, key by key and across two requests.
+            if (typesHere && text) {
+              if (cardBufs.turn !== turn) cardBufs = { turn, map: cardBufs.turn === turn - 1 ? cardBufs.map : new Map() };
+              const k = target && target !== UNKNOWN ? `f:${norm(target.label) || target.id}` : '?';
+              const before = ['fill', 'set', 'choose'].includes(s.do) || isPasteKey(s.key) ? '' : cardBufs.map.get(k) ?? '';
+              const now = `${before}${text}`.slice(-200);
+              cardBufs.map.set(k, now);
+              if (typedCredential(now)) throw new Error(`Blocked for safety: step ${i + 1} types the rest of a card number or a key. ${NO_CREDENTIALS} Nothing ran.`);
+            }
+            if (s.do === 'click_at' && cardBufs.turn === turn) cardBufs.map.delete('?'); // a spot clicked: a new field
+            // A card or a seed split over boxes or steps (a 4-box card form, a space key between two fills): every piece
+            // typed in this request and the one before, in order, whatever came between (round 6). A fill, a set or a
+            // type after another kind of step is a new piece (a space before it); keys and a type right after typing go on
+            // the same one. A sheet's cells (A1, B2) are no boxes (C10).
+            if (typesHere && text && !(s.do === 'key' && isPasteKey(s.key))) {
+              const cell = /^[a-z]{1,3}\d{1,7}$/i.test(String(target?.label ?? '').trim());
+              const prev = steps[i - 1], goesOn = s.do === 'key' || (s.do === 'type' && prev && (prev.do === 'type' || (prev.do === 'key' && keyChar(prev.key))));
+              pend = `${pend}${cell ? ' | ' : goesOn ? '' : ' '}${text}`.slice(-600);
+              if (!cell && piecesCredential(pend)) throw new Error(`Blocked for safety: step ${i + 1} types the rest of a card number or a seed phrase. ${NO_CREDENTIALS} Nothing ran.`);
+            }
           }
-          const appName = sameApp && lastRead.app ? lastRead.app : asked;
+          pieces.text = pend;
+          const secretForm = page.some((c) => /^(key|name)$/i.test(String(c.label ?? '').trim())) && page.some((c) => /^(value|secret)$/i.test(String(c.label ?? '').trim()));
           // A paste puts in the clipboard's text: checked like typing, and shown in the question (V9-6).
           const clipboard = mapped.some((s) => s.do === 'key' && isPasteKey(s.key)) ? await Promise.resolve().then(readClipboard).catch(() => null) : undefined;
           // What each step needs said in the question: a click that could delete, pay, send or sign out, a key that quits,
@@ -1142,6 +1236,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               }
             }
             if (typedSoFar.turn !== turn) typedSoFar = { turn, text: '', moved: false };
+            // Round 6: a strong-looking word ("Q3-Report", "iPhone15Pro") counts only on a sign-in page or a key's value form
+            // (a Key and a Value field: an env var's secret), as typed text does.
+            // A pasted clipboard that holds a card, a key or a password (one copied from a vault) is never pasted (M9).
+            if (s.do === 'key' && isPasteKey(s.key) && clipboard && (hasCardNumber(clipboard) || typedCredential(clipboard) || (strongSecret(clipboard) && (signin || keyNamed || secretForm)))) throw new Error(`Blocked for safety: step ${mapped.indexOf(s) + 1} pastes a password, key or card number. ${NO_CREDENTIALS} Nothing ran.`);
             // A caret moved (an arrow, Home, End) after typing: what's typed next can go anywhere in that text, so the
             // join no longer says what the field holds (tenth review R10-9). More typing is refused.
             // ponytail: a click_at inside the same field moves it too; such a plan still shows every step in the question.
@@ -1152,7 +1250,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
               // (eighth review V8-4).
               const joined = typedSoFar.text + typed;
               let tv = checkTyped(typed, HOME);
-              const jv = checkTyped(joined, HOME);
+              const jv = checkTyped(joined, HOME, { credentials: false });
               if (jv.level === BLOCK || (jv.level === ASK && tv.level === SAFE)) tv = jv;
               if (tv.level === BLOCK) throw new Error(`Blocked for safety: ${tv.reason} Nothing ran.`);
               if (tv.level === ASK && !notes.includes(tv.reason)) notes.push(tv.reason);
@@ -1161,7 +1259,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             // A focus is a click to the helper (it clicks the control's middle): named and checked as one.
             const label = s.do === 'click_text' ? s.text : ['click', 'focus'].includes(s.do) ? s.label : s.do === 'choose' ? s.option : null;
             // Named in the question too; the helper still stops at each one and asks again with what it really hits.
-            if (label && isRiskyClick(label)) notes.push(`"${label}" could delete, pay, send, quit or sign out.`);
+            // A money word alone (Short, Trade, a price) is judged as money below, not named as a deletion (round 6).
+            if (label && riskyWords(label)) notes.push(`"${label}" could delete, send, quit or sign out.`);
             const keyDoes = s.do === 'key' ? riskyKey(s.key) : null;
             if (keyDoes) notes.push(`${s.key} ${keyDoes}.`);
             if (label && ['click', 'focus'].includes(s.do)) s.shown = label; // named in the question; the helper ignores it
@@ -1170,16 +1269,60 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           // Owner's rule (DESIGN.md "Mac actions"): every plan asks, every time, with the real app and every step in
           // full (typed text whole, what a paste puts in). One yes covers exactly these steps in that app; the helper
           // refuses a plan without it, or in another app, and still stops at each risky step for its own yes.
-          const where = await hands('locate', spec).then((r) => r?.window?.app ?? null, () => null);
+          // The window the steps start in, checked before the ask and before any step (H5): a password manager, a web
+          // vault (by its address) or a secret file's window is refused up front, never acted in.
+          const win0 = await hands('locate', spec).then((r) => r?.window ?? null, () => null);
+          const where = win0?.app ?? null;
+          if ([where, appName].some(isPasswordApp)) refuseVault(where ?? appName);
+          const v0 = win0 ? checkWindow(win0, HOME, { viewers: !remote() }) : null;
+          if (v0?.vault) refuseVault(where, !!v0.secretFile);
           const inWhat = where ?? (appName === 'front' ? 'the app in front' : appName);
+          // A step that pays, buys, moves money or trades: always asked, Approve all too (owner's hard limit, pay). By its
+          // words anywhere ("Place order", "Send $50"), and by where it is (B2): in a money surface (a bank, broker,
+          // wallet, exchange, pay app, checkout page, app store) or next to an amount, a plain Confirm, Send, Continue
+          // or a Return that submits pays too. "Transfer photos" or "Pay attention" never do.
+          // The money context: a money surface by the window's app, host, address or title (never an editor, a chat or a
+          // sheet), or a browser page whose text shows a checkout's total (a total with a number). A plan heading to
+          // checkout ("Add to bag", then Continue, Confirm) is judged as in one from that step on.
+          const seenText = lastRead?.turn === turn ? [...(lastRead.controls ?? []).map((c) => `${c.label ?? ''} ${c.value ?? ''}`), ...(lastRead.texts ?? []).map(String)] : [];
+          const AMOUNT_FIELD = /amount|price|quantity|\bqty\b|shares|units|\bsum\b|total|\btip\b|deposit|withdraw|betrag|montant|importe|monto|valor|金额|金額|금액|сумма/i;
+          const fillsAmount = mapped.some((s) => ['fill', 'set', 'type'].includes(s.do) && /\d/.test(String(s.text ?? '')) && AMOUNT_FIELD.test(String(s.field ?? s.label ?? '')));
+          // A checkout's total counts only on a page that is no mail, chat, doc, sheet or Hydra's own app (round 4).
+          const pageUrl = win0?.url ?? (lastRead?.turn === turn ? lastRead.url : null);
+          const surfaceOf = (w, texts = []) => moneySurface(w ?? {}) || (inBrowser(w?.app) && !ordinaryPage(w?.url ?? pageUrl) && checkoutText(texts));
+          // Next to an amount (round 4: checkout evidence, never any $ in view): a browser page that shows a checkout's
+          // total, or a form with a card field. A plain Amount, Price or Quantity filled is no checkout (a sheet, an
+          // expense form, Hydra's own money page) but in a money surface (a bank's Amount, then Next).
+          const mctx = { surface: surfaceOf(win0, seenText) || moneySurface({ app: appName }), amount: cardForm || (inBrowser(where ?? appName) && !ordinaryPage(pageUrl) && checkoutText(seenText)) || (moneySurface(win0 ?? { app: appName }) && fillsAmount), membership: membershipPage(pageUrl), store: storePage(win0 ?? { app: appName, url: pageUrl }), payStep: payStepPage({ url: pageUrl }) };
+          const labelOf = (s) => (s.do === 'click_text' ? s.text : s.do === 'choose' ? s.option : s.shown);
+          const flowAt = (i) => mapped.slice(0, i).some((s) => toCheckout(labelOf(s)));
+          // In a money surface, a Return that submits (Return, Enter, cmd or ctrl+Return, a typed line break) pays too, but
+          // not one that runs a search (a search, find or symbol box filled just before it). Shortcuts (cmd+c, cmd+f,
+          // cmd+r) and space submit nothing here: the helper still stops at a Return or space that presses a money button.
+          const submits = (s, i) => {
+            const k = s.do === 'key' ? parseKey(s.key) : null;
+            // Space presses a focused button, unless it follows typing (there it is a space in the text).
+            if (k?.key === 'space' && !k.mods.size) { const prev = mapped[i - 1]; return !prev || !(['fill', 'set', 'type'].includes(prev.do) || (prev.do === 'key' && keyChar(prev.key) && parseKey(prev.key)?.key !== 'tab')); }
+            const isReturn = ['type', 'fill', 'set'].includes(s.do) ? /[\n\r\u0003\u0085\u2028\u2029]/.test(String(s.text ?? '')) : !!k && (k.key === 'return' || (k.mods.has('ctrl') && ['m', 'j', 'o'].includes(k.key)));
+            if (!isReturn) return false;
+            const typed = [...mapped.slice(0, i + 1)].reverse().find((x) => ['fill', 'set', 'type', 'choose'].includes(x.do));
+            return !(typed && SEARCH_FIELD.test(String(typed.field ?? typed.label ?? page.find((c) => c.focused)?.label ?? '')));
+          };
+          let pay = mapped.some((s, i) => isPayClick(labelOf(s), { surface: mctx.surface || flowAt(i), amount: mctx.amount, membership: mctx.membership, store: mctx.store, payStep: mctx.payStep }))
+            || mapped.some((s, i) => (mctx.surface || flowAt(i) || mctx.amount) && submits(s, i));
           const question = `In ${inWhat}, every step I'd take:\n${stepsText(mapped, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`;
-          // Approve all runs a plan unasked only when every step is in the safe set (planDeletion: a selection, a delete
-          // key, cut, copy, paste or a fill makes it a deletion) and nothing in it needs naming; steps in a password
-          // manager bring its vault forward: asked too. tagged: the strongest tag this plan was asked with, which every
-          // re-ask keeps (never weaker).
+          // planDeletion: a selection, a delete key, cut, copy, paste or a fill makes it a deletion, and so does anything
+          // in it that needs naming; Approve all runs those (owner's PR #8 decision), but never a plan that pays (pay).
+          // tagged: the strongest tag this plan was asked with, which every re-ask keeps (never weaker).
           let tagged = notes.length > 0 || planDeletion(mapped, [inWhat, appName]);
-          if (!(await confirm(question, ctx, { deletion: tagged }))) throw new Error(`${userName} said no, so nothing ran.`);
-          const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
+          if (!(await confirm(question, ctx, { deletion: tagged, pay }))) throw new Error(`${userName} said no, so nothing ran.`);
+          // money: in a money surface the helper also stops at a plain Confirm, Continue or OK it reaches by a spot or an id,
+          // so that ask names the label and is a hard one (B2).
+          // money: the helper also stops at a plain Confirm, Continue or OK it reaches by a spot or an id, and at money words
+          // (a price, Long, Short), so the sidecar judges that label with the window it is in by then (B2).
+          // money: only a plan in a money surface, next to an amount, heading to checkout or paying: elsewhere a Return on
+          // OK, Go or Continue is no stop (round 3 L: every plan said money, so Finder's Go asked twice).
+          const plan = { steps: mapped, wholeOk: ['plan'], planApp: where ?? appName, money: !!(mctx.surface || mctx.amount || mctx.membership || mctx.store || pay || mapped.some((s) => toCheckout(labelOf(s)))), ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
           // The helper stops before a risky step it only sees there (a click at a spot on a Delete button, Return on a
           // dialog whose default button sends or deletes): ask, then go on from that step. A no stops the plan.
           // A relay turn, before the window is said yes to (R11c review, F4): the helper's words quote the window (what a
@@ -1218,7 +1361,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 // The strongest of the first ask's tag and this one's (the steps left can't make a selection made
                 // before them safe, and the deletion's target changed with the app, so its yes doesn't carry).
                 tagged = tagged || planDeletion(left, [r.app, appName]);
-                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`, ctx, { deletion: tagged }))) {
+                if (isPasswordApp(r.app)) refuseVault(r.app);
+                if (!(await confirm(`In ${r.app ?? appName}, every step I'd take:\n${stepsText(left, { clipboard })}${notes.length ? `\n\n${notes.join('\n')}` : ''}`, ctx, { deletion: tagged, pay }))) {
                   throw new Error(`${userName} said no, so I stopped${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
                 }
                 plan.wholeOk = [...(plan.wholeOk ?? []).filter((x) => x !== 'plan'), 'plan'];
@@ -1243,7 +1387,27 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
                 r = await actOnce();
                 continue;
               }
-              if (!(await confirm(`${r.why || `That step could delete, pay, send or quit.`} Go ahead?`, ctx, { deletion: true }))) {
+              // What the helper stops at: a click on Pay, Buy, Transfer... asks, Approve all too (pay). Judged with the
+              // window the plan is in by now (it may have reached a checkout since it started), and with where the plan
+              // has been heading. A Confirm, Continue or price that is not money there runs on without an ask.
+              const nowWin = await hands('locate', plan.window != null ? `window:${plan.window}` : plan.app ? `app:${plan.app}` : 'front').then((x) => x?.window ?? null, () => null);
+              const ctxNow = { surface: surfaceOf(nowWin) || mctx.surface || flowAt(mapped.length - plan.steps.length + r.step), amount: mctx.amount, membership: mctx.membership || membershipPage(nowWin?.url), store: mctx.store || storePage(nowWin), payStep: mctx.payStep || payStepPage(nowWin) };
+              // A Return's stop names what it would press, joined by " + ", and "send" for a field Return can submit (no
+              // button: a submit in a money surface asked with the plan already, a search's Return is none).
+              const keyStep = ['key', 'type', 'fill'].includes(plan.steps[r.step]?.do);
+              const pressed = keyStep ? String(r.label ?? '').split(' + ').filter((l) => l && l !== 'send') : [r.label];
+              // A field's Return that submits ("send") in a money surface or next to an amount pays too, not a search's
+              // (round 6).
+              const payNow = pressed.some((l) => isPayClick(l, ctxNow)) || (keyStep && String(r.label ?? '').split(' + ').includes('send') && !!(ctxNow.surface || ctxNow.amount) && submits(mapped[mapped.length - plan.steps.length + r.step] ?? plan.steps[r.step], mapped.length - plan.steps.length + r.step));
+              // A click on a word that is not money here runs on; so does a Return or a typed line break whose default
+              // button is only a confirm word (OK, Go, Continue) that is not money here.
+              const goesOn = ['click', 'click_at', 'click_text', 'choose', 'focus'].includes(plan.steps[r.step]?.do) || (['key', 'type', 'fill'].includes(plan.steps[r.step]?.do) && confirmWord(r.label));
+              if (goesOn && !riskyWords(r.label) && !payNow && r.label) {
+                plan.steps = [{ ...plan.steps[r.step], confirmed: true, confirmedLabel: r.label }, ...plan.steps.slice(r.step + 1)];
+                r = await actOnce();
+                continue;
+              }
+              if (!(await confirm(`${r.why || `That step could delete, send or quit.`} Go ahead?`, ctx, { deletion: true, pay: pay || payNow }))) {
                 throw new Error(`${userName} said no, so I stopped before it${before.length ? ` (done first: ${told(before)})` : ''}. Nothing after it ran.`);
               }
               plan.steps = [{ ...plan.steps[r.step], confirmed: true, confirmedLabel: r.label ?? '' }, ...plan.steps.slice(r.step + 1)];
@@ -1260,7 +1424,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
             catch (err) {
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
               if (plan.app && /No matching window/.test(String(err?.message ?? err))) {
-                if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx, { deletion: isPasswordApp(plan.app) }))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
+                if (isPasswordApp(plan.app)) refuseVault(plan.app);
+                if (!(await confirm(`Open ${plan.app}? It isn't open, and the steps run in it.`, ctx))) throw new Error(`${userName} said no, so I didn't open ${plan.app}. Nothing ran.`);
                 if (await launchApp(plan.app, hands)) { unconfirm(); res = await act(); return seen(res); }
               }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
@@ -1278,6 +1443,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           // still says what ran.
           async function seen(res) {
             try { await windowShows(res.window, ctx, { okApp: plan.planApp }); } catch (e) {
+              // The steps ran, and the window they left shows a vault or a secret file: refused, and said truthfully (H5).
+              if (/^Blocked for safety: /.test(e.message)) throw new Error(`Blocked for safety after the steps ran (done: ${remote() ? plain(mapped) : res.done.join(', ')}): ${e.message.replace(/^Blocked for safety: /, '')}`);
               if (!/said no/.test(e.message)) throw e;
               return `In ${res.window.app}: ${remote() ? plain(mapped) : res.done.join(', ')}. ${userName} said no to reading the window after, so I can't see what it shows now.`;
             }
@@ -1285,7 +1452,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
           }
           function finish(res) {
             if (!res.controls) return `In ${res.window.app}: ${res.done.join(', ')}.`;
-            lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
+            lastRead = { win: res.window.id, app: res.window.app, title: res.window.title, url: res.window.url, controls: res.controls, texts: res.texts ?? [], turn };
             return `In ${res.window.app}: ${res.done.join(', ')}.\nNow showing: ${res.window.title || res.window.app}\n${controlList(res.controls, res.texts)}`;
           }
         },
@@ -1319,13 +1486,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, foc
         const spec = { do: what === 'switch' ? 'activate' : what, ...(real ? { app: String(real), exact: true, ...(Number.isInteger(pid) ? { pid } : {}) } : app ? { app } : {}), ...(window != null ? { window } : {}), ...(layout ? { layout } : {}) };
         const name = owner ?? real;
         const VERB = { switch: 'Bring forward', hide: 'Hide', quit: 'Quit', force_quit: 'Force quit', close: 'Close the window of', minimize: 'Minimize the window of', arrange: `Arrange (${layout}) the window of` };
-        // Brought forward or laid out (shown), a password manager puts its vault on screen: asked under Approve all too.
+        // Brought forward or laid out (shown), a password manager puts its vault on screen: asked under Approve all too
+        // (secret, a hard ask; nothing of it is read).
         const shows = ['switch', 'arrange'].includes(what) && isPasswordApp(name);
-        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx, { deletion: what === 'force_quit' || shows }))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
-        agentChangesScreen();
+        if (!(await confirm(`${VERB[what]} ${name}${window != null ? ` (window ${window})` : ''}?`, ctx, { deletion: what === 'force_quit', secret: shows }))) throw new Error(`${userName} said no, so ${name} was left as it is.`);
         let res = await hands('manage', JSON.stringify(spec));
         if (res.needsConfirm) {
-          // Always asked, Approve all too: this can lose work (a deletion).
+          // Asked, Approve all off: this can lose work (a deletion). Approve all runs it (owner's PR #8 decision).
           const answer = await ask({ placeholder: `${res.why} ${what === 'force_quit' ? 'Force quit' : what === 'close' ? 'Close it' : 'Quit'} anyway?`, choices: ['Allow', "Don't allow"], deletion: true }, ctx?.signal);
           if (!isYes(answer)) throw new Error(`${userName} said no, so ${res.app ?? 'the app'} stays open.`);
           res = await hands('manage', JSON.stringify({ ...spec, confirmed: true }));
@@ -1354,7 +1521,7 @@ molecule (smiles, label): a compound. model (title, parts [{shape: box|sphere|cy
 quiz (questions [{text, options: 2 to 4, answer: the right option word for word, explain}], up to ${LIMITS.questions}): "test me"; their score comes to you with their next message, so say a line and stop: never ask the questions in words too, or ask them for their answers or score.
 deep: true for "explain X in depth", "teach me how…", "walk me through…": one big card at a time, each replacing the last; 4 to 10 beats of a card each: the big picture, a stage per card, a short summary.
 Actions: type (text into the field at; needs actions allowed), copy (text), open (url), handoff (task), button (text, action {do: ask|open|copy, value}: a likely next step), emote (name: hype|wave|upset|remind|motivate), sfx (name). tone: accent, teal, amber, coral, lilac, sky, lime, red, white.
-A drawing stays until it's cleared, the window changes or the next one replaces it; keep: true keeps the cards up (screen marks still go) when adding to them or asked to. At most ${LIMITS.cardsShown} cards show at once (one more closes the oldest), so use the fewest. Each piece gets an id (p1, p2…); to change one: edit [{do: recolor|move|erase|clear, part, tone, dx, dy}] with no beats.${POINTER_OK ? '' : " On this desktop (Wayland) clicks and hovers in other apps can't be seen: never use wait; beats play one after another, so word each step to read well without pausing."}`,
+A drawing stays on screen until the user closes it. Every drawing is saved to their Notes page by itself: never save it again with a notes tool. Use the fewest cards. Each piece gets an id (p1, p2…); to change one: edit [{do: recolor|move|erase|clear, part, tone, dx, dy}] with no beats (erase and clear only when the user asks for it gone; pinned cards stay).${POINTER_OK ? '' : " On this desktop (Wayland) clicks and hovers in other apps can't be seen: never use wait; beats play one after another, so word each step to read well without pausing."}`,
       parameters: DrawArgs, modelSchema: drawModelSchema, executionMode: 'sequential', timeoutMs: 30 * 60_000,
       execute: draw,
     },
@@ -1440,10 +1607,9 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         const shown = isLink ? t : /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t) ? checkRead(expand(t), HOME).path : `the app ${t}`;
         const question = ov.level === ASK ? ov.reason : `Open ${shown}${app ? ` in ${app}` : ''}?`;
         // A hidden or app-data file (secret: it can hold sign-ins), or a password manager opened (its vault on screen),
-        // asks under Approve all too.
+        // asks under Approve all too (a hard ask; nothing of it is read here).
         const vault = isPasswordApp(app) || (!isLink && isPasswordApp(path.basename(t)));
-        if (!(await confirm(question, ctx, { deletion: !!ov.secret || vault }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
-        agentChangesScreen();
+        if (!(await confirm(question, ctx, { secret: !!ov.secret || vault }))) throw new Error(`${userName} said no, so I didn't open ${t}.`);
         // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
         const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);
         let r;
@@ -1742,7 +1908,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     const run = t.execute;
     if (typeof run !== 'function') continue;
     t.execute = (...a) => {
-      const call = {};
+      const call = { signal: a[1]?.signal }; // execute(args, ctx): Stop aborts ctx.signal
       return toolCall.run(call, async () => { try { return await run(...a); } finally { for (const [k, v] of forward.apps) if (v.call === call) forward.apps.delete(k); } });
     };
   }

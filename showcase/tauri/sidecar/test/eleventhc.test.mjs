@@ -18,7 +18,7 @@ fs.mkdirSync(path.dirname(docFile), { recursive: true });
 {
   const src = fs.readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
   const body = src.slice(src.indexOf('async function relayTurn('), src.indexOf('const agentRun = new ClaudeCodeAgent', src.indexOf('async function relayTurn(')));
-  assert.match(body, /\n\s*nextTurn\(\);/, 'relayTurn calls nextTurn()');
+  assert.match(body, /\n\s*(const drawTurn = )?nextTurn\(\);/, 'relayTurn calls nextTurn()'); // its number: the drawings of that turn go to one note
 }
 
 // ---- R11c-6: a code editor's window is no plain read in a relay turn; a single-document app still is.

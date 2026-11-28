@@ -11,15 +11,19 @@ mod linux;
 mod sidecar;
 #[cfg(target_os = "macos")]
 mod snapshot;
+mod startup;
 mod tap;
 mod voice;
+#[cfg(target_os = "macos")]
+mod voice_area;
+mod voice_epoch;
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use std::{thread, time::Duration};
 
@@ -32,6 +36,13 @@ use sidecar::spawn_sidecar;
 use voice::{init_hotkeys, set_esc, set_hotkey, start_voice, stop_voice, to_voice, voice_binary};
 
 static GENERATION: AtomicUsize = AtomicUsize::new(0);
+/// The startup sound (owner, 2026-11-26: "there should be an audio when hydra starts up along with the loading
+/// animation"): once per app launch, with the launch logo. LAUNCHED is set just before the sidecar starts; the first
+/// startup cue inside startup::WINDOW plays, and any cue after the first (a helper, voice or sidecar restart) or past
+/// the window is dropped. Every launch counts, Open at Login and the setup guide's relaunch included.
+static LAUNCHED: OnceLock<Instant> = OnceLock::new();
+static STARTUP_CUE_DONE: AtomicBool = AtomicBool::new(false);
+
 /// The overlay window the sidekick lives in. It moves to whichever screen the cursor is on.
 static SIDEKICK_OVERLAY: Mutex<Option<String>> = Mutex::new(None);
 /// The setup guide is open: voice events go to it (for the "try it" test) instead of the agent.
@@ -56,7 +67,7 @@ fn panel_open_js() -> String {
 struct Sidecar(Mutex<Option<ChildStdin>>);
 struct Roster(Mutex<Vec<String>>);
 /// The voice helper and how many times it has died on its own since it was last wanted.
-struct Voice(Mutex<Option<Child>>, AtomicUsize);
+struct Voice(Mutex<Option<voice::VoiceWorker>>, AtomicUsize, voice_epoch::VoiceEpoch, AtomicBool);
 /// Talk chord passed to the voice helper, e.g. ["control", "option"].
 struct TalkChord(Mutex<Vec<String>>);
 /// Windows: the downloaded speech model's folder (the sidecar owns the download and says where it is).
@@ -1938,8 +1949,33 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         // via: what opened it ('orb' chimes, 'wake' opens silently after the wake chime; voice/cue.swift).
         // afterVoice: the take opens once Hydra's voice has said its line (an ask's "Say yes or no.").
         Some("listen") => to_voice(app, &json!({ "cmd": "listen", "wait": msg.get("wait").cloned().unwrap_or(Value::Null), "via": msg.get("via").cloned().unwrap_or(Value::Null), "afterVoice": msg.get("afterVoice").and_then(Value::as_bool) == Some(true) })),
-        // Hydra's cues, played by the voice helper so mute-while-listening never silences them: the wake chime, and the
+        // Hydra's cues, played by the voice helper (voice/cue.swift): the wake chime, and the
         // soft loop while a spoken turn works.
+        // The startup sound goes through the once-per-launch latch, with its level (v, 0..1) in the message. The app
+        // plays the bundled file itself, so the tone never waits for the voice helper (voice on or off) and starts with
+        // the launch logo. Accepted: the helper does not know about this tone, so a take opened by a clap or the wake
+        // phrase in its 1.2 s plays over it (the Mac's sound is never muted; voice processing ducks it the least it
+        // can); the helper is rarely up that early.
+        Some("cue") if msg.get("name").and_then(Value::as_str) == Some("startup") => {
+            let since = LAUNCHED.get().map(Instant::elapsed).unwrap_or(Duration::MAX);
+            let done = STARTUP_CUE_DONE.swap(true, Ordering::SeqCst);
+            if let Some(why) = startup::drop_reason(done, since) {
+                eprintln!("startup cue: dropped ({why})");
+            } else {
+                let v = msg.get("v").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.0, 1.0);
+                match app.path().resource_dir() {
+                    Err(e) => eprintln!("startup cue: not played (no resource dir: {e})"),
+                    Ok(dir) => {
+                        let ms = since.as_millis();
+                        let wav = dir.join("sounds").join("startup.wav");
+                        match Command::new("/usr/bin/afplay").arg("-v").arg(v.to_string()).arg(wav).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                            Ok(mut c) => drop(thread::spawn(move || eprintln!("{}", startup::afplay_line(ms, c.wait().map(|s| s.code()).map_err(|e| e.to_string()))))),
+                            Err(e) => eprintln!("startup cue: not played (afplay: {e})"),
+                        }
+                    }
+                }
+            }
+        }
         Some("cue") => to_voice(app, &json!({ "cmd": "cue", "name": msg.get("name").and_then(Value::as_str).unwrap_or("") })),
         Some("pending") => to_voice(app, &json!({ "cmd": "pending", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
         // The orb dragged out of the Hydra window: it rides the cursor (on the cursor's screen) until the button is up.
@@ -1966,7 +2002,13 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         // Roamies is answering or speaking: the wake word waits, so it can't wake itself.
         Some("wake_hold") => to_voice(app, &json!({ "cmd": "wake_hold", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
         // Esc while it's listening: drop the take. only "ask": just the take an ask opened, never the owner's own.
-        Some("listen_cancel") => to_voice(app, &json!({ "cmd": "cancel", "only": msg.get("only").cloned().unwrap_or(Value::Null) })),
+        Some("listen_cancel") => {
+            if let Some(reset) = msg.get("pairingReset").and_then(Value::as_str) {
+                voice::reset_voice_pairing(app, reset);
+            } else {
+                to_voice(app, &json!({ "cmd": "cancel", "only": msg.get("only") }));
+            }
+        }
         // An orb tap during a take: send what was heard (Esc cancels it, above).
         Some("listen_finish") => to_voice(app, &json!({ "cmd": "finish" })),
         // Notch mode: the capsule at the notch shows the listening, so the pill by the cursor stays off.
@@ -1989,11 +2031,10 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
             if let Some(dir) = msg.get("model").and_then(Value::as_str) {
                 *app.state::<VoiceModel>().0.lock().unwrap() = Some(dir.to_owned());
             }
+            // Hydra never mutes or unmutes the Mac: voice_config carries no mute (sidecar nosystemmute.mjs).
             if msg.get("enabled").and_then(Value::as_bool) == Some(true) {
                 app.state::<Voice>().1.store(0, Ordering::Relaxed);
                 start_voice(app);
-                let mute = msg.get("mute").and_then(Value::as_bool).unwrap_or(true);
-                to_voice(app, &json!({ "cmd": "mute", "on": mute }));
                 let sound = msg.get("sound").and_then(Value::as_bool).unwrap_or(true);
                 to_voice(app, &json!({ "cmd": "sound", "on": sound }));
                 let wake = msg.get("wake").and_then(Value::as_bool).unwrap_or(false);
@@ -2010,7 +2051,8 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                     "asleep": msg.get("asleep").and_then(Value::as_bool).unwrap_or(false), "talk": msg.get("clapTalk").and_then(Value::as_bool).unwrap_or(false),
                     // The owner's own claps from "Clap twice" ({ peakDb, riseDb }), or null.
                     "cal": msg.get("clapCal").cloned().unwrap_or(Value::Null) }));
-                to_voice(app, &json!({ "cmd": "barge", "on": msg.get("barge").and_then(Value::as_bool).unwrap_or(true) }));
+                // Off unless the sidecar says on: its echo cancellation turns other apps' sound down while Hydra talks.
+                to_voice(app, &json!({ "cmd": "barge", "on": msg.get("barge").and_then(Value::as_bool).unwrap_or(false) }));
                 to_voice(app, &json!({ "cmd": "sleep_word", "phrase": msg.get("sleepWord").and_then(Value::as_str).unwrap_or("") }));
                 // Hydra's wake phrase (agent_settings.wake_phrase), after wake_name: it decides.
                 if let Some(p) = msg.get("wakePhrase").and_then(Value::as_str) {
@@ -2079,7 +2121,7 @@ fn main() {
         }))
         .manage(Sidecar(Mutex::new(None)))
         .manage(Roster(Mutex::new(vec!["sidekick".into()])))
-        .manage(Voice(Mutex::new(None), AtomicUsize::new(0)))
+        .manage(Voice(Mutex::new(None), AtomicUsize::new(0), voice_epoch::VoiceEpoch::default(), AtomicBool::new(false)))
         .manage(TalkChord(Mutex::new(vec!["control".into(), "option".into()])))
         .manage(VoiceModel(Mutex::new(None)))
         .manage(PermGuide(Mutex::new(None)))
@@ -2146,6 +2188,7 @@ fn main() {
             snapshot::watch_screenshots(app.handle().clone());
             #[cfg(target_os = "macos")]
             fullscreen::watch(app.handle().clone());
+            let _ = LAUNCHED.set(Instant::now());
             spawn_sidecar(app.handle());
             hydra::open_main(app.handle());
             Ok(())

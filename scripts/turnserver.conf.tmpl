@@ -1,0 +1,43 @@
+# coturn for Hydra's Phone View (RV plan O1), written by scripts/deploy-turn.sh. The phone and the Mac reach each other
+# through this relay when a carrier NAT blocks a direct path. Credentials are time-limited (TURN REST, use-auth-secret):
+# Hydra's web app signs them with the same secret (HYDRA_TURN_SECRET). No TLS: UDP and TCP 3478 only.
+listening-port=3478
+fingerprint
+use-auth-secret
+static-auth-secret=@SECRET@
+realm=@REALM@
+external-ip=@EXTERNAL_IP@
+# Relay ports (open these and 3478 in the firewall).
+min-port=49160
+max-port=49200
+# One owner, one viewer, but every TURN URL is one allocation per side and per network path (the phone's Wi-Fi and
+# cellular, the Mac's udp and tcp), and the Mac's werift never deletes its allocations on close (no Refresh with
+# lifetime 0): they stay until they expire. Room for several reconnects in a row (41 relay ports below).
+total-quota=24
+user-quota=24
+# Allocations live 2 minutes unless refreshed (browsers and werift refresh at the lifetime the server grants), so a
+# closed session's leftovers free up fast.
+default-allocate-lifetime=120
+max-allocate-lifetime=120
+stale-nonce=600
+no-tls
+no-dtls
+no-cli
+no-multicast-peers
+no-loopback-peers
+# Never a relay into private, local or reserved ranges (the VPS's own network included).
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=224.0.0.0-255.255.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+syslog
+simple-log

@@ -401,8 +401,8 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
       if (a.turns > LIMITS.turns) stop(a.id, { state: 'failed', reason: `Used all its ${LIMITS.turns} turns` });
     } else if (m.t === 'plan') { p.event = now(); a.step = one(m.text, 60); update(a); }
     else if (m.t === 'ask') {
-      // Approve all answers every yes/no at once, including a deletion. Off: it waits.
-      if (config.approveAll?.() === true) {
+      // Approve all answers every yes/no at once, including a deletion, but never a hard one (pay, secret). Off: it waits.
+      if (config.approveAll?.() === true && m.hard !== true) {
         log('agent_ask_auto', { id: a.id, question: String(m.question ?? '').slice(0, 120) });
         p.child.send({ t: 'reply', id: m.id, value: true });
         return;
